@@ -1,0 +1,5 @@
+node_modules/
+dist/
+.duct-uploads/
+.env
+*.tsbuildinfo
