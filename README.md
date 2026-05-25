@@ -5,9 +5,9 @@
 Duct is an open-source document intelligence pipeline. Point it at a PDF, DOCX, Markdown file (or a whole directory), and it extracts the text, splits it into searchable chunks, and lets you query them instantly. Works with or without AI embeddings.
 
 ```bash
-npx duct index ./contracts/
-npx duct search "termination clauses"
-npx duct serve   # starts a web UI at http://localhost:3456
+npx @docfide/duct index ./contracts/
+npx @docfide/duct search "termination clauses"
+npx @docfide/duct serve   # starts a web UI at http://localhost:3456
 ```
 
 ## Why Duct?
@@ -23,13 +23,13 @@ Every team deals with documents — contracts, reports, specs, proposals. Extrac
 ## Install
 
 ```bash
-npm install -g duct
+npm install -g @docfide/duct
 ```
 
 Or use directly with `npx`:
 
 ```bash
-npx duct index ./docs
+npx @docfide/duct index ./docs
 ```
 
 ## Usage
@@ -83,7 +83,7 @@ Start the server, open the browser, drag-and-drop documents, and search.
 ### Library
 
 ```typescript
-import { Duct } from 'duct'
+import { Duct } from '@docfide/duct'
 
 const duct = new Duct({
   embed: { provider: 'openai' },          // optional — falls back to BM25

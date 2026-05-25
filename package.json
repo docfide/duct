@@ -1,5 +1,5 @@
 {
-  "name": "duct",
+  "name": "@docfide/duct",
   "version": "0.1.0",
   "description": "Document intelligence pipeline — extract, chunk, embed, and search any document format",
   "type": "module",
