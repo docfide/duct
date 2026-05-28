@@ -1,5 +1,7 @@
 FROM node:22-alpine AS build
 
+RUN apk add --no-cache build-base cairo-dev pango-dev jpeg-dev giflib-dev
+
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci

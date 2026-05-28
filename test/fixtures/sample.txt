@@ -1,0 +1,5 @@
+This is a sample text document for testing Duct.
+It contains several key terms that we can search for.
+Termination clauses, indemnification, payment terms.
+The quick brown fox jumps over the lazy dog.
+Duct is a document intelligence pipeline.

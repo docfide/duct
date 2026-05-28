@@ -1,12 +1,9 @@
+import { readFileSync, writeFileSync } from 'node:fs'
 import type { Chunk, SearchResult, Searcher } from '../types.js'
-
-interface TermEntry {
-  freq: number
-}
 
 interface IndexedChunk {
   chunk: Chunk
-  terms: Map<string, number>
+  terms: [string, number][]
   length: number
 }
 
@@ -28,7 +25,7 @@ export class BM25Searcher implements Searcher {
       for (const term of freq.keys()) {
         this.df.set(term, (this.df.get(term) || 0) + 1)
       }
-      this.chunks.push({ chunk, terms: freq, length: terms.length })
+      this.chunks.push({ chunk, terms: [...freq.entries()], length: terms.length })
       this.totalLength += terms.length
     }
     this.totalDocs += newChunks.length
@@ -41,8 +38,9 @@ export class BM25Searcher implements Searcher {
 
     for (const entry of this.chunks) {
       let score = 0
+      const termMap = new Map(entry.terms)
       for (const term of queryTerms) {
-        const tf = entry.terms.get(term) || 0
+        const tf = termMap.get(term) || 0
         if (tf === 0) continue
         const df = this.df.get(term) || 0
         const idf = Math.log((this.totalDocs - df + 0.5) / (df + 0.5) + 1)
@@ -59,11 +57,42 @@ export class BM25Searcher implements Searcher {
     return scores.slice(0, topK).map(s => ({ chunk: s.chunk, score: s.score }))
   }
 
+  async remove(documentPath: string): Promise<void> {
+    this.chunks = this.chunks.filter(entry => {
+      if (entry.chunk.documentPath === documentPath) {
+        this.totalLength -= entry.length
+        return false
+      }
+      return true
+    })
+    this.totalDocs = this.chunks.length
+    this.df = new Map()
+    for (const entry of this.chunks) {
+      const seen = new Set(entry.terms.map(t => t[0]))
+      for (const term of seen) {
+        this.df.set(term, (this.df.get(term) || 0) + 1)
+      }
+    }
+  }
+
   async clear(): Promise<void> {
     this.chunks = []
     this.df = new Map()
     this.totalDocs = 0
     this.totalLength = 0
+  }
+
+  async save(path: string): Promise<void> {
+    const data = { chunks: this.chunks, df: [...this.df.entries()], totalDocs: this.totalDocs, totalLength: this.totalLength }
+    writeFileSync(path, JSON.stringify(data))
+  }
+
+  async load(path: string): Promise<void> {
+    const data = JSON.parse(readFileSync(path, 'utf-8'))
+    this.chunks = data.chunks
+    this.df = new Map(data.df)
+    this.totalDocs = data.totalDocs
+    this.totalLength = data.totalLength
   }
 }
 
