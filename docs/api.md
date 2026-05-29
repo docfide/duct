@@ -154,7 +154,10 @@ GET /api/config
   "hyde": false,
   "llmProvider": "ollama",
   "llmModel": "llama3.2",
-  "llmBaseUrl": "http://localhost:11434"
+  "llmBaseUrl": "http://localhost:11434",
+  "embedProvider": "openai",
+  "embedModel": "text-embedding-3-small",
+  "embedBaseUrl": ""
 }
 ```
 
@@ -177,7 +180,7 @@ Content-Type: application/json
 }
 ```
 
-Available fields: `ocr`, `chunkStrategy`, `chunkSize`, `chunkOverlap`, `searchMode`, `searchAlpha`, `rerank`, `hyde`, `llmProvider`, `llmModel`, `llmBaseUrl`, `openaiKey`, `geminiKey`.
+Available fields: `ocr`, `chunkStrategy`, `chunkSize`, `chunkOverlap`, `searchMode`, `searchAlpha`, `rerank`, `hyde`, `llmProvider`, `llmModel`, `llmBaseUrl`, `embedProvider`, `embedModel`, `embedBaseUrl`, `openaiKey`, `geminiKey`, `cohereKey`, `voyageKey`, `mistralKey`, `jinaKey`.
 
 API keys are applied to the runtime environment — they are not persisted to disk.
 

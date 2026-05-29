@@ -43,8 +43,10 @@ export interface DuctConfig {
     overlap?: number
   }
   embed?: {
-    provider?: 'openai' | 'gemini'
+    provider?: 'openai' | 'gemini' | 'cohere' | 'voyage' | 'mistral' | 'jina' | 'ollama' | 'openai-compatible'
     model?: string
+    baseUrl?: string
+    apiKey?: string
   }
   ocr?: boolean
   persistPath?: string
@@ -75,6 +77,13 @@ export interface RuntimeConfig {
   llmBaseUrl: string
   openaiKey: string
   geminiKey: string
+  embedProvider: string
+  embedModel: string
+  embedBaseUrl: string
+  cohereKey: string
+  voyageKey: string
+  mistralKey: string
+  jinaKey: string
 }
 
 export interface EmbeddingProvider {

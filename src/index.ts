@@ -5,13 +5,13 @@ import { extract } from './extract/index.js'
 import { chunk } from './chunk/index.js'
 import { extractUrl, isUrl } from './extract/web.js'
 import { extractTablesFromContent } from './extract/table.js'
-import { OpenAIEmbedder } from './embed/openai.js'
-import { GeminiEmbedder } from './embed/gemini.js'
 import { MemoryVectorStore } from './store/memory.js'
 import { BM25Searcher } from './search/bm25.js'
 import { HybridSearcher, reciprocalRankFusion } from './search/hybrid.js'
 import { SimpleReranker, NoopReranker } from './search/reranker.js'
 import { createLLMProvider, OpenAILLM, GeminiLLM, OllamaLLM } from './qa/provider.js'
+import { createEmbedder } from './embed/factory.js'
+import type { EmbedProvider } from './embed/factory.js'
 import type {
   DuctConfig, Chunk, EmbeddingProvider, IndexResult, SearchResult, Searcher,
   DocumentInfo, DocumentFormat, RuntimeConfig, Reranker, LLMProvider,
@@ -57,6 +57,9 @@ export class Duct {
   private loaded = false
   private versionHistory: Map<string, { version: number; content: string; timestamp: number }[]> = new Map()
   private watchers: Set<ReturnType<typeof watch>> = new Set()
+  private embedProvider: string = ''
+  private embedModel: string = ''
+  private embedBaseUrl: string = ''
 
   constructor(config: DuctConfig = {}) {
     this.store = new MemoryVectorStore()
@@ -73,22 +76,21 @@ export class Duct {
     this.hydeEnabled = config.search?.hyde ?? false
     this.persistPath = config.persistPath
     if (this.persistPath) mkdirSync(this.persistPath, { recursive: true })
+    this.embedProvider = config.embed?.provider || ''
+    this.embedModel = config.embed?.model || ''
+    this.embedBaseUrl = config.embed?.baseUrl || ''
     this.initEmbedder(config)
     this.initLLM(config)
     this.initReranker()
   }
 
   private initEmbedder(config: DuctConfig): void {
-    const provider = config.embed?.provider
-    if (provider === 'openai') {
-      this.embedder = new OpenAIEmbedder(config.embed?.model)
-    } else if (provider === 'gemini') {
-      this.embedder = new GeminiEmbedder(config.embed?.model)
-    } else if (process.env['OPENAI_API_KEY']) {
-      this.embedder = new OpenAIEmbedder()
-    } else if (process.env['GEMINI_API_KEY']) {
-      this.embedder = new GeminiEmbedder()
-    }
+    this.embedder = createEmbedder({
+      provider: config.embed?.provider as EmbedProvider | undefined,
+      model: config.embed?.model,
+      baseUrl: config.embed?.baseUrl,
+      apiKey: config.embed?.apiKey,
+    })
     if (this.embedder) {
       this.searcher = new HybridSearcher(new BM25Searcher(), this.store, this.searchAlpha)
     }
@@ -475,6 +477,13 @@ Return ONLY a JSON array of strings, like: ["sub-question 1", "sub-question 2"]`
       llmBaseUrl: '',
       openaiKey: process.env['OPENAI_API_KEY'] || '',
       geminiKey: process.env['GEMINI_API_KEY'] || '',
+      embedProvider: this.embedProvider,
+      embedModel: this.embedModel,
+      embedBaseUrl: this.embedBaseUrl,
+      cohereKey: process.env['COHERE_API_KEY'] || '',
+      voyageKey: process.env['VOYAGE_API_KEY'] || '',
+      mistralKey: process.env['MISTRAL_API_KEY'] || '',
+      jinaKey: process.env['JINA_API_KEY'] || '',
     }
   }
 
@@ -506,15 +515,32 @@ Return ONLY a JSON array of strings, like: ["sub-question 1", "sub-question 2"]`
     }
     if (cfg.openaiKey) process.env['OPENAI_API_KEY'] = cfg.openaiKey
     if (cfg.geminiKey) process.env['GEMINI_API_KEY'] = cfg.geminiKey
-    if (cfg.openaiKey || cfg.geminiKey) {
-      if (!this.embedder) {
-        if (cfg.openaiKey) this.embedder = new OpenAIEmbedder()
-        else if (cfg.geminiKey) this.embedder = new GeminiEmbedder()
-        if (this.embedder) {
-          this.searcher = new HybridSearcher(new BM25Searcher(), this.store, this.searchAlpha)
-        }
+    if (cfg.cohereKey) process.env['COHERE_API_KEY'] = cfg.cohereKey
+    if (cfg.voyageKey) process.env['VOYAGE_API_KEY'] = cfg.voyageKey
+    if (cfg.mistralKey) process.env['MISTRAL_API_KEY'] = cfg.mistralKey
+    if (cfg.jinaKey) process.env['JINA_API_KEY'] = cfg.jinaKey
+
+    const embedChanged = cfg.embedProvider !== undefined || cfg.embedModel !== undefined || cfg.embedBaseUrl !== undefined
+    const keysChanged = cfg.openaiKey !== undefined || cfg.geminiKey !== undefined ||
+      cfg.cohereKey !== undefined || cfg.voyageKey !== undefined ||
+      cfg.mistralKey !== undefined || cfg.jinaKey !== undefined
+
+    if (embedChanged || keysChanged) {
+      if (cfg.embedProvider !== undefined) this.embedProvider = cfg.embedProvider
+      if (cfg.embedModel !== undefined) this.embedModel = cfg.embedModel
+      if (cfg.embedBaseUrl !== undefined) this.embedBaseUrl = cfg.embedBaseUrl
+
+      const provider = (this.embedProvider || '') as EmbedProvider
+      this.embedder = createEmbedder({
+        provider: provider || undefined,
+        model: this.embedModel || undefined,
+        baseUrl: this.embedBaseUrl || undefined,
+      })
+      if (this.embedder) {
+        this.searcher = new HybridSearcher(new BM25Searcher(), this.store, this.searchAlpha)
       }
     }
+
     if (this.persistPath) {
       writeFileSync(join(this.persistPath, 'config.json'), JSON.stringify(this.getConfig()))
     }

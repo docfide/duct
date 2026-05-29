@@ -453,7 +453,7 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
       </div>
 
       <div class="cell">
-        <div class="sec-label">Settings</div>
+        <div class="sec-label">Search Settings</div>
         
         <div class="field-group">
           <label>Search Engine</label>
@@ -463,8 +463,40 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
             <option value="hybrid">Hybrid (BM25 + Vector)</option>
           </select>
         </div>
+      </div>
+
+      <div class="cell">
+        <div class="sec-label">Embed Provider</div>
+
         <div class="field-group">
-          <label>LLM Provider</label>
+          <label>Provider</label>
+          <select id="cfgEmbedProvider" onchange="toggleEmbedFields(); saveEmbedConfig()">
+            <option value="">Auto (from API keys)</option>
+            <option value="openai">OpenAI</option>
+            <option value="gemini">Gemini</option>
+            <option value="cohere">Cohere</option>
+            <option value="voyage">Voyage AI</option>
+            <option value="mistral">Mistral</option>
+            <option value="jina">Jina AI</option>
+            <option value="ollama">Ollama (Local)</option>
+            <option value="openai-compatible">OpenAI-Compatible</option>
+          </select>
+        </div>
+        <div class="field-group">
+          <label>Model</label>
+          <input type="text" id="cfgEmbedModel" placeholder="text-embedding-3-small" onchange="saveEmbedConfig()" />
+        </div>
+        <div class="field-group" id="embedBaseUrlGroup" style="display:none;">
+          <label>Base URL</label>
+          <input type="text" id="cfgEmbedBaseUrl" placeholder="http://localhost:11434" onchange="saveEmbedConfig()" />
+        </div>
+      </div>
+
+      <div class="cell">
+        <div class="sec-label">LLM Settings</div>
+        
+        <div class="field-group">
+          <label>Provider</label>
           <select id="cfgLLMProvider" onchange="saveLLMConfig()">
             <option value="none">None</option>
             <option value="ollama">Ollama (Local)</option>
@@ -473,7 +505,7 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
           </select>
         </div>
         <div class="field-group">
-          <label>Model Name</label>
+          <label>Model</label>
           <input type="text" id="cfgLLMModel" placeholder="llama3.2" onchange="saveLLMConfig()" />
         </div>
         <div class="field-group">
@@ -796,18 +828,37 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
     }
   }
 
+  function toggleEmbedFields() {
+    const val = document.getElementById('cfgEmbedProvider').value
+    const grp = document.getElementById('embedBaseUrlGroup')
+    grp.style.display = (val === 'ollama' || val === 'openai-compatible') ? 'block' : 'none'
+  }
+
   async function loadConfig() {
     try {
       const res = await fetch('/api/config'); const c = await res.json()
       document.getElementById('cfgSearchMode').value = c.searchMode || 'bm25'
       document.getElementById('engineMode').textContent = c.searchMode || 'bm25'
       
+      if (c.embedProvider) document.getElementById('cfgEmbedProvider').value = c.embedProvider
+      if (c.embedModel) document.getElementById('cfgEmbedModel').value = c.embedModel
+      if (c.embedBaseUrl) document.getElementById('cfgEmbedBaseUrl').value = c.embedBaseUrl
+      toggleEmbedFields()
+
       if (c.llmProvider && c.llmProvider !== 'none') {
         document.getElementById('cfgLLMProvider').value = c.llmProvider
       }
       if (c.llmModel) document.getElementById('cfgLLMModel').value = c.llmModel
       if (c.llmBaseUrl) document.getElementById('cfgLLMBaseUrl').value = c.llmBaseUrl
     } catch(e){}
+  }
+
+  async function saveEmbedConfig() {
+    const embedProvider = document.getElementById('cfgEmbedProvider').value
+    const embedModel = document.getElementById('cfgEmbedModel').value
+    const embedBaseUrl = document.getElementById('cfgEmbedBaseUrl').value
+    await fetch('/api/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ embedProvider, embedModel, embedBaseUrl }) })
+    toast('Embed config saved')
   }
 
   async function saveSearchConfig() {

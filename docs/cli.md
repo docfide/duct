@@ -16,7 +16,7 @@ duct index https://example.com/docs
 | `--strategy` | Chunking strategy: `sliding-window` (default) or `by-heading` |
 | `--chunk-size` | Chunk size in characters (default: 1500) |
 | `--chunk-overlap` | Chunk overlap in characters (default: 200) |
-| `--embed` | Embedding provider: `openai` or `gemini` |
+| `--embed` | Embedding provider: `openai`, `gemini`, `cohere`, `voyage`, `mistral`, `jina`, `ollama`, or `openai-compatible` |
 | `--no-embed` | Skip embeddings, use BM25 keyword search |
 | `--ocr` | Attempt OCR for scanned PDFs and image files |
 | `--persist` | Directory for persistent index storage |
@@ -43,7 +43,7 @@ duct search "termination" --search-mode hybrid --alpha 0.3 --rerank --json
 | `--alpha` | Hybrid search alpha (default: 0.5) |
 | `--rerank` | Enable cross-encoder re-ranking |
 | `--hyde` | Enable HyDE query expansion |
-| `--embed` | Embedding provider |
+| `--embed` | Embedding provider (`openai`, `gemini`, `cohere`, `voyage`, `mistral`, `jina`, `ollama`, `openai-compatible`) |
 | `--no-embed` | Skip embeddings |
 | `--ocr` | Enable OCR during indexing |
 | `--persist` | Persistent index directory |
@@ -100,7 +100,7 @@ duct watch ./inbox --ocr --embed openai --persist .duct-data
 | `--strategy` | Chunking strategy |
 | `--ocr` | Enable OCR |
 | `--persist` | Persistent index directory |
-| `--embed` | Embedding provider |
+| `--embed` | Embedding provider (`openai`, `gemini`, `cohere`, `voyage`, `mistral`, `jina`, `ollama`, `openai-compatible`) |
 
 File changes are picked up via `fs.watch` with recursive mode. Stop with Ctrl+C.
 
@@ -165,7 +165,7 @@ duct serve --search-mode hybrid --alpha 0.3 --llm ollama
 |------|-------------|
 | `-p, --port` | Port to listen on (default: 3456) |
 | `--strategy` | Chunking strategy |
-| `--embed` | Embedding provider |
+| `--embed` | Embedding provider (`openai`, `gemini`, `cohere`, `voyage`, `mistral`, `jina`, `ollama`, `openai-compatible`) |
 | `--no-embed` | Skip embeddings |
 | `--ocr` | Enable OCR |
 | `--persist` | Persistent index directory |

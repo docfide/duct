@@ -37,17 +37,22 @@
     "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
-    "@google/generative-ai": "^0.21.0",
+    "@mistralai/mistralai": "^2.2.5",
     "@types/express": "^4.17.0",
     "@types/multer": "^1.4.0",
     "@types/node": "^20.0.0",
+    "cohere-ai": "^8.0.0",
     "express-rate-limit": "^8.5.2",
     "tsx": "^4.0.0",
     "typescript": "^5.4.0",
-    "vitest": "^4.1.7"
+    "vitest": "^4.1.7",
+    "voyageai": "^0.2.1"
   },
   "optionalDependencies": {
-    "@google/generative-ai": "^0.21.0"
+    "@google/generative-ai": "^0.21.0",
+    "@mistralai/mistralai": "^2.0.0",
+    "cohere-ai": "^8.0.0",
+    "voyageai": "^0.3.0"
   },
   "repository": {
     "type": "git",

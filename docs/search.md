@@ -21,10 +21,16 @@ Semantic search using text embeddings. Requires an embedding provider.
 duct search "What are my obligations?" --embed openai
 ```
 
-| Provider | Default Model | Env Variable |
-|----------|---------------|--------------|
-| OpenAI | `text-embedding-3-small` | `OPENAI_API_KEY` |
-| Gemini | `text-embedding-004` | `GEMINI_API_KEY` |
+| Provider | Default Model | Env Variable | Dimensions | Cost/1M tokens |
+|----------|---------------|--------------|------------|----------------|
+| OpenAI | `text-embedding-3-small` | `OPENAI_API_KEY` | 1536 | $0.02 |
+| Gemini | `text-embedding-004` | `GEMINI_API_KEY` | 768 | $0.006 |
+| Cohere | `embed-v4.0` | `COHERE_API_KEY` | 1024 | $0.10 |
+| Voyage AI | `voyage-3-large` | `VOYAGE_API_KEY` | 1024 | $0.18 |
+| Mistral | `mistral-embed` | `MISTRAL_API_KEY` | 1024 | $0.10 |
+| Jina AI | `jina-embeddings-v3` | `JINA_API_KEY` | 1024 | $0.09 |
+| Ollama | `nomic-embed-text` | `OLLAMA_HOST` | 768 | Free |
+| OpenAI-Compatible | `text-embedding-3-small` | `EMBED_BASE_URL` / `EMBED_API_KEY` | 1536 | Varies |
 
 Chunks are embedded at index time and compared using cosine similarity at search time. Captures semantic meaning even when the query wording doesn't match the document text exactly.
 

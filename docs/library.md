@@ -15,8 +15,10 @@ const duct = new Duct(options?: DuctConfig)
 | `chunk.strategy` | `'sliding-window' \| 'by-heading'` | `'sliding-window'` | Chunking strategy |
 | `chunk.size` | `number` | `1500` | Chunk size in characters |
 | `chunk.overlap` | `number` | `200` | Chunk overlap in characters |
-| `embed.provider` | `'openai' \| 'gemini'` | — | Embedding provider (omit for BM25 only) |
+| `embed.provider` | `'openai' \| 'gemini' \| 'cohere' \| 'voyage' \| 'mistral' \| 'jina' \| 'ollama' \| 'openai-compatible'` | — | Embedding provider (omit for BM25 only) |
 | `embed.model` | `string` | — | Embedding model override |
+| `embed.baseUrl` | `string` | — | Embedding base URL (for `ollama` and `openai-compatible`) |
+| `embed.apiKey` | `string` | — | Embedding API key override |
 | `llm.provider` | `'ollama' \| 'openai' \| 'gemini'` | — | LLM provider for Q&A |
 | `llm.model` | `string` | — | LLM model override |
 | `llm.baseUrl` | `string` | — | LLM base URL override |
@@ -186,7 +188,7 @@ duct.configure({
 })
 ```
 
-Available config fields: `ocr`, `chunkStrategy`, `chunkSize`, `chunkOverlap`, `searchMode`, `searchAlpha`, `rerank`, `hyde`, `llmProvider`, `llmModel`, `llmBaseUrl`, `openaiKey`, `geminiKey`.
+Available config fields: `ocr`, `chunkStrategy`, `chunkSize`, `chunkOverlap`, `searchMode`, `searchAlpha`, `rerank`, `hyde`, `llmProvider`, `llmModel`, `llmBaseUrl`, `embedProvider`, `embedModel`, `embedBaseUrl`, `openaiKey`, `geminiKey`, `cohereKey`, `voyageKey`, `mistralKey`, `jinaKey`.
 
 ---
 
