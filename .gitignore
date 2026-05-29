@@ -4,3 +4,4 @@ dist/
 .env
 *.tsbuildinfo
 ANNOUNCEMENT.md
+*.DS_Store
