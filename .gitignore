@@ -3,3 +3,4 @@ dist/
 .duct-uploads/
 .env
 *.tsbuildinfo
+ANNOUNCEMENT.md

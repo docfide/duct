@@ -51,11 +51,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tensflare/duct.git"
+    "url": "git+https://github.com/docfide/duct.git"
   },
-  "homepage": "https://github.com/tensflare/duct#readme",
+  "homepage": "https://github.com/docfide/duct#readme",
   "bugs": {
-    "url": "https://github.com/tensflare/duct/issues"
+    "url": "https://github.com/docfide/duct/issues"
   },
   "keywords": [
     "document",

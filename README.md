@@ -222,7 +222,7 @@ ssh user@host "cd /app/duct && docker compose up -d"
 ## Development
 
 ```bash
-git clone https://github.com/tensflare/duct
+git clone https://github.com/docfide/duct
 cd duct
 npm install
 npm run dev          # run CLI with tsx
@@ -237,4 +237,4 @@ MIT — see [LICENSE](LICENSE).
 
 ---
 
-Built by [Tensflare](https://docfide.com). We build contract software; Duct is our gift to developers who work with documents.
+Built by [Docfide](https://docfide.com). We build contract software; Duct is our gift to developers who work with documents.
