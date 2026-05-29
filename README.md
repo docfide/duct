@@ -1,5 +1,6 @@
 # Duct
 
+![Duct: Document Intelligence Pipeline](assets/social-preview.png)
 **Extract, chunk, embed, search, and ask — document intelligence in one command.**
 
 Duct is an open-source document intelligence pipeline. Point it at a PDF, DOCX, Markdown, image, HTML, or text file (or a whole directory), and it extracts the text, splits it into searchable chunks, and lets you query them instantly — with or without AI embeddings.

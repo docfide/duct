@@ -239,9 +239,16 @@ export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimi
 const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Duct — Flow × Lime</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Duct — Local Search Engine</title>
+  
+  <!-- Open Graph Social Preview -->
+  <meta property="og:title" content="Duct — Local Document Intelligence">
+  <meta property="og:description" content="Extract, chunk, embed, search, and ask — document intelligence in one command.">
+  <meta property="og:image" content="https://duct.docfide.com/assets/social-preview.png">
+  <meta name="twitter:card" content="summary_large_image">
+
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -398,7 +405,7 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
         <div class="ds-tag">LOCAL SEARCH ENGINE</div>
       </div>
     </div>
-    <div class="version">flow × lime</div>
+    <div class="version">v0.1.0</div>
   </div>
 
   <div class="body">
