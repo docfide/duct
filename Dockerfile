@@ -8,12 +8,15 @@ RUN npm ci
 COPY tsconfig.json ./
 COPY src/ ./src/
 RUN npm run build
+RUN npm prune --omit=dev
 
 FROM node:22-alpine
 
+RUN apk add --no-cache cairo pango jpeg giflib
+
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY README.md LICENSE ./
 
