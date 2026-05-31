@@ -1,7 +1,7 @@
 import express from 'express'
 import multer from 'multer'
 import rateLimit from 'express-rate-limit'
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, unlinkSync } from 'node:fs'
 import { extname, join } from 'node:path'
 import type { Duct } from './index.js'
 
@@ -135,6 +135,9 @@ export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimi
     try {
       await duct.removeDocument(path)
       originalNames.delete(path)
+      if (path.startsWith(uploadDir)) {
+        try { unlinkSync(path) } catch {}
+      }
       res.json({ ok: true })
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })
@@ -142,13 +145,17 @@ export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimi
   })
 
   app.get('/api/config', (_req, res) => {
-    res.json(duct.getConfig())
+    const cfg = duct.getConfig()
+    const sanitized = { ...cfg, openaiKey: '', geminiKey: '', cohereKey: '', voyageKey: '', mistralKey: '', jinaKey: '' }
+    res.json(sanitized)
   })
 
   app.put('/api/config', (req, res) => {
     try {
       duct.configure(req.body)
-      res.json({ ok: true, config: duct.getConfig() })
+      const cfg = duct.getConfig()
+      const sanitized = { ...cfg, openaiKey: '', geminiKey: '', cohereKey: '', voyageKey: '', mistralKey: '', jinaKey: '' }
+      res.json({ ok: true, config: sanitized })
     } catch (err) {
       res.status(400).json({ error: (err as Error).message })
     }
@@ -159,8 +166,12 @@ export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimi
   })
 
   app.delete('/api/clear', async (_req, res) => {
-    await duct.clear()
-    res.json({ ok: true })
+    try {
+      await duct.clear()
+      res.json({ ok: true })
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message })
+    }
   })
 
   app.get('/api/export', async (req, res) => {
@@ -220,13 +231,27 @@ export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimi
       res.status(400).json({ error: 'Directories array is required' })
       return
     }
-    duct.watch(directories)
-    res.json({ ok: true, watching: directories })
+    for (const dir of directories) {
+      if (typeof dir !== 'string' || !existsSync(dir)) {
+        res.status(400).json({ error: `Directory does not exist: ${dir}` })
+        return
+      }
+    }
+    try {
+      duct.watch(directories)
+      res.json({ ok: true, watching: directories })
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message })
+    }
   })
 
   app.post('/api/unwatch', (_req, res) => {
-    duct.unwatch()
-    res.json({ ok: true })
+    try {
+      duct.unwatch()
+      res.json({ ok: true })
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message })
+    }
   })
 
   app.get('*', (_req, res) => {
@@ -766,7 +791,7 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
         const answerText = data.answer.replace(/\\n/g, '<br>')
         let sourcesHtml = '<div class="source"><strong>SOURCES</strong><br>'
         for (const s of (data.sources || []).slice(0, 5)) {
-          sourcesHtml += '<a href="#" onclick="searchDoc(\\'' + esc(s.documentPath) + '\\');return false">' + esc(s.documentPath.split('/').pop() || s.documentPath) + '</a> <span style="color:var(--muted)">[' + s.score.toFixed(2) + ']</span><br>'
+          sourcesHtml += '<a href="#" class="source-link" data-path="' + esc(s.documentPath) + '">' + esc(s.documentPath.split('/').pop() || s.documentPath) + '</a> <span style="color:var(--muted)">[' + s.score.toFixed(2) + ']</span><br>'
         }
         sourcesHtml += '</div>'
         answerDiv.innerHTML = answerText + sourcesHtml
@@ -781,10 +806,14 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
     btn.disabled = false; btn.textContent = 'Ask'
   }
 
-  function searchDoc(path) {
-    document.getElementById('searchInput').value = path
-    search()
-  }
+  document.getElementById('chatMessages').addEventListener('click', e => {
+    const link = e.target.closest('.source-link')
+    if (link) {
+      e.preventDefault()
+      document.getElementById('searchInput').value = link.getAttribute('data-path') || ''
+      search()
+    }
+  })
 
   function viewResult(el) {
     document.querySelectorAll('.result').forEach(r => r.style.borderColor = 'var(--border)');

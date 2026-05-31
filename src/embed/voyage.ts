@@ -1,8 +1,9 @@
 import type { EmbeddingProvider } from '../types.js'
+import type { VoyageAIClient, VoyageModule } from './sdk-types.js'
 
 export class VoyageEmbedder implements EmbeddingProvider {
   readonly dimensions = 1024
-  private client: any = null
+  private client: VoyageAIClient | null = null
   private model: string
   private apiKey: string
 
@@ -11,11 +12,11 @@ export class VoyageEmbedder implements EmbeddingProvider {
     this.model = model || 'voyage-3-large'
   }
 
-  private async getClient(): Promise<any> {
+  private async getClient(): Promise<VoyageAIClient> {
     if (!this.client) {
       if (!this.apiKey) throw new Error('VOYAGE_API_KEY environment variable is not set')
-      const { VoyageAIClient } = await import('voyageai') as any
-      this.client = new VoyageAIClient({ apiKey: this.apiKey })
+      const mod = await import('voyageai') as VoyageModule
+      this.client = new mod.VoyageAIClient({ apiKey: this.apiKey })
     }
     return this.client
   }

@@ -1,8 +1,9 @@
 import type { EmbeddingProvider } from '../types.js'
+import type { CohereClientV2, CohereModule } from './sdk-types.js'
 
 export class CohereEmbedder implements EmbeddingProvider {
   readonly dimensions = 1024
-  private client: any = null
+  private client: CohereClientV2 | null = null
   private model: string
   private apiKey: string
 
@@ -11,11 +12,11 @@ export class CohereEmbedder implements EmbeddingProvider {
     this.model = model || 'embed-v4.0'
   }
 
-  private async getClient(): Promise<any> {
+  private async getClient(): Promise<CohereClientV2> {
     if (!this.client) {
       if (!this.apiKey) throw new Error('COHERE_API_KEY environment variable is not set')
-      const { CohereClientV2 } = await import('cohere-ai') as any
-      this.client = new CohereClientV2({ token: this.apiKey })
+      const mod = await import('cohere-ai') as CohereModule
+      this.client = new mod.CohereClientV2({ token: this.apiKey })
     }
     return this.client
   }

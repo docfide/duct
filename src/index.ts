@@ -152,55 +152,65 @@ export class Duct {
     await this.ensureLoaded()
     const paths = Array.isArray(input) ? input : [input]
     const resolved: string[] = []
-    for (const p of paths) resolved.push(...(await findFiles(p)))
+    for (const p of paths) {
+      try {
+        resolved.push(...(await findFiles(p)))
+      } catch (err) {
+        console.warn(`  Skipping "${p}": ${(err as Error).message}`)
+      }
+    }
     const start = Date.now()
     let totalDocs = 0
     let totalChunks = 0
 
     for (const filePath of resolved) {
-      if (this.documents.has(filePath)) {
-        if (this.versionHistory.has(filePath)) {
-          const versions = this.versionHistory.get(filePath)!
-          const lastContent = versions[versions.length - 1]?.content
-          const doc = await this.extractPath(filePath)
-          if (doc.content !== lastContent) {
-            await this.removeDocument(filePath)
+      try {
+        if (this.documents.has(filePath)) {
+          if (this.versionHistory.has(filePath)) {
+            const versions = this.versionHistory.get(filePath)!
+            const lastContent = versions[versions.length - 1]?.content
+            const doc = await this.extractPath(filePath)
+            if (doc.content !== lastContent) {
+              await this.removeDocument(filePath)
+            } else {
+              continue
+            }
           } else {
             continue
           }
-        } else {
-          continue
         }
-      }
-      totalDocs++
+        totalDocs++
 
-      const doc = await this.extractPath(filePath)
-      const tableAugmented = extractTablesFromContent(doc.content)
-      const chunks = chunk(tableAugmented, filePath, doc.format, this.chunkStrategy, this.chunkSize, this.chunkOverlap)
+        const doc = await this.extractPath(filePath)
+        const tableAugmented = extractTablesFromContent(doc.content)
+        const chunks = chunk(tableAugmented, filePath, doc.format, this.chunkStrategy, this.chunkSize, this.chunkOverlap)
 
-      await this.searcher.add(chunks)
-      this.chunksCount += chunks.length
-      totalChunks += chunks.length
+        await this.searcher.add(chunks)
+        this.chunksCount += chunks.length
+        totalChunks += chunks.length
 
-      this.documents.set(filePath, {
-        path: filePath,
-        format: doc.format,
-        chunkCount: chunks.length,
-        size: (doc.metadata.size as number) || 0,
-        indexedAt: Date.now(),
-      })
+        this.documents.set(filePath, {
+          path: filePath,
+          format: doc.format,
+          chunkCount: chunks.length,
+          size: (doc.metadata.size as number) || 0,
+          indexedAt: Date.now(),
+        })
 
-      const versions = this.versionHistory.get(filePath) || []
-      versions.push({ version: versions.length + 1, content: doc.content, timestamp: Date.now() })
-      this.versionHistory.set(filePath, versions)
+        const versions = this.versionHistory.get(filePath) || []
+        versions.push({ version: versions.length + 1, content: doc.content, timestamp: Date.now() })
+        this.versionHistory.set(filePath, versions)
 
-      if (this.embedder) {
-        const batchSize = 20
-        for (let i = 0; i < chunks.length; i += batchSize) {
-          const batch = chunks.slice(i, i + batchSize)
-          const embeddings = await this.embedder.embed(batch.map(c => c.content))
-          await this.store.add(batch, embeddings)
+        if (this.embedder) {
+          const batchSize = 20
+          for (let i = 0; i < chunks.length; i += batchSize) {
+            const batch = chunks.slice(i, i + batchSize)
+            const embeddings = await this.embedder.embed(batch.map(c => c.content))
+            await this.store.add(batch, embeddings)
+          }
         }
+      } catch (err) {
+        console.warn(`  Error indexing "${filePath}": ${(err as Error).message}`)
       }
     }
 
@@ -220,19 +230,31 @@ export class Duct {
     let results: SearchResult[]
 
     if (this.searchMode === 'vector' && this.embedder) {
-      const [queryEmb] = await this.embedder.embed([query])
-      results = await this.store.search(queryEmb, topK)
+      try {
+        const [queryEmb] = await this.embedder.embed([query])
+        results = await this.store.search(queryEmb, topK)
+      } catch {
+        results = await this.searcher.search(query, topK)
+      }
     } else if (this.searchMode === 'hybrid' && this.embedder) {
-      const [queryEmb] = await this.embedder.embed([query])
-      const bm25Results = await this.searcher.search(query, topK * 3)
-      const vectorResults = await this.store.search(queryEmb, topK * 3)
-      results = reciprocalRankFusion(bm25Results, vectorResults, topK, this.searchAlpha)
+      try {
+        const [queryEmb] = await this.embedder.embed([query])
+        const bm25Results = await this.searcher.search(query, topK * 3)
+        const vectorResults = await this.store.search(queryEmb, topK * 3)
+        results = reciprocalRankFusion(bm25Results, vectorResults, topK, this.searchAlpha)
+      } catch {
+        results = await this.searcher.search(query, topK)
+      }
     } else {
       results = await this.searcher.search(query, topK * 2)
     }
 
-    if (this.rerankEnabled) {
-      results = await this.reranker.rerank(query, results, topK)
+    try {
+      if (this.rerankEnabled) {
+        results = await this.reranker.rerank(query, results, topK)
+      }
+    } catch {
+      results = results.slice(0, topK)
     }
 
     results.sort((a, b) => b.score - a.score)
@@ -359,14 +381,14 @@ export class Duct {
       return this.ask(query)
     }
 
-    const planPrompt = `Given the question: "${query}"
+    let subQueries: string[] = [query]
+    try {
+      const planPrompt = `Given the question: "${query}"
 
 Break this question down into 2-4 sub-questions that need to be answered independently. Each sub-question should be searchable against a document index.
 
 Return ONLY a JSON array of strings, like: ["sub-question 1", "sub-question 2"]`
-    const planResp = await this.llmProvider.generate(planPrompt, 'You are a search query planner. Output ONLY valid JSON.')
-    let subQueries: string[]
-    try {
+      const planResp = await this.llmProvider.generate(planPrompt, 'You are a search query planner. Output ONLY valid JSON.')
       subQueries = JSON.parse(planResp.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim())
       if (!Array.isArray(subQueries)) subQueries = [query]
     } catch { subQueries = [query] }
@@ -385,10 +407,15 @@ Return ONLY a JSON array of strings, like: ["sub-question 1", "sub-question 2"]`
       ).join('\n')}`
     ).join('\n\n---\n\n')
 
-    const answer = await this.llmProvider.generate(
-      `Documents:\n\n${context}\n\nOriginal Question: ${query}\n\nProvide a comprehensive answer synthesizing information from all sub-queries. Cite sources.`,
-      'You are a research assistant synthesizing multi-source information.',
-    )
+    let answer: string
+    try {
+      answer = await this.llmProvider.generate(
+        `Documents:\n\n${context}\n\nOriginal Question: ${query}\n\nProvide a comprehensive answer synthesizing information from all sub-queries. Cite sources.`,
+        'You are a research assistant synthesizing multi-source information.',
+      )
+    } catch {
+      answer = this.fallbackAnswer(allResults.flatMap(r => r.results), query)
+    }
 
     const sources = [...new Map(
       allResults.flatMap(r => r.results).map(r => [r.chunk.id, r])
@@ -415,7 +442,10 @@ Return ONLY a JSON array of strings, like: ["sub-question 1", "sub-question 2"]`
           statSync(fullPath)
           await this.index(fullPath)
           callback?.()
-        } catch {}
+        } catch (err) {
+          const msg = (err as Error).message
+          if (!msg.includes('ENOENT')) console.warn(`  Watch error for "${fullPath}": ${msg}`)
+        }
       })
       this.watchers.add(w)
     }
@@ -423,7 +453,9 @@ Return ONLY a JSON array of strings, like: ["sub-question 1", "sub-question 2"]`
 
   unwatch(): void {
     for (const w of this.watchers) {
-      try { w.close() } catch {}
+      try { w.close() } catch (err) {
+        console.warn(`  Error closing watcher: ${(err as Error).message}`)
+      }
     }
     this.watchers.clear()
   }
@@ -437,7 +469,6 @@ Return ONLY a JSON array of strings, like: ["sub-question 1", "sub-question 2"]`
     await this.searcher.remove(path)
     if (this.embedder) await this.store.remove(path)
     if (this.persistPath) await this._save()
-    try { unlinkSync(path) } catch {}
   }
 
   async clear(): Promise<void> {
