@@ -18,7 +18,7 @@ import type {
   QAResult, SchemaField, ExtractionResult, DocDiff,
 } from './types.js'
 
-const VALID_EXTS = new Set(['.pdf', '.docx', '.md', '.markdown', '.html', '.htm', '.txt', '.png', '.jpg', '.jpeg', '.tiff', '.tif', '.bmp', '.gif', '.webp'])
+const VALID_EXTS = new Set(['.pdf', '.docx', '.md', '.markdown', '.html', '.htm', '.txt', '.csv', '.json', '.log', '.xml', '.xlsx', '.pptx', '.png', '.jpg', '.jpeg', '.tiff', '.tif', '.bmp', '.gif', '.webp'])
 
 async function findFiles(input: string): Promise<string[]> {
   if (isUrl(input)) return [input]

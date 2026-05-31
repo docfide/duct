@@ -5,7 +5,7 @@ export interface ExtractedDocument {
   metadata: Record<string, unknown>
 }
 
-export type DocumentFormat = 'pdf' | 'docx' | 'md' | 'html' | 'txt' | 'image' | 'url'
+export type DocumentFormat = 'pdf' | 'docx' | 'md' | 'html' | 'txt' | 'image' | 'url' | 'xlsx' | 'pptx'
 
 export interface DocumentInfo {
   path: string

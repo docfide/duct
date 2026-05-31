@@ -52,7 +52,9 @@
     "@google/generative-ai": "^0.21.0",
     "@mistralai/mistralai": "^2.0.0",
     "cohere-ai": "^8.0.0",
-    "voyageai": "^0.3.0"
+    "jszip": "^3.10.1",
+    "voyageai": "^0.3.0",
+    "xlsx": "^0.18.5"
   },
   "repository": {
     "type": "git",

@@ -5,3 +5,4 @@ dist/
 *.tsbuildinfo
 ANNOUNCEMENT.md
 *.DS_Store
+social-preview.html

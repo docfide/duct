@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, unlinkSync } from 'node:fs'
 import { extname, join } from 'node:path'
 import type { Duct } from './index.js'
 
-const VALID_EXTS = new Set(['.pdf', '.docx', '.md', '.markdown', '.html', '.htm', '.txt', '.png', '.jpg', '.jpeg', '.tiff', '.tif', '.bmp', '.gif', '.webp'])
+const VALID_EXTS = new Set(['.pdf', '.docx', '.md', '.markdown', '.html', '.htm', '.txt', '.csv', '.json', '.log', '.xml', '.xlsx', '.pptx', '.png', '.jpg', '.jpeg', '.tiff', '.tif', '.bmp', '.gif', '.webp'])
 
 const uploadDir = join(process.cwd(), '.duct-uploads')
 if (!existsSync(uploadDir)) mkdirSync(uploadDir, { recursive: true })
@@ -456,9 +456,9 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
         <div class="drop-zone" id="dropZone">
           <div style="font-size:20px;margin-bottom:8px">📄</div>
           <div class="t-ui">Drop files here</div>
-          <div style="font-size:10px;color:var(--muted);margin-top:4px;font-family:var(--mono);">pdf, docx, md, txt, images</div>
+          <div style="font-size:10px;color:var(--muted);margin-top:4px;font-family:var(--mono);">pdf, docx, xlsx, pptx, md, csv, json, txt, images</div>
         </div>
-        <input type="file" id="fileInput" multiple accept=".pdf,.docx,.md,.markdown,.html,.htm,.txt,.png,.jpg,.jpeg,.tiff,.tif,.bmp,.gif,.webp" style="display:none;" />
+        <input type="file" id="fileInput" multiple accept=".pdf,.docx,.md,.markdown,.html,.htm,.txt,.csv,.json,.log,.xml,.xlsx,.pptx,.png,.jpg,.jpeg,.tiff,.tif,.bmp,.gif,.webp" style="display:none;" />
         <div id="uploadProgress" style="margin-top:8px;"></div>
 
         <div class="inline-form" style="margin-top:8px;">

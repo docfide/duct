@@ -21,7 +21,16 @@ export function detectFormat(path: string): DocumentFormat {
     case '.htm':
       return 'html'
     case '.txt':
+    case '.csv':
+    case '.json':
+    case '.log':
       return 'txt'
+    case '.xml':
+      return 'txt'
+    case '.xlsx':
+      return 'xlsx'
+    case '.pptx':
+      return 'pptx'
     default:
       return 'txt'
   }
@@ -103,6 +112,50 @@ async function extractText(path: string): Promise<ExtractedDocument> {
   }
 }
 
+async function extractExcel(path: string): Promise<ExtractedDocument> {
+  const XLSX = (await import('xlsx')).default
+  const workbook = XLSX.readFile(path)
+  const parts: string[] = []
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName]
+    const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1 })
+    if (rows.length === 0) continue
+    parts.push(`--- Sheet: ${sheetName} ---`)
+    for (const row of rows) {
+      const cells = row.map(c => c == null ? '' : String(c)).join('\t')
+      if (cells.trim()) parts.push(cells)
+    }
+  }
+  const content = parts.join('\n')
+  return {
+    path,
+    format: 'xlsx',
+    content,
+    metadata: { sheets: workbook.SheetNames, size: content.length },
+  }
+}
+
+async function extractPptx(path: string): Promise<ExtractedDocument> {
+  const { default: JSZip } = await import('jszip')
+  const buffer = readFileSync(path)
+  const zip = await JSZip.loadAsync(buffer)
+  const slideFiles = Object.keys(zip.files)
+    .filter(f => /^ppt\/slides\/slide\d+\.xml$/.test(f))
+    .sort()
+  const parts: string[] = []
+  for (const file of slideFiles) {
+    const xml = await zip.files[file].async('text')
+    const text = xml.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim()
+    if (text) parts.push(text)
+  }
+  return {
+    path,
+    format: 'pptx',
+    content: parts.join('\n\n'),
+    metadata: { slides: slideFiles.length, size: buffer.length },
+  }
+}
+
 const extractors: Record<DocumentFormat, Extractor> = {
   pdf: { extract: extractPdf },
   docx: { extract: extractDocx },
@@ -111,6 +164,8 @@ const extractors: Record<DocumentFormat, Extractor> = {
   txt: { extract: extractText },
   image: { extract: extractImage },
   url: { extract: extractUrl },
+  xlsx: { extract: extractExcel },
+  pptx: { extract: extractPptx },
 }
 
 export async function extract(path: string, options?: { ocr?: boolean }): Promise<ExtractedDocument> {
