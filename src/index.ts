@@ -136,9 +136,9 @@ export class Duct {
         if (typeof meta.documents[0] === 'string') {
           const paths = meta.documents as string[]
           this.documents = new Map()
-          for (const p of paths) this.documents.set(p, { path: p, format: 'txt' as DocumentFormat, chunkCount: 0, size: 0, indexedAt: 0 })
+          for (const p of paths) this.documents.set(p, { path: p, format: 'txt' as DocumentFormat, chunkCount: 0, size: 0, indexedAt: 0, metadata: {} })
         } else {
-          const docs = meta.documents as DocumentInfo[]
+          const docs = (meta.documents as DocumentInfo[]).map(d => ({ ...d, metadata: d.metadata ?? {} }))
           this.documents = new Map(docs.map(d => [d.path, d]))
         }
       }
@@ -148,7 +148,7 @@ export class Duct {
     if (this.embedder && existsSync(vectorsPath)) await this.store.load(vectorsPath)
   }
 
-  async index(input: string | string[]): Promise<IndexResult> {
+  async index(input: string | string[], metadata?: Record<string, unknown>): Promise<IndexResult> {
     await this.ensureLoaded()
     const paths = Array.isArray(input) ? input : [input]
     const resolved: string[] = []
@@ -162,6 +162,7 @@ export class Duct {
     const start = Date.now()
     let totalDocs = 0
     let totalChunks = 0
+    const docMeta = metadata ?? {}
 
     for (const filePath of resolved) {
       try {
@@ -185,6 +186,10 @@ export class Duct {
         const tableAugmented = extractTablesFromContent(doc.content)
         const chunks = chunk(tableAugmented, filePath, doc.format, this.chunkStrategy, this.chunkSize, this.chunkOverlap)
 
+        for (const c of chunks) {
+          c.metadata = { ...docMeta, ...doc.metadata }
+        }
+
         await this.searcher.add(chunks)
         this.chunksCount += chunks.length
         totalChunks += chunks.length
@@ -195,6 +200,7 @@ export class Duct {
           chunkCount: chunks.length,
           size: (doc.metadata.size as number) || 0,
           indexedAt: Date.now(),
+          metadata: { ...docMeta },
         })
 
         const versions = this.versionHistory.get(filePath) || []
@@ -225,16 +231,16 @@ export class Duct {
     return await extract(filePath, { ocr: this.ocr })
   }
 
-  async search(query: string, topK = 10): Promise<SearchResult[]> {
+  async search(query: string, topK = 10, filter?: Record<string, unknown>): Promise<SearchResult[]> {
     await this.ensureLoaded()
     let results: SearchResult[]
 
     if (this.searchMode === 'vector' && this.embedder) {
       try {
         const [queryEmb] = await this.embedder.embed([query])
-        results = await this.store.search(queryEmb, topK)
+        results = await this.store.search(queryEmb, topK * 2)
       } catch {
-        results = await this.searcher.search(query, topK)
+        results = await this.searcher.search(query, topK * 2)
       }
     } else if (this.searchMode === 'hybrid' && this.embedder) {
       try {
@@ -243,10 +249,19 @@ export class Duct {
         const vectorResults = await this.store.search(queryEmb, topK * 3)
         results = reciprocalRankFusion(bm25Results, vectorResults, topK, this.searchAlpha)
       } catch {
-        results = await this.searcher.search(query, topK)
+        results = await this.searcher.search(query, topK * 2)
       }
     } else {
       results = await this.searcher.search(query, topK * 2)
+    }
+
+    if (filter && Object.keys(filter).length > 0) {
+      results = results.filter(r => {
+        for (const [key, value] of Object.entries(filter)) {
+          if (r.chunk.metadata[key] !== value) return false
+        }
+        return true
+      })
     }
 
     try {
@@ -487,6 +502,10 @@ Return ONLY a JSON array of strings, like: ["sub-question 1", "sub-question 2"]`
 
   stats(): { documents: number; chunks: number } {
     return { documents: this.documents.size, chunks: this.chunksCount }
+  }
+
+  getDocument(path: string): DocumentInfo | undefined {
+    return this.documents.get(path)
   }
 
   getDocuments(): DocumentInfo[] {

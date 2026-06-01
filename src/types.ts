@@ -13,6 +13,7 @@ export interface DocumentInfo {
   chunkCount: number
   size: number
   indexedAt: number
+  metadata: Record<string, unknown>
 }
 
 export interface Chunk {

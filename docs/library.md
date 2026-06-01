@@ -55,9 +55,9 @@ const duct = new Duct({
 
 ## Methods
 
-### `duct.index(paths)`
+### `duct.index(paths, metadata?)`
 
-Index files, directories, or URLs.
+Index files, directories, or URLs. Optionally attach metadata that propagates to every chunk of the document.
 
 ```typescript
 const result = await duct.index('./report.pdf')
@@ -68,22 +68,43 @@ const result = await duct.index(['./doc1.pdf', './doc2.md'])
 
 const result = await duct.index('./docs/')     // recursive
 const result = await duct.index('https://...') // URL
+
+// With metadata (product_id, tenant, category, etc.)
+await duct.index('./policy.pdf', {
+  tenant_id: 'acme',
+  document_type: 'policy',
+  category: 'hr',
+})
+// metadata appears on each chunk: chunk.metadata.tenant_id === 'acme'
 ```
+
+Metadata values must be JSON-serializable primitives. Boolean, number, and string values can be used as search filters.
 
 ---
 
-### `duct.search(query, topK?)`
+### `duct.search(query, topK?, filter?)`
 
-Search indexed documents. Returns results sorted by relevance score.
+Search indexed documents. Returns results sorted by relevance score descending (highest score first).
 
 ```typescript
+// Basic search
 const results = await duct.search('termination clause', 10)
-// [{ chunk: Chunk, score: number }, ...]
 
-// score is unbounded for BM25 (higher = better match)
-// score is cosine similarity (0-1) for vector search
-// score is RRF rank for hybrid search
+// Search scoped to metadata (exact match)
+const results = await duct.search('indemnification', 10, { tenant_id: 'acme' })
+const results = await duct.search('review', 10, { brand: 'apple', category: 'phone' })
+// [{ chunk: Chunk, score: number }, ...]
 ```
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `query` | string | Search query |
+| `topK` | number | Number of results (default: 10) |
+| `filter` | `Record<string, unknown>` | Optional — only return chunks whose metadata matches all key/value pairs exactly |
+
+### Scoring
+
+See [Scoring & Ranking](search.md#scoring) for how scores work per mode.
 
 ---
 
@@ -203,13 +224,33 @@ const config = duct.getConfig()
 
 ---
 
+### `duct.getDocument(path)`
+
+Get metadata for a single indexed document.
+
+```typescript
+const doc = duct.getDocument('/path/to/doc.pdf')
+// {
+//   path: string,
+//   format: DocumentFormat,
+//   chunkCount: number,
+//   size: number,
+//   indexedAt: number,
+//   metadata: { tenant_id: 'acme', category: 'hr' }
+// }
+```
+
+Returns `undefined` if the path is not indexed.
+
+---
+
 ### `duct.getDocuments()`
 
 Get a list of all indexed documents.
 
 ```typescript
 const docs = duct.getDocuments()
-// [{ path: string, format: DocumentFormat, chunkCount: number, size: number, indexedAt: number }]
+// [{ path: string, format: DocumentFormat, chunkCount: number, size: number, indexedAt: number, metadata: Record<string, unknown> }]
 ```
 
 ---
@@ -242,3 +283,70 @@ Remove all indexed data.
 ```typescript
 await duct.clear()
 ```
+
+---
+
+## Interfaces
+
+Duct exports TypeScript interfaces for swapping core components:
+
+### `EmbeddingProvider`
+
+```typescript
+interface EmbeddingProvider {
+  embed(texts: string[]): Promise<number[][]>
+  readonly dimensions: number
+}
+```
+
+See [Embedding Providers](search.md#embedding-providers) for built-in implementations. Implement this interface to add a custom embedder.
+
+### `LLMProvider`
+
+```typescript
+interface LLMProvider {
+  generate(prompt: string, system?: string): Promise<string>
+  embed?(texts: string[]): Promise<number[][]>
+  readonly name: string
+}
+```
+
+Set a custom LLM provider at runtime:
+
+```typescript
+duct.setLLMProvider(myCustomProvider)
+```
+
+### `Reranker`
+
+```typescript
+interface Reranker {
+  rerank(query: string, results: SearchResult[], topK: number): Promise<SearchResult[]>
+}
+```
+
+The built-in `SimpleReranker` adjusts scores by term proximity and exact-match boosting (see [Re-Ranking](search.md#re-ranking)). Implement this interface to provide a custom second-pass scoring function.
+
+### `VectorStore` / `Searcher`
+
+```typescript
+interface VectorStore {
+  add(chunks: Chunk[], embeddings: number[][]): Promise<void>
+  search(query: number[], topK: number): Promise<SearchResult[]>
+  clear(): Promise<void>
+  remove(documentPath: string): Promise<void>
+  save(path: string): Promise<void>
+  load(path: string): Promise<void>
+}
+
+interface Searcher {
+  add(chunks: Chunk[]): Promise<void>
+  search(query: string, topK: number): Promise<SearchResult[]>
+  clear(): Promise<void>
+  remove(documentPath: string): Promise<void>
+  save(path: string): Promise<void>
+  load(path: string): Promise<void>
+}
+```
+
+These are used internally by `Duct` and are not currently exposed for external registration, but can be implemented for custom storage backends (e.g., PostgreSQL, Pinecone).

@@ -20,6 +20,15 @@ const storage = multer.diskStorage({
 
 const originalNames = new Map<string, string>()
 
+function parseMetadata(raw: unknown): Record<string, unknown> | undefined {
+  if (!raw) return undefined
+  if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) return raw as Record<string, unknown>
+  if (typeof raw === 'string') {
+    try { const p = JSON.parse(raw); if (typeof p === 'object' && p !== null && !Array.isArray(p)) return p } catch {}
+  }
+  return undefined
+}
+
 export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimitMb?: number }) {
   const app = express()
   const token = opts?.authToken
@@ -56,8 +65,9 @@ export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimi
 
   app.post('/api/index', (req, res) => {
     const isUrl = req.body?.url
+    const bodyMeta = parseMetadata(req.body?.metadata)
     if (isUrl) {
-      duct.index(isUrl).then(r => res.json({ results: [{ file: isUrl, ...r }] })).catch(e => res.status(500).json({ error: e.message }))
+      duct.index(isUrl, bodyMeta).then(r => res.json({ results: [{ file: isUrl, ...r }] })).catch(e => res.status(500).json({ error: e.message }))
       return
     }
     upload.array('files')(req, res, async (err) => {
@@ -74,11 +84,13 @@ export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimi
         res.status(400).json({ error: 'No files uploaded.' })
         return
       }
+      const formMeta = parseMetadata(typeof req.body?.metadata === 'string' ? req.body.metadata : undefined)
+      const meta = { ...bodyMeta, ...formMeta }
       try {
         const results = []
         for (const file of files) {
           originalNames.set(file.path, file.originalname)
-          const result = await duct.index(file.path)
+          const result = await duct.index(file.path, meta)
           results.push({ file: file.originalname, ...result })
         }
         res.json({ results })
@@ -92,9 +104,9 @@ export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimi
     const q = req.query.q as string
     if (!q) { res.status(400).json({ error: 'Query parameter "q" is required' }); return }
     const topK = parseInt(req.query.topK as string) || 10
-    const mode = req.query.mode as string
+    const filter = parseMetadata(req.query.filter as string)
     try {
-      const results = await duct.search(q, topK)
+      const results = await duct.search(q, topK, filter)
       const mapped = results.map(r => ({
         ...r,
         chunk: { ...r.chunk, documentPath: originalNames.get(r.chunk.documentPath) || r.chunk.documentPath },
@@ -120,7 +132,15 @@ export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimi
     }
   })
 
-  app.get('/api/documents', (_req, res) => {
+  app.get('/api/documents', (req, res) => {
+    const path = req.query.path as string
+    if (path) {
+      const raw = duct.getDocument(path)
+      if (!raw) { res.status(404).json({ error: 'Document not found' }); return }
+      const doc = { ...raw, path: originalNames.get(raw.path) || raw.path, storePath: raw.path }
+      res.json({ document: doc })
+      return
+    }
     const docs = duct.getDocuments().map(d => ({
       ...d,
       path: originalNames.get(d.path) || d.path,

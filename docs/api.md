@@ -15,13 +15,17 @@ Upload files or index a URL.
 POST /api/index
 Content-Type: multipart/form-data
 files: report.pdf, contract.docx
+metadata: {"tenant_id":"acme","category":"legal"}
 ```
 
-**URL:**
+**URL with metadata:**
 ```json
 POST /api/index
 Content-Type: application/json
-{ "url": "https://example.com/docs" }
+{
+  "url": "https://example.com/docs",
+  "metadata": { "tenant_id": "acme", "category": "legal" }
+}
 ```
 
 **Response:**
@@ -33,6 +37,8 @@ Content-Type: application/json
 }
 ```
 
+Metadata is propagated to every chunk of the indexed document and can be used as a search filter (see `GET /api/search`). Values must be JSON-serializable.
+
 ---
 
 ## `GET /api/search`
@@ -41,13 +47,20 @@ Search indexed documents.
 
 ```
 GET /api/search?q=termination+clause&topK=10
+GET /api/search?q=indemnification&filter={"tenant_id":"acme"}
 ```
 
-| Param | Description |
-|-------|-------------|
-| `q` | Search query (required) |
-| `topK` | Number of results (default: 10) |
-| `mode` | Search mode override |
+| Param | Type | Description |
+|-------|------|-------------|
+| `q` | string | Search query (required) |
+| `topK` | number | Number of results (default: 10) |
+| `filter` | string | URL-encoded JSON object — only return chunks whose metadata matches all key/value pairs exactly |
+
+**Example with filter:**
+```
+GET /api/search?q=policy&filter=%7B%22tenant_id%22%3A%22acme%22%2C%22category%22%3A%22hr%22%7D
+```
+This searches for "policy" among documents where `tenant_id === "acme"` and `category === "hr"`.
 
 **Response:**
 ```json
@@ -60,7 +73,8 @@ GET /api/search?q=termination+clause&topK=10
         "documentPath": "contract.pdf",
         "content": "The term of this Agreement shall commence...",
         "heading": "Term and Termination",
-        "index": 3
+        "index": 3,
+        "metadata": { "tenant_id": "acme", "category": "legal" }
       }
     }
   ]
@@ -104,20 +118,44 @@ Content-Type: application/json
 
 ## `GET /api/documents`
 
-List all indexed documents with their store paths.
+List all indexed documents, or get a single document's metadata.
 
 ```
-GET /api/documents
+GET /api/documents              # list all
+GET /api/documents?path=/tmp/... # get single document
 ```
 
-**Response:**
+**Response (list):**
 ```json
 {
   "documents": [
-    { "path": "report.pdf", "format": "pdf", "chunkCount": 12, "storePath": "/tmp/...", "indexedAt": 1748530000 }
+    {
+      "path": "report.pdf",
+      "format": "pdf",
+      "chunkCount": 12,
+      "storePath": "/tmp/...",
+      "indexedAt": 1748530000,
+      "metadata": { "tenant_id": "acme", "category": "legal" }
+    }
   ]
 }
 ```
+
+**Response (single — returns `document` object instead of `documents` array):**
+```json
+{
+  "document": {
+    "path": "report.pdf",
+    "format": "pdf",
+    "chunkCount": 12,
+    "storePath": "/tmp/...",
+    "indexedAt": 1748530000,
+    "metadata": { "tenant_id": "acme", "category": "legal" }
+  }
+}
+```
+
+Use `storePath` for `DELETE /api/documents` and `GET /api/diff` requests.
 
 ---
 

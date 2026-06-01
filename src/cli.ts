@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import { Command } from 'commander'
+import chalk from 'chalk'
+import ora from 'ora'
 import { Duct } from './index.js'
 import { createServer } from './server.js'
 
@@ -45,12 +47,14 @@ program
       })
 
       for (const p of paths) {
+        const spinner = ora({ text: `Indexing ${chalk.cyan(p)}...`, color: 'green' }).start()
         const result = await duct.index(p)
-        console.log(`  Indexed ${result.documents} document(s) → ${result.chunks} chunk(s) in ${result.time}ms`)
+        spinner.succeed(chalk.dim(`${result.documents} doc(s) → ${result.chunks} chunk(s) in ${result.time}ms`))
       }
-      result(duct)
+      const s = duct.stats()
+      console.log(`  ${chalk.green('✓')} ${chalk.bold(`Total: ${s.documents} document(s), ${s.chunks} chunk(s)`)}\n`)
     } catch (err) {
-      console.error(`  Error: ${(err as Error).message}`)
+      console.error(`  ${chalk.red('✗')} ${chalk.red((err as Error).message)}`)
       process.exit(1)
     }
   })
@@ -89,7 +93,12 @@ program
         },
       })
 
-      if (options.index) await duct.index(options.index)
+      if (options.index) {
+        const spinner = ora({ text: `Indexing ${chalk.cyan(options.index)}...`, color: 'green' }).start()
+        await duct.index(options.index)
+        spinner.succeed('Indexed')
+      }
+
       const results = await duct.search(query, options.topK)
       if (results.length === 0) {
         if (options.json) {
@@ -97,24 +106,33 @@ program
           return
         }
         console.log(options.index
-          ? '  No results found.'
-          : '  No results. Index some documents first: duct index ./docs, or use --index')
+          ? `  ${chalk.yellow('No results found.')}`
+          : `  ${chalk.yellow('No results.')} ${chalk.dim('Index some documents first: duct index ./docs, or use --index')}`)
         return
       }
-      
+
       if (options.json) {
         console.log(JSON.stringify(results, null, 2))
         return
       }
-      
+
+      const scoreStyle = (s: number) => {
+        if (s > 0.7) return chalk.green(s.toFixed(2))
+        if (s > 0.4) return chalk.yellow(s.toFixed(2))
+        return chalk.red(s.toFixed(2))
+      }
+
+      console.log()
       for (const r of results) {
-        const heading = r.chunk.heading ? ` / ${r.chunk.heading}` : ''
-        console.log(`  [${r.score.toFixed(2)}] ${r.chunk.documentPath}${heading}`)
-        console.log(`  ${r.chunk.content.slice(0, 200).replace(/\n/g, ' ')}${r.chunk.content.length > 200 ? '...' : ''}`)
+        const heading = r.chunk.heading ? chalk.dim(` › ${r.chunk.heading}`) : ''
+        const file = r.chunk.documentPath
+        console.log(`  ${scoreStyle(r.score)}  ${chalk.cyan(file)}${heading}`)
+        const snippet = r.chunk.content.slice(0, 200).replace(/\n/g, ' ')
+        console.log(`       ${chalk.dim(snippet)}${r.chunk.content.length > 200 ? chalk.dim('...') : ''}`)
         console.log()
       }
     } catch (err) {
-      console.error(`  Error: ${(err as Error).message}`)
+      console.error(`  ${chalk.red('✗')} ${chalk.red((err as Error).message)}`)
       process.exit(1)
     }
   })
@@ -141,7 +159,11 @@ program
         llm: options.llm ? { provider: options.llm as 'ollama' | 'openai' | 'gemini', model: options.model, baseUrl: options.baseUrl } : undefined,
       })
 
-      if (options.index) await duct.index(options.index)
+      if (options.index) {
+        const spinner = ora({ text: `Indexing ${chalk.cyan(options.index)}...`, color: 'green' }).start()
+        await duct.index(options.index)
+        spinner.succeed('Indexed')
+      }
 
       if (options.answer === false) {
         const results = await duct.search(question, options.topK)
@@ -149,33 +171,32 @@ program
           console.log(JSON.stringify(results, null, 2))
           return
         }
-        console.log(`\n  Context for: "${question}"\n`)
+        console.log(`\n  ${chalk.bold(`Context for:`)} ${chalk.cyan(`"${question}"`)}\n`)
         for (const r of results) {
-          console.log(`  [${r.score.toFixed(2)}] ${r.chunk.documentPath}${r.chunk.heading ? ' > ' + r.chunk.heading : ''}`)
-          console.log(`  ${r.chunk.content.slice(0, 500)}`)
+          const heading = r.chunk.heading ? chalk.dim(` › ${r.chunk.heading}`) : ''
+          console.log(`  ${chalk.green(r.score.toFixed(2))}  ${chalk.cyan(r.chunk.documentPath)}${heading}`)
+          console.log(`       ${chalk.dim(r.chunk.content.slice(0, 500))}`)
           console.log()
         }
         return
       }
 
+      const spinner = ora({ text: 'Thinking...', color: 'yellow' }).start()
       const result = await duct.ask(question, options.topK)
-      if (options.json) {
-        console.log(JSON.stringify(result, null, 2))
-        return
-      }
-      
-      console.log(`\n  Searching for: "${question}"...`)
-      console.log(`\n  Answer (${result.time}ms):\n`)
-      console.log(`  ${result.answer}\n`)
+      spinner.succeed(chalk.dim(`Answer in ${result.time}ms`))
+
+      console.log(`\n  ${result.answer}\n`)
+
       if (result.sources.length > 0) {
-        console.log(`  Sources:`)
+        console.log(`  ${chalk.bold('Sources:')}`)
         for (const s of result.sources) {
-          console.log(`    [${s.score.toFixed(2)}] ${s.documentPath}${s.heading ? ' > ' + s.heading : ''}`)
+          const heading = s.heading ? chalk.dim(` › ${s.heading}`) : ''
+          console.log(`    ${chalk.green(s.score.toFixed(2))}  ${chalk.cyan(s.documentPath)}${heading}`)
         }
         console.log()
       }
     } catch (err) {
-      console.error(`  Error: ${(err as Error).message}`)
+      console.error(`  ${chalk.red('✗')} ${chalk.red((err as Error).message)}`)
       process.exit(1)
     }
   })
@@ -197,12 +218,12 @@ program
         embed: options.embed ? { provider: options.embed as 'openai' | 'gemini' } : undefined,
       })
 
-      console.log(`  Watching ${dirs.length} director(ies) for changes...`)
-      console.log(`  Press Ctrl+C to stop.\n`)
+      console.log(`  ${chalk.green('✓')} Watching ${chalk.bold(String(dirs.length))} director(ies) for changes...`)
+      console.log(`  ${chalk.dim('  Press Ctrl+C to stop.')}\n`)
 
       duct.watch(dirs, () => {
         const s = duct.stats()
-        console.log(`  Indexed. Total: ${s.documents} docs, ${s.chunks} chunks`)
+        console.log(`  ${chalk.green('✓')} Indexed. ${chalk.dim(`Total: ${s.documents} docs, ${s.chunks} chunks`)}`)
       })
 
       let shuttingDown = false
@@ -211,7 +232,7 @@ program
         shuttingDown = true
         duct.unwatch()
         const s = duct.stats()
-        console.log(`\n  Stopped. Total: ${s.documents} docs, ${s.chunks} chunks`)
+        console.log(`\n  ${chalk.yellow('Stopped.')} ${chalk.dim(`Total: ${s.documents} docs, ${s.chunks} chunks`)}`)
         process.exit(0)
       }
       process.on('SIGINT', shutdown)
@@ -219,7 +240,7 @@ program
 
       await new Promise(() => {})
     } catch (err) {
-      console.error(`  Error: ${(err as Error).message}`)
+      console.error(`  ${chalk.red('✗')} ${chalk.red((err as Error).message)}`)
       process.exit(1)
     }
   })
@@ -245,23 +266,31 @@ program
         llm: options.llm ? { provider: options.llm as 'ollama' | 'openai' | 'gemini', model: options.model } : undefined,
       })
 
-      if (options.index) await duct.index(options.index)
+      if (options.index) {
+        const spinner = ora({ text: `Indexing ${chalk.cyan(options.index)}...`, color: 'green' }).start()
+        await duct.index(options.index)
+        spinner.succeed('Indexed')
+      }
 
-      console.log(`  Extracting ${parsedFields.map(f => f.name).join(', ')}...`)
+      const spinner = ora({ text: `Extracting ${chalk.bold(parsedFields.map(f => f.name).join(', '))}...`, color: 'yellow' }).start()
       const results = await duct.extractSchema(parsedFields)
+      spinner.succeed('Done')
+
       if (options.json) {
         console.log(JSON.stringify(results, null, 2))
       } else {
+        const maxNameLen = Math.max(...parsedFields.map(f => f.name.length), 0)
         for (const r of results) {
-          console.log(`\n  ${r.path}`)
+          console.log(`\n  ${chalk.cyan(r.path)}`)
           for (const [key, val] of Object.entries(r.fields)) {
-            console.log(`    ${key}: ${val ?? '(not found)'}`)
+            const padded = key.padEnd(maxNameLen)
+            console.log(`    ${chalk.dim(padded)}  ${val ?? chalk.dim('(not found)')}`)
           }
         }
         console.log()
       }
     } catch (err) {
-      console.error(`  Error: ${(err as Error).message}`)
+      console.error(`  ${chalk.red('✗')} ${chalk.red((err as Error).message)}`)
       process.exit(1)
     }
   })
@@ -276,25 +305,25 @@ program
       const duct = new Duct({ persistPath: options.persist })
       const d = await duct.diff(path)
       if (!d) {
-        console.log('  No version history found for this document. Re-index it to create versions.')
+        console.log(`  ${chalk.yellow('No version history found.')} ${chalk.dim('Re-index the document to create versions.')}`)
         return
       }
-      console.log(`\n  Changes in "${d.path}" (v${d.versionA} → v${d.versionB}):\n`)
+      console.log(`\n  ${chalk.bold('Changes in')} ${chalk.cyan(d.path)} ${chalk.dim(`(v${d.versionA} → v${d.versionB})`)}\n`)
       if (d.additions.length > 0) {
-        console.log('  Added lines:')
-        for (const line of d.additions) console.log(`    + ${line.slice(0, 120)}`)
+        console.log(`  ${chalk.green('Added:')}`)
+        for (const line of d.additions) console.log(`    ${chalk.green('+')} ${line.slice(0, 120)}`)
         console.log()
       }
       if (d.removals.length > 0) {
-        console.log('  Removed lines:')
-        for (const line of d.removals) console.log(`    - ${line.slice(0, 120)}`)
+        console.log(`  ${chalk.red('Removed:')}`)
+        for (const line of d.removals) console.log(`    ${chalk.red('-')} ${line.slice(0, 120)}`)
         console.log()
       }
       if (d.additions.length === 0 && d.removals.length === 0) {
-        console.log('  No significant text changes detected.')
+        console.log(`  ${chalk.dim('No significant text changes detected.')}`)
       }
     } catch (err) {
-      console.error(`  Error: ${(err as Error).message}`)
+      console.error(`  ${chalk.red('✗')} ${chalk.red((err as Error).message)}`)
       process.exit(1)
     }
   })
@@ -329,22 +358,19 @@ program
       const token = options.authToken || process.env['DUCT_AUTH_TOKEN']
       const server = createServer(duct, { authToken: token, uploadLimitMb: options.uploadLimit })
       server.listen(options.port, () => {
-        console.log(`\n  Duct server running at http://localhost:${options.port}`)
-        if (token) console.log(`  Auth: token required`)
-        console.log(`  Upload limit: ${options.uploadLimit} MB`)
-        console.log(`  Embedding: ${duct['embedder'] ? 'enabled' : 'disabled (keyword search only)'}`)
-        console.log(`  LLM: ${duct['llmProvider'] ? duct['llmProvider']!.name : 'none (configure in settings)'}`)
-        console.log(`  Search: ${options.searchMode || 'bm25'}${options.alpha ? ' (alpha=' + options.alpha + ')' : ''}\n`)
+        console.log(`\n  ${chalk.green('✓')} ${chalk.bold('Duct server running at')} ${chalk.cyan(`http://localhost:${options.port}`)}`)
+        if (token) console.log(`    ${chalk.dim('Auth:')} token required`)
+        console.log(`    ${chalk.dim('Upload limit:')} ${options.uploadLimit} MB`)
+        console.log(`    ${chalk.dim('Embedding:')} ${duct['embedder'] ? chalk.green('enabled') : chalk.dim('disabled (keyword search only)')}`)
+        const llmName = duct['llmProvider'] ? duct['llmProvider']!.name : 'none'
+        console.log(`    ${chalk.dim('LLM:')} ${llmName === 'none' ? chalk.dim('none (configure in settings)') : chalk.green(llmName)}`)
+        const mode = options.searchMode || 'bm25'
+        console.log(`    ${chalk.dim('Search:')} ${mode}${options.alpha ? chalk.dim(` (alpha=${options.alpha})`) : ''}\n`)
       })
     } catch (err) {
-      console.error(`  Error: ${(err as Error).message}`)
+      console.error(`  ${chalk.red('✗')} ${chalk.red((err as Error).message)}`)
       process.exit(1)
     }
   })
-
-function result(duct: Duct) {
-  const s = duct.stats()
-  console.log(`\n  Total: ${s.documents} document(s), ${s.chunks} chunk(s)\n`)
-}
 
 program.parse()
