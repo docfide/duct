@@ -655,7 +655,7 @@ function renderResults() {
       '<div class="result-main"><div class="result-title"><span class="name">' + esc(fileName(c.documentPath)) + '</span>' +
       (c.page ? '<span class="where">' + esc(pageRef(c)) + '</span>' : '') +
       (c.heading ? '<span class="section">› ' + esc(c.heading) + '</span>' : '') + '</div>' +
-      '<div class="folder">' + esc(folder) + '</div>' +
+      (c.metadata && c.metadata.whatsappChat ? whatsappLine(c.metadata) : '<div class="folder">' + esc(folder) + '</div>') +
       (r.why ? '<div class="why" hidden>' + whyText(r) + '</div>' : '') +
       '<div class="snippet">' + (r.snippet ? markSnippet(r.snippet) : highlight(c.content.slice(0, 260), terms(r))) + '</div>' +
       '<div class="result-actions"><button class="btn btn-sm btn-primary" data-act="open">' + (link ? 'Open link' : c.page ? 'Open at ' + esc(pageRef(c)) : 'Open') + '</button>' +
@@ -966,6 +966,29 @@ async function uploadFiles(files) {
 }
 
 $('#fileInput').addEventListener('change', e => { uploadFiles(e.target.files); e.target.value = '' })
+
+$('#whatsappInput').addEventListener('change', async e => {
+  const file = e.target.files[0]
+  e.target.value = ''
+  if (!file) return
+  toast('Reading the WhatsApp chat…')
+  const form = new FormData()
+  form.append('file', file)
+  try {
+    const res = await api('/api/whatsapp', { method: 'POST', body: form })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status)
+    toast('Added “' + data.chat + '”: ' + plural(data.messages, 'message') + ' and ' + plural(data.attachments, 'file') + (data.skipped ? ' (' + data.skipped + ' voice notes, stickers or other files left out)' : ''))
+    refreshAll()
+  } catch (err) { toast(err.message, true) }
+})
+
+/** "WhatsApp · from Chidi Okafor in Okafor Holdings · 8 Mar 2026" */
+function whatsappLine(meta) {
+  if (!meta || !meta.whatsappChat) return ''
+  const when = meta.whatsappSentAt ? new Date(meta.whatsappSentAt).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : ''
+  return '<div class="wa-line">WhatsApp' + (meta.whatsappSender ? ' · from ' + esc(meta.whatsappSender) + ' in ' + esc(meta.whatsappChat) : ' · ' + esc(meta.whatsappChat)) + (when ? ' · ' + esc(when) : '') + '</div>'
+}
 
 async function watchFolder() {
   if (desktop && desktop.watchDirectory) {
@@ -1539,6 +1562,8 @@ const ACTIONS = {
   'add-files': () => { closeAddMenu(); $('#fileInput').click() },
   'watch-folder': () => { closeAddMenu(); watchFolder() },
   'add-url': () => { closeAddMenu(); $('#urlDialog').showModal() },
+  'add-whatsapp': () => { closeAddMenu(); $('#whatsappDialog').showModal() },
+  'pick-whatsapp': () => { $('#whatsappDialog').close(); $('#whatsappInput').click() },
   'toggle-add': () => { const menu = $('#addMenu'); menu.hidden = !menu.hidden; $('[data-action="toggle-add"]').setAttribute('aria-expanded', String(!menu.hidden)) },
   'open-settings': el => openSettings(el.dataset.tab || 'general'),
   'skip-welcome': () => { rememberWelcome(); showApp() },

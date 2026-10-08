@@ -369,3 +369,8 @@ dialog::backdrop { background: rgba(0,0,0,.55); }
 .try-label { font-size: 12px; color: var(--muted); margin-right: 2px; }
 .try-chip { font: inherit; font-size: 13px; color: var(--body); background: var(--s2); border: 1px solid var(--border2); border-radius: 999px; padding: 4px 12px; cursor: pointer; }
 .try-chip:hover { border-color: var(--lime); color: var(--text); }
+
+/* WhatsApp */
+.wa-line { font-size: 11.5px; color: #4fce5d; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.steps-list { margin: 8px 0 10px 18px; padding: 0; color: var(--body); font-size: 13.5px; line-height: 1.6; }
+.steps-list li { margin: 3px 0; }

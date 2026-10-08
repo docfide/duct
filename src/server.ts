@@ -25,6 +25,7 @@ import type { ConnectorManager } from './connectors/manager.js'
 import type { S3Credentials } from './connectors/sources.js'
 import { callbackPage } from './connectors/oauth.js'
 import { currentLedger, LEDGER_CATEGORY_LABELS } from './ledger.js'
+import { importWhatsApp } from './whatsapp.js'
 import type { OidcLogin } from './oidc.js'
 import { clearCrashes, collectDiagnostics, listCrashes, sendFeedback, validateFeedback } from './diagnostics.js'
 import { Collections } from './api/collections.js'
@@ -580,6 +581,31 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
       } catch (err) {
         for (const file of files) { try { if (existsSync(file.path)) unlinkSync(file.path) } catch {} }
         res.status(500).json({ error: (err as Error).message })
+      }
+    })
+  })
+
+  // WhatsApp: an exported chat (.zip with media, or the chat .txt). Exports with photos and documents are large,
+  // so these get their own size limit.
+  const whatsappUpload = multer({
+    storage,
+    limits: { fileSize: Math.max(maxMb, 1024) * 1024 * 1024 },
+    fileFilter: (_req, file, cb) => /\.(zip|txt)$/i.test(file.originalname) ? cb(null, true) : cb(new Error('Choose the .zip (or .txt) that WhatsApp’s Export chat made.')),
+  })
+  app.post('/api/whatsapp', (req, res) => {
+    if (!duct.getFeatures().uploads) { sendError(res, new FeatureDisabledError('uploads')); return }
+    whatsappUpload.single('file')(req, res, async (err) => {
+      const file = req.file
+      try {
+        if (err) { res.status(err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ error: err.message }); return }
+        if (!file) { res.status(400).json({ error: 'No file uploaded.' }); return }
+        const result = await importWhatsApp(duct, libraryDir, file.path, file.originalname)
+        audit(res, 'upload', `WhatsApp: ${result.chat}`)
+        res.json(result)
+      } catch (e) {
+        sendError(res, e, (e as { status?: number }).status ?? 500)
+      } finally {
+        if (file) { try { if (existsSync(file.path)) unlinkSync(file.path) } catch {} }
       }
     })
   })

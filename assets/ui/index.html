@@ -81,6 +81,7 @@
             <button role="menuitem" data-action="add-files"><strong>Add files to your Library</strong><span>Copied to your Duct Library and indexed</span></button>
             <button role="menuitem" data-action="watch-folder" data-requires="watch"><strong>Watch a folder</strong><span>Indexed where it is and kept in sync</span></button>
             <button role="menuitem" data-action="add-url"><strong>Add a web page</strong><span>Index the text of a public page</span></button>
+            <button role="menuitem" data-action="add-whatsapp"><strong>Add a WhatsApp chat</strong><span>The messages and every file in it, with who sent what</span></button>
           </div>
         </div>
         <button class="icon-btn" data-action="open-settings" aria-label="Settings" title="Settings">⚙</button>
@@ -340,6 +341,23 @@
     </form>
   </dialog>
 
+  <dialog id="whatsappDialog" class="small-dialog" aria-labelledby="whatsappTitle">
+    <form method="dialog">
+      <h2 id="whatsappTitle">Add a WhatsApp chat</h2>
+      <ol class="steps-list">
+        <li>On your phone, open the chat in WhatsApp.</li>
+        <li>Tap the chat’s name (iPhone) or ⋮ › More (Android), then <strong>Export chat</strong> › <strong>Attach media</strong>.</li>
+        <li>Send the .zip to this computer: email it to yourself, AirDrop it, or save it to Drive.</li>
+        <li>Choose it here. Exporting the chat again later updates it.</li>
+      </ol>
+      <p class="hint">Duct reads the export on this computer. Nothing is sent anywhere, and Duct never opens WhatsApp itself.</p>
+      <div class="dialog-actions">
+        <button class="btn btn-ghost" value="cancel">Cancel</button>
+        <button class="btn btn-primary" type="button" data-action="pick-whatsapp">Choose the export</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="collectDialog" class="collect-dialog" aria-labelledby="collectTitle">
     <form method="dialog" class="settings-head">
       <h2 id="collectTitle">Collected passages</h2>
@@ -381,6 +399,7 @@
   </dialog>
 
   <input type="file" id="fileInput" multiple hidden>
+  <input type="file" id="whatsappInput" accept=".zip,.txt" hidden>
   <div class="drop-overlay" id="dropOverlay" hidden><div>Drop to add to your Library</div></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 </body>

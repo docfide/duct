@@ -1,5 +1,6 @@
+import { chatSections, chatTitle, isChatFileName, parseWhatsAppChat } from '../whatsapp-chat.js'
 import { readFileSync, statSync } from 'node:fs'
-import { extname } from 'node:path'
+import { basename, extname } from 'node:path'
 import type { ExtractedDocument, DocumentFormat } from '../types.js'
 import { formatForPath } from '../formats.js'
 import { ocrPdf } from '../ocr/index.js'
@@ -83,6 +84,14 @@ function subtitleText(raw: string): string {
 
 async function extractText(path: string): Promise<ExtractedDocument> {
   const raw = decodeText(readFileSync(path))
+  // An exported WhatsApp chat: one section per day, so results say "8 March 2026".
+  if (isChatFileName(basename(path))) {
+    const messages = parseWhatsAppChat(raw)
+    if (messages.length) {
+      const sections = chatSections(messages)
+      return { path, format: 'txt', content: sections.map(s => s.text).join('\n\n'), sections, metadata: { size: raw.length, title: chatTitle(basename(path)) ?? null } }
+    }
+  }
   const ext = extname(path).toLowerCase()
   const content = ext === '.srt' || ext === '.vtt' ? subtitleText(raw) : raw
   return { path, format: 'txt', content, metadata: { size: raw.length } }

@@ -503,3 +503,14 @@ A first look at the library, worked out on this computer from each document's na
 ```
 
 Kinds: `invoice`, `receipt`, `statement`, `cv`, `contract`, `proposal`, `minutes`, `policy`, `letter`, `report`, and by format `slides`, `sheets`, `email`, `scans`. A document counts once. Every suggestion finds at least one result.
+
+
+## `POST /api/whatsapp`
+
+Adds a chat exported with WhatsApp's **Export chat** (with media): multipart field `file`, the `.zip` (or the chat `.txt` alone). It's stored in the Library under `WhatsApp/<chat>/`, replacing an earlier import of the same chat.
+
+```json
+{ "chat": "Okafor Holdings", "messages": 412, "attachments": 23, "skipped": 9, "dir": "/Users/ada/Duct Library/WhatsApp/Okafor Holdings" }
+```
+
+The conversation is one document with a section per day. Each attachment has the metadata `whatsappChat`, `whatsappSender` and `whatsappSentAt` (ISO time), its display name is `<file> · from <sender>`, and its modified time is when it was sent. `skipped` counts files Duct doesn't read (voice notes, stickers). The size limit is 1 GB or `--upload-limit`, whichever is larger.
