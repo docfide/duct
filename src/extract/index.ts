@@ -104,8 +104,9 @@ async function extractSvg(path: string): Promise<ExtractedDocument> {
 
 /** Excel (.xlsx, .xlsm, .xls, .xlsb) and OpenDocument spreadsheets; each sheet is a "page". */
 async function extractSpreadsheet(path: string, format: DocumentFormat): Promise<ExtractedDocument> {
-  const XLSX = (await import('xlsx')).default
-  const workbook = XLSX.readFile(path, { cellDates: true })
+  const XLSX = await import('xlsx')
+  // SheetJS 0.20's ES module doesn't touch the file system itself: hand it the bytes.
+  const workbook = XLSX.read(readFileSync(path), { type: 'buffer', cellDates: true })
   const sheets: string[] = []
   for (const sheetName of workbook.SheetNames) {
     const rows = XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[sheetName], { header: 1, raw: false })

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- Spreadsheets are read with SheetJS 0.20.3 (fixes the prototype-pollution and ReDoS advisories in 0.18.5); pdf.js 6 and sharp 0.35.5 also clear their advisories.
 - `duct serve` listens on `127.0.0.1` by default and refuses other interfaces without `--auth-token`. It accepts only expected `Host` headers, rejects cross-origin writes, and sends a Content-Security-Policy.
 - The API no longer indexes local paths sent as URLs, never indexes files without a supported extension, and only deletes files that Duct stored in its Library.
 - `POST /api/watch` only accepts folders under `--watch-root`; the desktop app picks folders with the native dialog instead.

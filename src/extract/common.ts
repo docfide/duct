@@ -90,7 +90,8 @@ export async function readPdfDocument(buffer: Buffer): Promise<{ pages: string[]
   const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs')
   // pdf.js takes ownership of the bytes it is given, so pass a copy.
   const data = new Uint8Array(buffer)
-  const pdf = await getDocument({ data, verbosity: 0 }).promise
+  const task = getDocument({ data, verbosity: 0 })
+  const pdf = await task.promise
   try {
     const pages: string[] = []
     for (let i = 1; i <= pdf.numPages; i++) {
@@ -106,7 +107,8 @@ export async function readPdfDocument(buffer: Buffer): Promise<{ pages: string[]
     } catch {}
     return { pages, details }
   } finally {
-    await pdf.destroy()
+    // pdf.js 6 frees a document through its loading task.
+    await task.destroy()
   }
 }
 
