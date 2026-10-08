@@ -142,7 +142,7 @@
     "cli",
     "pipeline"
   ],
-  "author": "Tensflare Inc.",
+  "author": "Tensflare Ltd",
   "license": "Apache-2.0",
   "engines": {
     "node": ">=22.13"
