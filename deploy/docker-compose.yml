@@ -7,7 +7,7 @@
 
 services:
   duct:
-    image: ${DUCT_IMAGE:-ghcr.io/tensflare/duct:latest}
+    image: ${DUCT_IMAGE:-ghcr.io/docfide/duct:v1.0.0-alpha.1}
     build: ..
     restart: unless-stopped
     env_file: .env

@@ -19,7 +19,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      - run: npm publish --provenance
+      # Prereleases (1.0.0-alpha.1…) go to the "next" tag, so `npm install @docfide/duct` keeps getting the stable version.
+      - run: npm publish --provenance --tag ${{ github.event.release.prerelease && 'next' || 'latest' }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -39,4 +40,5 @@ jobs:
       - uses: docker/build-push-action@v5
         with:
           push: true
-          tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }},ghcr.io/${{ github.repository }}:latest
+          # :latest only moves for stable releases; prereleases get their own tag and :next.
+          tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }},ghcr.io/${{ github.repository }}:${{ github.event.release.prerelease && 'next' || 'latest' }}

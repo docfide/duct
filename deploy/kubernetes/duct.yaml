@@ -36,7 +36,7 @@ spec:
         fsGroup: 1000
       containers:
         - name: duct
-          image: ghcr.io/tensflare/duct:latest
+          image: ghcr.io/docfide/duct:v1.0.0-alpha.1
           args:
             - serve
             - --host=0.0.0.0

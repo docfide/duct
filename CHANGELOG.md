@@ -7,8 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-- The Docker image keeps its data in `/data` (`DUCT_HOME`) and runs as the unprivileged `node` user.
+## [1.0.0-alpha.1] - 2026-10-08
+
+Duct 1.0 turns the search library into a product family: the desktop app, a team server you can run in your own cloud, the developer API with its clients, and Tensflare accounts for paid plans (hosted AI, sync, connectors, team sign-in). This alpha is for testers; 1.0.0 follows once payments, identity providers, Docker images and Windows and Linux builds are verified.
+
+### Upgrading from 0.2
+- Requires Node.js 22.13 or later.
+- Indexes from 0.2 are migrated on first start, and their documents are re-read in the background. The CLI keeps one index in `$DUCT_HOME` or `~/.duct`.
+- `duct serve` listens on `127.0.0.1` by default. Any other `--host` needs `--auth-token` or sign-in (`--oidc-issuer`).
+- `POST /api/watch` only accepts folders under `--watch-root`, and the API only deletes files Duct stored in its Library.
+- Docker: the image keeps its data in `/data` (`DUCT_HOME`) and runs as the unprivileged `node` user (uid 1000). Move a volume that was mounted elsewhere to `/data`, and make it writable by uid 1000 (`chown -R 1000:1000`).
 
 ### Security
 - Spreadsheets are read with SheetJS 0.20.3 (fixes the prototype-pollution and ReDoS advisories in 0.18.5); pdf.js 6 and sharp 0.35.5 also clear their advisories.

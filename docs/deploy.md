@@ -103,7 +103,7 @@ Each entry records who did it, their role, the time and the document involved. B
 ## Backups and upgrades
 
 - **Back up:** everything Duct keeps is in the data volume (`/data`). Back it up with your usual volume snapshots. To copy it consistently, stop the container first (`docker compose stop duct`).
-- **Upgrade:** pull the new image and recreate the container: `docker compose pull && docker compose up -d`. In Kubernetes, change the image tag. Duct migrates its database on start.
+- **Upgrade:** set `DUCT_IMAGE` to the new release tag, then `docker compose pull && docker compose up -d`. In Kubernetes, change the image tag. Duct migrates its database on start. Images are at `ghcr.io/docfide/duct`: `:latest` is the newest stable release and `:next` the newest prerelease.
 - **Restore:** put the volume back and start Duct.
 
 ## Also possible
