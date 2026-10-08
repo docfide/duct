@@ -1120,11 +1120,22 @@ async function renderAccount() {
     return
   }
   const until = a.expiresAt ? new Date(a.expiresAt).toLocaleDateString() : ''
+  let bill = null
+  try { bill = await json('/api/account/billing') } catch {}
+  const sub = bill && bill.subscription
+  const day = iso => iso ? new Date(iso).toLocaleDateString() : ''
+  const billingHtml = sub
+    ? '<p class="hint">' + (sub.status === 'past_due' ? '<strong>Your last payment didn’t go through.</strong> Update your payment method to keep your plan.'
+      : sub.renews ? 'Renews on ' + esc(day(sub.period_end)) + ' for ' + esc(sub.price) + (sub.interval === 'year' ? ' a year' : ' a month') + '.'
+      : 'Ends on ' + esc(day(sub.period_end)) + '. It won’t renew.') + (sub.plan === 'team' ? ' ' + esc(String(sub.seats)) + ' seats.' : '') + '</p>' +
+      (bill.invoices.length ? '<p class="hint">Last payment: ' + esc(bill.invoices[0].amount) + ' on ' + esc(day(bill.invoices[0].date)) + (bill.invoices[0].status !== 'paid' ? ' (' + esc(bill.invoices[0].status) + ')' : '') + '</p>' : '')
+    : ''
   box.innerHTML = '<div class="account-card"><span class="plan">' + esc(a.plan) + '</span><strong>' + esc(a.email || 'Signed in') + '</strong>' +
     (a.needsReconnect ? '<p class="notice">Connect to the internet to keep paid features working. Everything local still works.</p>' : '') +
     (a.entitlements.length ? '<ul>' + a.entitlements.map(e => '<li>' + esc(ENTITLEMENT_LABELS[e] || e) + '</li>').join('') + '</ul>' : '<p class="hint">Your plan is Free. Everything local is included.</p>') +
-    (until && !a.needsReconnect ? '<p class="hint">Paid features keep working offline until ' + esc(until) + '.</p>' : '') +
-    '<div><button class="btn" data-action="account-signout">Sign out</button></div></div>'
+    (until && !a.needsReconnect ? '<p class="hint">Paid features keep working offline until ' + esc(until) + '.</p>' : '') + billingHtml +
+    '<div class="about-actions">' + (sub ? '<button class="btn btn-primary" data-action="account-portal" data-next="/account">Manage plan and billing</button>' : '<button class="btn btn-primary" data-action="account-portal" data-next="/account/upgrade">Upgrade</button><button class="btn" data-action="account-portal" data-next="/account">Account settings</button>') +
+    '<button class="btn" data-action="account-signout">Sign out</button></div></div>'
 }
 
 async function renderTelemetry() {
@@ -1275,6 +1286,12 @@ const ACTIONS = {
   },
   'account-signin': async () => {
     try { await send('POST', '/api/account/signin', {}); renderAccount() } catch (err) { toast(err.message, true) }
+  },
+  'account-portal': async el => {
+    try {
+      const { url } = await send('POST', '/api/account/portal', { next: el.dataset.next || '/account' })
+      window.open(url, '_blank', 'noopener')
+    } catch (err) { toast(err.message, true) }
   },
   'account-signout': async () => {
     if (!confirm('Sign out of Tensflare on this device?\n\nEverything local keeps working.')) return

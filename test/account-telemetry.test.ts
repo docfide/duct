@@ -143,6 +143,10 @@ function fakeAccounts() {
       res.writeHead(200).end()
     } else if (url.pathname === '/.well-known/jwks.json') {
       json(200, { keys: [jwk] })
+    } else if (url.pathname === '/v1/billing') {
+      json(req.headers.authorization === 'Bearer access' ? 200 : 401, { subscription: { plan: state.plan, interval: 'year', seats: 1, currency: 'NGN', status: 'active', renews: true, period_end: '2027-10-08T00:00:00Z', price: '₦72,000' }, refundable: true, invoices: [] })
+    } else if (url.pathname === '/v1/web-login') {
+      json(200, { url: `${base}/account/continue?token=once&next=${JSON.parse(body).next}` })
     } else if (url.pathname === '/v1/me') {
       json(200, { id: 'acct_1', email: 'ada@example.com' })
     } else if (url.pathname === '/v1/entitlements') {
@@ -218,6 +222,13 @@ describe('Sign in with Tensflare', () => {
     fake.state.refresh.clear()
     expect((await a.refresh(true)).signedIn).toBe(false)
     fake.state.plan = 'pro'
+  })
+
+  it('loads billing and makes a one-time link to the account website', async () => {
+    const a = account()
+    await a.signIn()
+    expect((await a.billing()).subscription).toMatchObject({ plan: 'pro', price: '₦72,000', renews: true })
+    expect(await a.webLink('/account/upgrade')).toBe(`${base}/account/continue?token=once&next=/account/upgrade`)
   })
 
   it('revokes the session on sign out', async () => {

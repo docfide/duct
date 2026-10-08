@@ -65,6 +65,12 @@ export interface AccountStatus {
   needsReconnect?: boolean
 }
 
+export interface BillingSummary {
+  subscription: { plan: string; interval: string; seats: number; currency: string; status: string; renews: boolean; period_end: string | null; price: string } | null
+  refundable: boolean
+  invoices: { date: string; amount: string; status: string }[]
+}
+
 export interface AccountOptions {
   storage: AccountStorage
   /** https://accounts.tensflare.com (sign-in, tokens, keys). */
@@ -113,6 +119,8 @@ export class TensflareAccount {
   private fetchImpl: typeof fetch
   private now: () => number
   private pending: Promise<AccountStatus> | null = null
+  /** A short-lived access token kept in memory only (refresh tokens rotate on every use). */
+  private access: { token: string; expiresAt: number } | null = null
 
   constructor(opts: AccountOptions) {
     this.accountsUrl = (opts.accountsUrl ?? process.env['DUCT_ACCOUNTS_URL'] ?? 'https://accounts.tensflare.com').replace(/\/+$/, '')
@@ -201,6 +209,7 @@ export class TensflareAccount {
   async signOut(): Promise<void> {
     const state = this.storage.load()
     this.storage.save(null)
+    this.access = null
     if (!state) return
     try {
       await this.fetchImpl(`${this.accountsUrl}/oauth/revoke`, {
@@ -228,11 +237,47 @@ export class TensflareAccount {
     // The old refresh token is now spent: save the new one before anything else can fail.
     const next: AccountState = { ...state, refreshToken: tokens.refresh_token }
     this.storage.save(next)
+    this.access = { token: tokens.access_token, expiresAt: this.now() + 55 * 60_000 }
     try {
       await this.loadProfile(next, tokens.access_token)
       this.storage.save(next)
     } catch {}
     return this.status()
+  }
+
+  /** An access token for the account API, refreshing (and rotating the refresh token) when needed. */
+  async accessToken(): Promise<string> {
+    if (this.access && this.access.expiresAt > this.now() + 60_000) return this.access.token
+    const state = this.storage.load()
+    if (!state) throw new Error('Not signed in')
+    let tokens: { access_token: string; refresh_token: string }
+    try {
+      tokens = await this.token({ grant_type: 'refresh_token', refresh_token: state.refreshToken })
+    } catch (err) {
+      if ((err as { oauth?: string }).oauth === 'invalid_grant') this.storage.save(null)
+      throw err
+    }
+    this.storage.save({ ...state, refreshToken: tokens.refresh_token })
+    this.access = { token: tokens.access_token, expiresAt: this.now() + 55 * 60_000 }
+    return tokens.access_token
+  }
+
+  /** Plan, renewal and recent payments, for Settings › Account. */
+  async billing(): Promise<BillingSummary> {
+    const res = await this.fetchImpl(`${this.apiUrl}/v1/billing`, { headers: { Authorization: `Bearer ${await this.accessToken()}` }, signal: AbortSignal.timeout(15_000) })
+    if (!res.ok) throw new Error(`Couldn’t load billing (HTTP ${res.status})`)
+    return res.json() as Promise<BillingSummary>
+  }
+
+  /** A one-time link that opens the account website signed in, at `next` (e.g. /account/upgrade). */
+  async webLink(next = '/account'): Promise<string> {
+    const res = await this.fetchImpl(`${this.apiUrl}/v1/web-login`, {
+      method: 'POST', headers: { Authorization: `Bearer ${await this.accessToken()}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ next }), signal: AbortSignal.timeout(15_000),
+    })
+    const body = await res.json().catch(() => ({})) as { url?: string }
+    if (!res.ok || !body.url || !body.url.startsWith(this.accountsUrl + '/account/')) throw new Error('Couldn’t open your account page')
+    return body.url
   }
 
   private async token(params: Record<string, string>): Promise<{ access_token: string; refresh_token: string }> {

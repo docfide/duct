@@ -319,6 +319,18 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     res.status(202).json({ started: true })
   })
 
+  app.get('/api/account/billing', async (_req, res) => {
+    if (!account || !account.status().signedIn) { res.json({ subscription: null, refundable: false, invoices: [] }); return }
+    try { res.json(await account.billing()) } catch (err) { res.status(502).json({ error: (err as Error).message }) }
+  })
+
+  // Opens the account website signed in: billing, plan changes, team, devices. Only these pages are allowed.
+  app.post('/api/account/portal', adminOnly, async (req, res) => {
+    if (!account) { res.status(404).json({ error: 'Accounts are not available on this server.' }); return }
+    const next = ['/account', '/account/upgrade', '/account/change', '/account/cancel', '/account/refund'].includes(req.body?.next) ? req.body.next : '/account'
+    try { res.json({ url: await account.webLink(next) }) } catch (err) { res.status(502).json({ error: (err as Error).message }) }
+  })
+
   app.post('/api/account/signout', adminOnly, async (_req, res) => {
     if (account) await account.signOut()
     signIn = { running: false }
