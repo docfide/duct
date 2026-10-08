@@ -262,6 +262,31 @@ API keys are applied to the runtime environment — they are not persisted to di
 
 ---
 
+## `GET /api/features` / `PUT /api/features`
+
+Which features are switched on. Everything is on by default; `PUT` (admin only) switches some off and saves the change with the index.
+
+```bash
+curl -X PUT localhost:3456/api/features -H 'Content-Type: application/json' \
+  -d '{"ask": false, "webPages": false, "formats": {"image": false, "archive": false}}'
+```
+
+| Name | When off |
+|------|----------|
+| `ask` | `POST /api/ask` answers 403 |
+| `semanticSearch` | no embeddings are made or used; search is keyword-only |
+| `schemaExtraction` | `POST /api/extract` answers 403 |
+| `fileNameSearch` | file names are no longer matched |
+| `webPages` | `POST /api/index` with a `url` answers 403 |
+| `uploads` | file uploads to `POST /api/index` answer 403 |
+| `watchedFolders` | watching pauses (folders are remembered); `POST /api/watch` answers 403 |
+| `ocrOnDemand` | `POST /api/ocr` answers 403 |
+| `export` | `GET /api/export` answers 403 |
+| `diff` | `GET /api/diff` answers 403 |
+| `formats.<family>` | files of that family (`document`, `spreadsheet`, `presentation`, `ebook`, `email`, `text`, `code`, `image`, `archive`) are skipped when indexing and hidden from search |
+
+A refused request answers `403 {"error": "…", "feature": "ask"}`. `GET /api/info` also carries `features`.
+
 ## `GET /api/stats`
 
 Get document and chunk counts.

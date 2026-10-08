@@ -539,7 +539,10 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
     if (!files.length) return
     const r = (await api.addFiles(files)) || {}
     const unsupported = r.unsupported || []
-    if (unsupported.length || r.failed) {
+    if (r.error) {
+      sound('oops')
+      showNotice({ pose: 'needsHand', title: "I can't add those right now", sub: r.error })
+    } else if (unsupported.length || r.failed) {
       sound('oops')
       const exts = [...new Set(unsupported.map(n => (n.match(/\.[^.]+$/) || ['these'])[0].toLowerCase()))]
       showNotice(unsupported.length

@@ -147,6 +147,58 @@ function groupFormats(id) {
   return id === 'web' ? ['url'] : formats
 }
 
+// What each switch in Settings > Features does. Names match src/features.ts.
+const FEATURE_GROUPS = [
+  { title: 'Search and AI', items: [
+    ['ask', 'Ask (Labs)', 'Answers written by an AI model from your documents, with sources.'],
+    ['semanticSearch', 'Search by meaning', 'Uses an embedding model. Off: no passages are sent to an embedding provider.'],
+    ['fileNameSearch', 'Match file names', 'Find documents by their name as well as their text.'],
+    ['schemaExtraction', 'Field extraction', 'Pull fields such as dates and amounts out of documents with an AI model (API and command line).'],
+  ] },
+  { title: 'Adding documents', items: [
+    ['uploads', 'Add files', 'Copy files into your Duct Library, from the app or the API.'],
+    ['watchedFolders', 'Watched folders', 'Index folders where they are and keep them in sync. Off: watching pauses; folders are remembered.'],
+    ['webPages', 'Web pages', 'Index the text of a page by its address.'],
+    ['ocrOnDemand', 'Read a scan on request', 'The “Read with OCR” button for documents with no text.'],
+  ] },
+  { title: 'Results', items: [
+    ['export', 'Export results', 'Download search results as CSV or JSON.'],
+    ['diff', 'Compare versions', 'Show what changed between the last two versions of a document.'],
+  ] },
+]
+const KIND_LABELS = { document: 'Documents (PDF, Word, Pages, Markdown, HTML…)', spreadsheet: 'Spreadsheets', presentation: 'Presentations', ebook: 'E-books', email: 'Email', text: 'Text, CSV, JSON and subtitles', code: 'Source code', image: 'Images and SVG', archive: 'ZIP archives' }
+const DESKTOP_PREFS = [
+  ['island', 'Notch companion', 'Duct at the top of the screen: progress, quick search and a drop zone.'],
+  ['sounds', 'Sounds', 'Short sounds when a job finishes or needs you.'],
+  ['shortcut', 'Quick search shortcut', '⌘⇧Space (Ctrl+Shift+Space) from any app.'],
+]
+
+const feature = name => !state.info || !state.info.features || state.info.features[name] !== false
+const kindOn = kind => !state.info || !state.info.features || state.info.features.formats[kind] !== false
+
+/** Hides every control for a switched-off feature. */
+function applyFeatures() {
+  const modeAsk = $('.mode[data-mode="ask"]')
+  modeAsk.hidden = !feature('ask')
+  if (!feature('ask') && state.mode === 'ask') setMode('search')
+  $$('[data-action="export"]').forEach(el => { el.hidden = !feature('export') })
+  $$('[data-action="add-url"]').forEach(el => { el.hidden = !feature('webPages') })
+  $$('[data-action="add-files"]').forEach(el => { el.hidden = !feature('uploads') })
+  $('#welcome .hint').hidden = !feature('uploads')
+}
+
+function renderFeatureList(prefs) {
+  const admin = isAdmin()
+  const check = (attr, on, label, help, disabled) =>
+    '<label class="check"><input type="checkbox" ' + attr + (on ? ' checked' : '') + (disabled ? ' disabled' : '') + '> <span><strong>' + esc(label) + '</strong><small>' + esc(help) + '</small></span></label>'
+  let html = FEATURE_GROUPS.map(g => '<h3>' + esc(g.title) + '</h3>' + g.items.map(([name, label, help]) => check('data-feature="' + name + '"', feature(name), label, help, !admin)).join('')).join('')
+  html += '<h3>File types Duct reads</h3><p class="hint">Switched-off types are skipped when indexing and hidden from search. Turning one back on rescans watched folders.</p>'
+  html += Object.keys(KIND_LABELS).map(kind => check('data-format-kind="' + kind + '"', kindOn(kind), KIND_LABELS[kind], '', !admin)).join('')
+  if (prefs) html += '<h3>This computer</h3>' + DESKTOP_PREFS.map(([name, label, help]) => check('data-pref="' + name + '"', prefs[name] !== false, label, help, false)).join('')
+  $('#featureList').innerHTML = html
+  $('#featuresHint').textContent = admin ? 'Turn off anything you don’t use. Switched-off features disappear from Duct and its API.' : 'Only an admin can change these.'
+}
+
 function pageRef(chunk) {
   const label = state.info.formats.find(f => f.format === chunk.documentFormat)?.pageLabel || 'p.'
   return label + ' ' + chunk.page
@@ -244,7 +296,8 @@ function renderSidebar() {
   $$('[data-bind="attentionCount"]').forEach(el => { el.textContent = fmt(attention) })
   $('[data-view="attention"]').hidden = attention === 0
 
-  const kinds = GROUPS.map(g => ({ ...g, count: ready.filter(d => groupFormats(g.id).includes(d.format)).length })).filter(g => g.count > 0)
+  const formatOn = format => { const f = state.info.formats.find(x => x.format === format); return !f || kindOn(f.kind) }
+  const kinds = GROUPS.map(g => ({ ...g, count: ready.filter(d => groupFormats(g.id).includes(d.format) && formatOn(d.format)).length })).filter(g => g.count > 0)
   $('#kindList').innerHTML = kinds.map(g =>
     '<button class="side-item' + (state.group === g.id ? ' active' : '') + '" data-group="' + g.id + '"><span class="name">' + esc(g.label) + '</span><span class="count">' + fmt(g.count) + '</span></button>').join('')
     || '<p class="hint side-empty">Nothing indexed yet</p>'
@@ -261,7 +314,7 @@ function renderSidebar() {
     (s.watched && isAdmin() ? '<button class="remove" data-remove-source="' + esc(s.under) + '" aria-label="Stop watching ' + esc(s.label) + '" title="Stop watching">✕</button>' : '') + '</div>').join('')
     || '<p class="hint side-empty">No sources yet</p>'
 
-  for (const el of $$('[data-requires="watch"]')) el.hidden = !state.canWatch || !isAdmin()
+  for (const el of $$('[data-requires="watch"]')) el.hidden = !state.canWatch || !isAdmin() || !feature('watchedFolders')
   $$('.side-item[data-view]').forEach(el => el.classList.toggle('active', el.dataset.view === (state.view === 'documents' ? (state.docFilter === 'attention' ? 'attention' : 'documents') : state.view === 'home' || state.view === 'results' ? 'search' : '')))
 }
 
@@ -580,7 +633,7 @@ function renderDocuments() {
       const link = isLink(d.path)
       const actions = []
       if (d.status !== 'failed') actions.push('<button class="btn btn-sm" data-doc-act="open">Open</button>')
-      if (d.status === 'no-text' && !link && isAdmin()) actions.push('<button class="btn btn-sm" data-doc-act="ocr">Read with OCR</button>')
+      if (d.status === 'no-text' && !link && isAdmin() && feature('ocrOnDemand')) actions.push('<button class="btn btn-sm" data-doc-act="ocr">Read with OCR</button>')
       if (desktop && desktop.revealDocument && !link) actions.push('<button class="btn btn-sm" data-doc-act="reveal">Show</button>')
       if (isAdmin()) actions.push('<button class="btn btn-sm btn-danger" data-doc-act="remove" title="Remove from Duct">✕</button>')
       return '<div class="doc-row" role="row" data-path="' + esc(d.path) + '">' + badge(d.format) +
@@ -699,7 +752,7 @@ $('#urlForm').addEventListener('submit', async e => {
 
 // Drag and drop anywhere adds files to the Library.
 let dragDepth = 0
-window.addEventListener('dragenter', e => { if (e.dataTransfer && [...e.dataTransfer.types].includes('Files')) { e.preventDefault(); dragDepth++; $('#dropOverlay').hidden = false } })
+window.addEventListener('dragenter', e => { if (feature('uploads') && e.dataTransfer && [...e.dataTransfer.types].includes('Files')) { e.preventDefault(); dragDepth++; $('#dropOverlay').hidden = false } })
 window.addEventListener('dragover', e => { if (dragDepth) e.preventDefault() })
 window.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; $('#dropOverlay').hidden = true } })
 window.addEventListener('drop', e => {
@@ -720,7 +773,7 @@ function showWelcome() {
   $('#app').hidden = true
   $('#welcomeStart').hidden = false
   $('#welcomeProgress').hidden = true
-  $('[data-action="watch-folder"]', $('#welcome')).hidden = !state.canWatch
+  $('[data-action="watch-folder"]', $('#welcome')).hidden = !state.canWatch || !feature('watchedFolders')
   renderMascots()
 }
 
@@ -771,6 +824,8 @@ async function openSettings(tab = 'general') {
     else el.value = value ?? ''
   }
   $('#mascotToggle').checked = mascotEnabled()
+  try { state.info.features = (await json('/api/features')).features } catch {}
+  renderFeatureList(desktop && desktop.getPrefs ? await desktop.getPrefs().catch(() => null) : null)
   $('#libraryDir').textContent = state.info.libraryDir
   $('#keyStorage').textContent = desktop ? 'Keys are stored in your system keychain and never written to disk in plain text.' : 'Keys are kept in memory until the server restarts. They are never written to disk.'
   $('#keys').innerHTML = KEY_FIELDS.map(([field, label]) =>
@@ -805,6 +860,23 @@ $('#settings').addEventListener('change', async e => {
   if (el.id === 'mascotToggle') {
     try { localStorage.setItem('duct.mascot', el.checked ? 'on' : 'off') } catch {}
     renderMascots()
+    return
+  }
+  if (el.dataset.feature || el.dataset.formatKind) {
+    const body = el.dataset.feature ? { [el.dataset.feature]: el.checked } : { formats: { [el.dataset.formatKind]: el.checked } }
+    try {
+      const data = await send('PUT', '/api/features', body)
+      state.info.features = data.features
+      applyFeatures()
+      renderSidebar()
+      if (state.query && state.view === 'results') runSearch()
+      toast('Saved')
+    } catch (err) { el.checked = !el.checked; toast('Not saved: ' + err.message, true) }
+    return
+  }
+  if (el.dataset.pref) {
+    const ok = await desktop.setPref(el.dataset.pref, el.checked).catch(() => false)
+    if (!ok) { el.checked = !el.checked; toast('Not saved', true) } else toast('Saved')
     return
   }
   const body = {}
@@ -906,6 +978,7 @@ document.addEventListener('click', e => {
 })
 
 function exportResults() {
+  if (!feature('export')) return
   if (!state.query) { toast('Search for something first', true); return }
   window.location.href = '/api/export?format=csv&q=' + encodeURIComponent(state.query)
 }
@@ -926,6 +999,7 @@ async function start() {
   $$('[data-bind="version"]').forEach(el => { el.textContent = 'v' + state.info.version })
   if (!isAdmin()) $$('[data-admin]').forEach(el => { el.hidden = true })
   $('#askSetup').hidden = state.config.llmProvider !== 'none'
+  applyFeatures()
   renderSidebar()
   renderStatus()
   const empty = state.docs.length === 0 && state.sources.length === 0

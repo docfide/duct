@@ -46,6 +46,7 @@ export async function addToLibrary(
   sourcePath: string,
   options: { originalName?: string; metadata?: Record<string, unknown>; move?: boolean } = {},
 ): Promise<LibraryResult> {
+  duct.requireFeature('uploads')
   const originalName = options.originalName ?? basename(sourcePath)
   const hash = fingerprint(sourcePath).hash()
   const existing = duct.findDocumentByHash(hash)

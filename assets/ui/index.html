@@ -152,6 +152,7 @@
     <div class="settings-body">
       <nav class="settings-tabs" role="tablist" aria-label="Settings sections">
         <button role="tab" class="tab active" data-tab="general">General</button>
+        <button role="tab" class="tab" data-tab="features">Features</button>
         <button role="tab" class="tab" data-tab="search" data-admin>Search</button>
         <button role="tab" class="tab" data-tab="ai" data-admin>AI</button>
         <button role="tab" class="tab" data-tab="library">Library</button>
@@ -161,7 +162,10 @@
         <section class="panel" data-panel="general">
           <label class="check" data-admin><input type="checkbox" data-setting="ocr"> <span><strong>Read scanned pages and images (OCR)</strong><small>Slower to index. Without it, scans are listed under Needs attention so you can read them one by one.</small></span></label>
           <label class="check"><input type="checkbox" id="mascotToggle"> <span><strong>Show the mascot</strong><small>Only on this device.</small></span></label>
-          <p class="hint" data-desktop hidden>The notch companion and sounds can be turned off in the View menu.</p>
+        </section>
+        <section class="panel" data-panel="features" hidden>
+          <p class="hint" id="featuresHint">Turn off anything you don't use. Switched-off features disappear from Duct and its API.</p>
+          <div id="featureList"></div>
         </section>
         <section class="panel" data-panel="search" hidden>
           <label class="field"><span>How results are found</span>

@@ -15,6 +15,8 @@ import { VERSION } from './version.js'
 import { viewerHtml } from './viewer.js'
 import { ACCEPT_ATTRIBUTE, FORMATS, SUPPORTED_SUMMARY, isSupportedFile } from './formats.js'
 import { islandHtml } from './island.js'
+import { FEATURE_LABELS, FEATURE_NAMES, FORMAT_KINDS, FeatureDisabledError } from './features.js'
+import type { FeatureName } from './features.js'
 
 // Mascot art ships with the package; the dotLottie player and its wasm are served
 // locally (never from a CDN) so the UI works offline.
@@ -72,6 +74,15 @@ export interface ServerOptions {
    * the system keychain). Keys are otherwise kept in memory only.
    */
   onSecrets?: (keys: Partial<Record<typeof API_KEY_FIELDS[number], string>>) => void
+}
+
+/** 403 for a switched-off feature, otherwise `status` with the error's message. */
+function sendError(res: express.Response, err: unknown, status = 500): void {
+  if (err instanceof FeatureDisabledError) {
+    res.status(403).json({ error: err.message, feature: err.feature })
+    return
+  }
+  res.status(status).json({ error: (err as Error).message })
 }
 
 function hostnameOf(hostHeader: string | undefined): string {
@@ -224,6 +235,12 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
 
   app.use('/api/', auth)
 
+  /** Answers 403 when a feature is switched off in Settings. */
+  const needs = (name: FeatureName): express.RequestHandler => (_req, res, next) => {
+    if (duct.getFeatures()[name]) next()
+    else sendError(res, new FeatureDisabledError(name))
+  }
+
   app.get('/api/me', (_req, res) => {
     res.json({ role: res.locals.role, auth: !!token })
   })
@@ -239,7 +256,20 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
       supported: SUPPORTED_SUMMARY,
       accept: ACCEPT_ATTRIBUTE,
       formats: FORMATS.map(f => ({ format: f.format, kind: f.kind, label: f.label, pageLabel: f.pageLabel ?? 'p.' })),
+      features: duct.getFeatures(),
     })
+  })
+
+  app.get('/api/features', (_req, res) => {
+    res.json({ features: duct.getFeatures(), names: FEATURE_NAMES, labels: FEATURE_LABELS, formatKinds: FORMAT_KINDS })
+  })
+
+  app.put('/api/features', adminOnly, (req, res) => {
+    try {
+      res.json({ ok: true, features: duct.setFeatures(req.body) })
+    } catch (err) {
+      sendError(res, err, 400)
+    }
   })
 
   app.post('/api/index', (req, res) => {
@@ -250,9 +280,10 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
         res.status(400).json({ error: 'The "url" field must be an http(s) URL.' })
         return
       }
-      duct.index(url, bodyMeta).then(r => res.json({ results: [{ file: url, ...r }] })).catch(e => res.status(500).json({ error: e.message }))
+      duct.index(url, bodyMeta).then(r => res.json({ results: [{ file: url, ...r }] })).catch(e => sendError(res, e))
       return
     }
+    if (!duct.getFeatures().uploads) { sendError(res, new FeatureDisabledError('uploads')); return }
     upload.array('files')(req, res, async (err) => {
       if (err) {
         if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
@@ -298,14 +329,14 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     }
   })
 
-  app.post('/api/ask', async (req, res) => {
+  app.post('/api/ask', needs('ask'), async (req, res) => {
     const { question, topK = 5, agentic } = req.body
     if (!question) { res.status(400).json({ error: 'Question is required' }); return }
     try {
       const result = agentic ? await duct.agenticSearch(question) : await duct.ask(question, topK)
       res.json(result)
     } catch (err) {
-      res.status(500).json({ error: (err as Error).message })
+      sendError(res, err)
     }
   })
 
@@ -360,7 +391,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
   })
 
   // Runs OCR on one document now (OCR is otherwise off by default because it is slow).
-  app.post('/api/ocr', async (req, res) => {
+  app.post('/api/ocr', needs('ocrOnDemand'), async (req, res) => {
     const doc = typeof req.body?.path === 'string' ? duct.getDocument(req.body.path) : undefined
     if (!doc || doc.source === 'url') { res.status(404).json({ error: 'Document not found' }); return }
     try {
@@ -425,7 +456,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     }
   })
 
-  app.get('/api/export', async (req, res) => {
+  app.get('/api/export', needs('export'), async (req, res) => {
     const q = req.query.q as string
     const format = req.query.format as string || 'json'
     if (!q) { res.status(400).json({ error: 'Query parameter "q" is required' }); return }
@@ -451,7 +482,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     }
   })
 
-  app.get('/api/diff', async (req, res) => {
+  app.get('/api/diff', needs('diff'), async (req, res) => {
     const path = req.query.path as string
     if (!path) { res.status(400).json({ error: 'Path is required' }); return }
     try {
@@ -462,7 +493,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     }
   })
 
-  app.post('/api/extract', async (req, res) => {
+  app.post('/api/extract', needs('schemaExtraction'), async (req, res) => {
     const { fields, paths } = req.body
     if (!fields || !Array.isArray(fields)) {
       res.status(400).json({ error: 'Fields array is required' })
@@ -476,7 +507,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     }
   })
 
-  app.post('/api/watch', adminOnly, (req, res) => {
+  app.post('/api/watch', adminOnly, needs('watchedFolders'), (req, res) => {
     const { directories } = req.body
     if (!directories || !Array.isArray(directories)) {
       res.status(400).json({ error: 'Directories array is required' })

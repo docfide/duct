@@ -157,6 +157,18 @@ Output shows `+` for added lines and `-` for removed lines since the previous in
 
 ---
 
+## `duct features`
+
+Shows which features are on, or switches them. Changes are saved with the index.
+
+```bash
+duct features                               # list
+duct features ask=off formats.image=off     # switch off
+duct features ask=on
+```
+
+See [`/api/features`](api.md#get-apifeatures--put-apifeatures) for what each switch does.
+
 ## `duct serve`
 
 Start the web server with the full UI (Search, Ask, Upload, Settings tabs).

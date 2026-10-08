@@ -371,7 +371,7 @@ export class SqliteStore {
 
     // File names: a document whose name contains every query word is a strong match (people search by name).
     const nameWords = (query.normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}]+/gu) || []).filter(w => w.length > 2).slice(0, 8)
-    if (nameWords.length) {
+    if (nameWords.length && scope?.fileNames !== false) {
       const rows = this.db.prepare(`
         SELECT c.uid, c.idx, c.heading, c.page, c.content, d.path, d.format, d.chunk_metadata
         FROM documents d JOIN chunks c ON c.document_id = d.id AND c.idx = (SELECT min(idx) FROM chunks WHERE document_id = d.id)

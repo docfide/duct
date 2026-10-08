@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Browsers log in to a token-protected server once (`POST /api/login`, HttpOnly cookie).
 
 ### Added
+- Feature switches: Settings > Features turns off Ask, search by meaning, file-name matching, field extraction, adding files, watched folders, web pages, OCR on request, export, version comparison, and whole file families. Off is enforced by the library (`FeatureDisabledError`), the server (403) and the UI. Also `duct features`, `GET/PUT /api/features`, and `new Duct({ features })`. The desktop app adds switches for the notch companion, sounds and the quick-search shortcut.
 - Redesigned main window: search as you type with a preview pane, file-type and source filters, a Documents view with **Needs attention**, a settings dialog, and Ask as a Labs mode in the search bar. It works down to phone-width windows.
 - First-run screen: choose a folder or add files, watch the progress, start searching.
 - File names are searchable, not just file contents.

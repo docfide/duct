@@ -56,6 +56,27 @@ function setSoundsEnabled(on) {
   updateTrayMenu()
 }
 
+function shortcutEnabled() {
+  return readPrefs().shortcut !== false
+}
+
+function setShortcutEnabled(on) {
+  writePrefs({ ...readPrefs(), shortcut: on })
+  if (on) registerShortcut()
+  else globalShortcut.unregister(SEARCH_SHORTCUT)
+}
+
+function registerShortcut() {
+  if (shortcutEnabled()) registerShortcut()
+}
+
+// Desktop-only switches shown in the page's Settings > Features (the rest live in the index's settings).
+const DESKTOP_PREFS = {
+  island: { get: islandEnabled, set: on => setIslandEnabled(on) },
+  sounds: { get: soundsEnabled, set: on => setSoundsEnabled(on) },
+  shortcut: { get: shortcutEnabled, set: on => setShortcutEnabled(on) },
+}
+
 function startIsland() {
   if (island || !serverUrl) return
   const prefs = readPrefs()
@@ -458,6 +479,14 @@ ipcMain.handle('notification:show', (_event, title, body) => {
 })
 
 ipcMain.handle('app:version', () => app.getVersion())
+
+ipcMain.handle('prefs:get', () => Object.fromEntries(Object.entries(DESKTOP_PREFS).map(([k, p]) => [k, p.get()])))
+ipcMain.handle('prefs:set', (_event, name, on) => {
+  const pref = DESKTOP_PREFS[name]
+  if (!pref || typeof on !== 'boolean') return false
+  pref.set(on)
+  return true
+})
 
 app.whenReady().then(async () => {
   if (!gotLock) return

@@ -4,6 +4,8 @@ import type { FSWatcher } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import { basename, extname, join, resolve } from 'node:path'
 import { detectFormat, extract, UnsupportedFileError } from './extract/index.js'
+import { FeatureDisabledError, defaultFeatures, enabledFormats, formatAllowed, mergeFeatures } from './features.js'
+import type { Features, FeaturesPatch } from './features.js'
 import { PACKAGE_EXTENSIONS, SUPPORTED_EXTENSIONS, isIgnoredDirectory, isSupportedFile } from './formats.js'
 import { chunk } from './chunk/index.js'
 import { extractUrl, isUrl } from './extract/web.js'
@@ -147,6 +149,8 @@ export class Duct {
   private llmModel: string = ''
   private llmBaseUrl: string = ''
   private blockPrivateUrls: boolean
+  private features: Features = defaultFeatures()
+  private explicitFeatures: FeaturesPatch = {}
 
   constructor(config: DuctConfig = {}) {
     this.blockPrivateUrls = config.blockPrivateUrls ?? false
@@ -171,6 +175,53 @@ export class Duct {
     if (this.persistPath) this.migrateLegacyIndex(this.persistPath)
     this.applySavedSettings(config)
     this.initReranker()
+    this.initFeatures(config)
+  }
+
+  /** Saved feature switches, then the constructor's (which win and aren't saved). */
+  private initFeatures(config: DuctConfig): void {
+    const saved = this.store.getSettings()['features']
+    if (saved) {
+      try { this.features = mergeFeatures(this.features, saved) } catch (err) { safeWarn(`  Ignoring saved feature settings: ${(err as Error).message}`) }
+    }
+    if (config.features) {
+      this.explicitFeatures = config.features
+      this.features = mergeFeatures(this.features, config.features)
+    }
+  }
+
+  /** Which features are switched on. */
+  getFeatures(): Features {
+    return { ...this.features, formats: { ...this.features.formats } }
+  }
+
+  /**
+   * Switches features on or off and saves the change. Switching a file family back on rescans watched
+   * folders in the background, so files skipped while it was off are indexed.
+   */
+  setFeatures(patch: FeaturesPatch): Features {
+    const before = this.features
+    const next = mergeFeatures(before, patch)
+    this.features = mergeFeatures(next, this.explicitFeatures)
+    const saved = (this.store.getSettings()['features'] ?? {}) as FeaturesPatch
+    this.store.setSettings({ features: mergeFeatures(mergeFeatures(defaultFeatures(), saved), patch) })
+    const reenabled = Object.keys(this.features.formats).some(k => this.features.formats[k as keyof Features['formats']] && !before.formats[k as keyof Features['formats']])
+    // Watching stops while the switch is off; the folders are remembered and picked up again when it's back on.
+    if (!this.features.watchedFolders && before.watchedFolders) this.unwatch()
+    else if (this.features.watchedFolders && !before.watchedFolders) this.restoreSources().catch(err => safeWarn(`  Could not restore watched folders: ${(err as Error).message}`))
+    else if (reenabled) this.rescanSources().catch(err => safeWarn(`  Rescan failed: ${(err as Error).message}`))
+    if (this.features.semanticSearch && !before.semanticSearch) this.embedPending().catch(() => {})
+    return this.getFeatures()
+  }
+
+  /** Throws FeatureDisabledError when the feature is off. */
+  requireFeature(name: Exclude<keyof Features, 'formats'>): void {
+    if (!this.features[name]) throw new FeatureDisabledError(name)
+  }
+
+  /** The embedder, unless search by meaning is switched off. */
+  private get activeEmbedder(): EmbeddingProvider | null {
+    return this.features.semanticSearch ? this.embedder : null
   }
 
   private initEmbedder(config: DuctConfig): void {
@@ -316,8 +367,9 @@ export class Duct {
     const paths = Array.isArray(input) ? input : [input]
     const resolved: string[] = []
     for (const p of paths) {
+      if (isUrl(p) && !this.features.webPages) throw new FeatureDisabledError('webPages')
       try {
-        resolved.push(...(await findFiles(p)))
+        resolved.push(...(await findFiles(p)).filter(f => isUrl(f) || formatAllowed(this.features, f)))
       } catch (err) {
         safeWarn(`  Skipping "${p}": ${(err as Error).message}`)
       }
@@ -357,7 +409,7 @@ export class Duct {
       }
     }
 
-    if (this.embedder && totalChunks > 0) await this.embedPending()
+    if (this.activeEmbedder && totalChunks > 0) await this.embedPending()
     return { documents: totalDocs, chunks: totalChunks, time: Date.now() - start, ...(failed > 0 ? { failed } : {}) }
   }
 
@@ -473,14 +525,14 @@ export class Duct {
 
   /** Embeds every chunk that has no vector for the current model. Safe to call repeatedly. */
   async embedPending(): Promise<void> {
-    if (!this.embedder) return
+    const embedder = this.activeEmbedder
+    if (!embedder) return
     if (this.embedding) return this.embedding
     // A provider that failed (missing key, unreachable server) isn't retried until the settings change.
     if (this.embedError) return
-    const embedder = this.embedder
     const model = this.embedKey()
     const run = async () => {
-      while (this.embedder === embedder) {
+      while (this.activeEmbedder === embedder) {
         const batch = this.store.chunksNeedingVectors(model, EMBED_BATCH)
         if (batch.length === 0) break
         const vectors = await embedder.embed(batch.map(b => b.content))
@@ -517,11 +569,19 @@ export class Duct {
   async search(query: string, topK = 10, filter?: Record<string, unknown>, scope?: SearchScope): Promise<SearchResult[]> {
     const fetchK = Math.max(topK * 3, 30)
     const activeFilter = filter && Object.keys(filter).length > 0 ? filter : undefined
+    // Switched-off file families are hidden, and so are file-name matches when that feature is off.
+    const allowed = enabledFormats(this.features)
+    if (allowed || !this.features.fileNameSearch) {
+      const formats = allowed ? (scope?.formats ? scope.formats.filter(f => allowed.includes(f)) : allowed) : scope?.formats
+      if (formats && formats.length === 0) return []
+      scope = { ...scope, ...(formats ? { formats } : {}), ...(this.features.fileNameSearch ? {} : { fileNames: false }) }
+    }
     let results: SearchResult[]
+    const embedder = this.activeEmbedder
 
-    if ((this.searchMode === 'vector' || this.searchMode === 'hybrid') && this.embedder) {
+    if ((this.searchMode === 'vector' || this.searchMode === 'hybrid') && embedder) {
       try {
-        const queryEmb = this.embedder.embedQuery ? await this.embedder.embedQuery(query) : (await this.embedder.embed([query]))[0]
+        const queryEmb = embedder.embedQuery ? await embedder.embedQuery(query) : (await embedder.embed([query]))[0]
         const vectorResults = this.store.searchVectors(queryEmb, this.embedKey(), fetchK, activeFilter, scope)
         if (this.searchMode === 'vector' && vectorResults.length > 0) {
           results = vectorResults
@@ -549,6 +609,7 @@ export class Duct {
   }
 
   async ask(query: string, topK = 5): Promise<QAResult> {
+    this.requireFeature('ask')
     const start = Date.now()
 
     let hydeQuery = query
@@ -598,6 +659,7 @@ export class Duct {
   }
 
   async extractSchema(fields: SchemaField[], paths?: string[]): Promise<ExtractionResult[]> {
+    this.requireFeature('schemaExtraction')
     if (!this.llmProvider) throw new Error('LLM provider required for schema extraction. Configure in settings.')
     const docs = paths || this.store.listDocuments().filter(d => d.status === 'indexed').map(d => d.path)
     const results: ExtractionResult[] = []
@@ -628,6 +690,7 @@ export class Duct {
   }
 
   async diff(path: string): Promise<DocDiff | null> {
+    this.requireFeature('diff')
     const known = this.findDocument(path)
     const versions = this.store.lastVersions(known?.path ?? path)
     if (versions.length < 2) return null
@@ -659,6 +722,7 @@ export class Duct {
   }
 
   async agenticSearch(query: string): Promise<QAResult> {
+    this.requireFeature('ask')
     const start = Date.now()
     if (!this.llmProvider) {
       return this.ask(query)
@@ -718,6 +782,7 @@ Return ONLY a JSON array of strings, like: ["sub-question 1", "sub-question 2"]`
    * indexed, deleted or moved files are removed. Folders are remembered; see restoreSources().
    */
   async watch(paths: string[], callback?: () => void): Promise<void> {
+    this.requireFeature('watchedFolders')
     for (const p of paths) {
       const dir = resolve(p)
       if (!statSync(dir).isDirectory()) continue
@@ -730,6 +795,7 @@ Return ONLY a JSON array of strings, like: ["sub-question 1", "sub-question 2"]`
   /** Re-watches every remembered folder, catching up on changes made while Duct wasn't running. */
   async restoreSources(callback?: () => void): Promise<string[]> {
     const restored: string[] = []
+    if (!this.features.watchedFolders) return restored
     for (const source of this.store.listSources()) {
       if (source.kind !== 'watch') continue
       if (!existsSync(source.path)) {
@@ -759,6 +825,7 @@ Return ONLY a JSON array of strings, like: ["sub-question 1", "sub-question 2"]`
    * (SMB/NFS) often don't deliver. Cheap when nothing changed: unchanged files are skipped by timestamp.
    */
   async rescanSources(): Promise<void> {
+    if (!this.features.watchedFolders) return
     for (const source of this.store.listSources()) {
       if (source.kind === 'watch' && existsSync(source.path)) await this.reconcile(source.path)
     }
@@ -972,3 +1039,5 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
 }
 
 export { HybridSearcher, reciprocalRankFusion, extractUrl, isUrl, extractTablesFromContent }
+export { FeatureDisabledError, FEATURE_NAMES, FEATURE_LABELS, FORMAT_KINDS, defaultFeatures } from './features.js'
+export type { Features, FeaturesPatch, FeatureName } from './features.js'

@@ -71,6 +71,7 @@ docs/             User docs: cli, api, library, search, qa
 - **API keys in the desktop app** are encrypted with Electron `safeStorage` into `userData/secrets.bin` (through `createServer({ onSecrets })`) and passed to `duct.configure()` at launch. Elsewhere they live only in memory.
 - **Electron** imports `../dist/*.js`, so run `npm run build` before launching it. It holds a single-instance lock, keeps its index in `userData/data`, and copies "Add Files" into the Library. Watching goes through IPC (`duct:watchDirectory`), not the HTTP API. `DUCT_USER_DATA_DIR` and `DUCT_LIBRARY_DIR` override the paths for tests and portable installs.
 - **CLI** keeps its index in `$DUCT_HOME` or `~/.duct` (the `dataDir()` helper in `cli.ts`).
+- **Feature switches** (`src/features.ts`): `Features` holds on/off switches and `formats` per `FormatKind`, saved in the settings table under `features`. Constructor `features` win but aren't saved. Enforce a new switch in three places: `requireFeature()` in the library, `needs('<name>')` on the server route, and `applyFeatures()`/`FEATURE_GROUPS` in `assets/ui/app.js`. Format families are filtered in `index()` (`formatAllowed`) and `search()` (`enabledFormats`). Desktop-only switches (island, sounds, shortcut) live in `desktop-settings.json` via `prefs:get`/`prefs:set` IPC.
 
 ## Adding things
 

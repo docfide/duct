@@ -132,9 +132,14 @@ function createIsland({ serverUrl, onShowMain, onAddFiles, onWatchFolders, isSup
     const folders = existing.filter(p => fs.statSync(p).isDirectory() && !isPackage(p))
     const files = existing.filter(p => (fs.statSync(p).isFile() || isPackage(p)) && isSupportedFile(p))
     const unsupported = existing.filter(p => !folders.includes(p) && !files.includes(p)).map(p => path.basename(p))
-    const result = files.length ? await onAddFiles(files) : { added: 0, duplicates: 0, failed: 0 }
-    if (folders.length) await onWatchFolders(folders)
-    return { ...result, unsupported, watched: folders }
+    try {
+      const result = files.length ? await onAddFiles(files) : { added: 0, duplicates: 0, failed: 0 }
+      if (folders.length) await onWatchFolders(folders)
+      return { ...result, unsupported, watched: folders }
+    } catch (err) {
+      // E.g. adding files or watching folders is switched off in Settings.
+      return { added: 0, duplicates: 0, failed: 0, unsupported: [], watched: [], error: err.message }
+    }
   })
   screen.on('display-metrics-changed', onDisplaysChanged)
   screen.on('display-added', onDisplaysChanged)

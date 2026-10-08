@@ -5,7 +5,8 @@ import chalk from 'chalk'
 import ora from 'ora'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { Duct } from './index.js'
+import { Duct, FEATURE_LABELS, FEATURE_NAMES, FORMAT_KINDS } from './index.js'
+import type { FeaturesPatch } from './index.js'
 import type { DuctConfig } from './types.js'
 import { createServer } from './server.js'
 import { VERSION } from './version.js'
@@ -337,6 +338,40 @@ program
     } catch (err) {
       console.error(`  ${chalk.red('✗')} ${chalk.red((err as Error).message)}`)
       process.exit(1)
+    }
+  })
+
+program
+  .command('features')
+  .description('Show which features are on, or switch them: duct features ask=off formats.image=off')
+  .argument('[changes...]', 'name=on|off, or formats.<family>=on|off')
+  .option('--persist <path>', 'Index directory (default: $DUCT_HOME or ~/.duct)')
+  .action((changes: string[], options) => {
+    const duct = new Duct({ persistPath: dataDir(options.persist), embed: false })
+    try {
+      if (changes.length) {
+        const patch: FeaturesPatch = {}
+        for (const change of changes) {
+          const m = change.match(/^([\w.]+)=(on|off|true|false)$/)
+          if (!m) throw new Error(`Expected name=on or name=off, got "${change}"`)
+          const on = m[2] === 'on' || m[2] === 'true'
+          if (m[1].startsWith('formats.')) patch.formats = { ...patch.formats, [m[1].slice(8)]: on } as FeaturesPatch['formats']
+          else (patch as Record<string, boolean>)[m[1]] = on
+        }
+        duct.setFeatures(patch)
+      }
+      const f = duct.getFeatures()
+      const mark = (on: boolean) => on ? chalk.green('on ') : chalk.dim('off')
+      console.log()
+      for (const name of FEATURE_NAMES) console.log(`  ${mark(f[name])}  ${name.padEnd(18)} ${chalk.dim(FEATURE_LABELS[name])}`)
+      console.log(`\n  ${chalk.bold('File families')}`)
+      for (const kind of FORMAT_KINDS) console.log(`  ${mark(f.formats[kind])}  formats.${kind}`)
+      console.log()
+    } catch (err) {
+      console.error(`  ${chalk.red('✗')} ${chalk.red((err as Error).message)}`)
+      process.exitCode = 1
+    } finally {
+      duct.close()
     }
   })
 

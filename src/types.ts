@@ -85,6 +85,8 @@ export interface IndexActivity {
 export interface SearchScope {
   formats?: DocumentFormat[]
   under?: string
+  /** Also match file names (default true). */
+  fileNames?: boolean
 }
 
 export interface SearchResult {
@@ -122,6 +124,8 @@ export interface DuctConfig {
     rerank?: boolean
     hyde?: boolean
   }
+  /** Features to switch off (all are on by default). Overrides saved feature settings for the names given. */
+  features?: import('./features.js').FeaturesPatch
 }
 
 export interface RuntimeConfig {

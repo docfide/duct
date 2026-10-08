@@ -12,5 +12,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onMenuAction: (callback) => ipcRenderer.on('menu:action', (_event, action) => callback(action)),
   showNotification: (title, body) => ipcRenderer.invoke('notification:show', title, body),
   getVersion: () => ipcRenderer.invoke('app:version'),
+  getPrefs: () => ipcRenderer.invoke('prefs:get'),
+  setPref: (name, on) => ipcRenderer.invoke('prefs:set', name, on),
   platform: process.platform,
 })
