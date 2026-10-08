@@ -70,6 +70,8 @@ export interface IndexActivity {
   /** Display name of the file being indexed. */
   current: string
   embedding: boolean
+  /** Why semantic search is paused (e.g. a missing API key); keyword search keeps working. Cleared by configure(). */
+  embeddingError?: string
   /** The most recent finished run. `id` increases with every run, so short runs aren't missed by pollers. */
   lastRun?: { id: number; done: number; failed: number; failures: IndexFailure[]; finishedAt: number }
 }

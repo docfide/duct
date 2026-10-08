@@ -48,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Requires Node.js 22.13 or later.
 
 ### Fixed
+- "Preparing semantic search…" no longer stays on forever. The embedding job's busy flag never cleared when there was nothing to embed, which also stopped later embeddings from running. A failing provider (for example, Gemini selected without `GEMINI_API_KEY`) now shows "semantic search paused" with the reason, and isn't retried until the embedding settings change.
 - The README now states the actual license (Apache 2.0).
 - pdf.js no longer floods the console with font warnings.
 - Slides in `.pptx` files were ordered as text (slide 10 before slide 2), and words split across text runs were merged.

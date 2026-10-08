@@ -269,3 +269,32 @@ describe('run reports', () => {
     expect(second.failed).toBe(0)
   })
 })
+
+describe('embedding status', () => {
+  it('clears the embedding flag when there is nothing to embed', async () => {
+    const duct = new Duct({ embed: { provider: 'ollama', baseUrl: 'http://127.0.0.1:9' } })
+    duct.configure({ embedModel: 'another-model' })   // re-embeds in the background; the index is empty
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(duct.activity().embedding).toBe(false)
+  })
+
+  it('reports why semantic search is paused, and retries after the settings change', async () => {
+    const saved = process.env['GEMINI_API_KEY']
+    delete process.env['GEMINI_API_KEY']
+    try {
+      const file = join(freshDir('paused'), 'a.txt')
+      writeFileSync(file, 'some text to embed')
+      const duct = new Duct({ embed: { provider: 'gemini' } })
+      await duct.index(file)
+      const a = duct.activity()
+      expect(a.embedding).toBe(false)
+      expect(a.embeddingError).toMatch(/GEMINI_API_KEY/)
+      expect(await duct.search('text')).toHaveLength(1)   // keyword search still works
+
+      duct.configure({ embedProvider: '' })                // any embedding change clears the error
+      expect(duct.activity().embeddingError).toBeUndefined()
+    } finally {
+      if (saved !== undefined) process.env['GEMINI_API_KEY'] = saved
+    }
+  })
+})

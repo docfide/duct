@@ -1396,6 +1396,7 @@ body.member .admin-only { display: none !important; }
       const line = document.getElementById('activityLine')
       if (a.indexing || a.embedding) {
         line.style.display = 'block'
+        line.style.color = ''
         line.textContent = a.indexing
           ? '⟳ indexing ' + a.done + '/' + a.total + (a.current ? ' · ' + a.current : '')
           : '⟳ preparing semantic search…'
@@ -1406,7 +1407,16 @@ body.member .admin-only { display: none !important; }
         activityTimer = setTimeout(pollActivity, 1000)
         return
       }
-      line.style.display = 'none'
+      // Semantic search paused (missing key, unreachable provider): say why instead of spinning.
+      if (a.embeddingError) {
+        line.style.display = 'block'
+        line.style.color = 'var(--warning)'
+        line.textContent = '⚠ semantic search paused: ' + a.embeddingError
+        line.title = 'Keyword search still works. Fix the embedding settings (or pick a provider with a key) to resume.'
+      } else {
+        line.style.display = 'none'
+        line.style.color = ''
+      }
       if (wasBusy) {
         wasBusy = false
         refreshDocs()

@@ -77,6 +77,7 @@ export class Duct {
   private pendingChanges = new Map<string, NodeJS.Timeout>()
   private locks = new Map<string, Promise<void>>()
   private embedding: Promise<void> | null = null
+  private embedError: string | null = null
   private progress = { active: 0, done: 0, total: 0, current: '', failures: [] as IndexFailure[], failed: 0 }
   private lastRun: IndexActivity['lastRun']
   private runCounter = 0
@@ -303,7 +304,12 @@ export class Duct {
   /** What indexing is doing right now, for progress displays. */
   activity(): IndexActivity {
     const { active, done, total, current } = this.progress
-    return { indexing: active > 0, done, total, current, embedding: this.embedding !== null, ...(this.lastRun ? { lastRun: this.lastRun } : {}) }
+    return {
+      indexing: active > 0, done, total, current,
+      embedding: this.embedding !== null,
+      ...(this.embedError ? { embeddingError: this.embedError } : {}),
+      ...(this.lastRun ? { lastRun: this.lastRun } : {}),
+    }
   }
 
   private async indexOne(path: string, metadata: Record<string, unknown> | undefined, options: IndexOptions | undefined): Promise<IndexOutcome> {
@@ -397,23 +403,27 @@ export class Duct {
   async embedPending(): Promise<void> {
     if (!this.embedder) return
     if (this.embedding) return this.embedding
+    // A provider that failed (missing key, unreachable server) isn't retried until the settings change.
+    if (this.embedError) return
     const embedder = this.embedder
     const model = this.embedKey()
-    this.embedding = (async () => {
-      try {
-        while (this.embedder === embedder) {
-          const batch = this.store.chunksNeedingVectors(model, EMBED_BATCH)
-          if (batch.length === 0) break
-          const vectors = await embedder.embed(batch.map(b => b.content))
-          if (vectors.length !== batch.length) throw new Error(`embedding provider returned ${vectors.length} vectors for ${batch.length} texts`)
-          this.store.addVectors(batch.map((b, i) => ({ chunkRowId: b.rowId, model, vector: vectors[i] })))
-        }
-      } catch (err) {
-        safeWarn(`  Embedding paused (keyword search still works): ${(err as Error).message}`)
-      } finally {
-        this.embedding = null
+    const run = async () => {
+      while (this.embedder === embedder) {
+        const batch = this.store.chunksNeedingVectors(model, EMBED_BATCH)
+        if (batch.length === 0) break
+        const vectors = await embedder.embed(batch.map(b => b.content))
+        if (vectors.length !== batch.length) throw new Error(`embedding provider returned ${vectors.length} vectors for ${batch.length} texts`)
+        this.store.addVectors(batch.map((b, i) => ({ chunkRowId: b.rowId, model, vector: vectors[i] })))
       }
-    })()
+    }
+    // Clear the flag in a callback: run() can finish synchronously (nothing to embed), and clearing it inside
+    // run() would happen before the assignment below, leaving "embedding" set forever.
+    this.embedding = run()
+      .catch(err => {
+        if (this.embedder === embedder) this.embedError = (err as Error).message
+        safeWarn(`  Embedding paused (keyword search still works): ${(err as Error).message}`)
+      })
+      .finally(() => { this.embedding = null })
     return this.embedding
   }
 
@@ -843,6 +853,7 @@ Return ONLY a JSON array of strings, like: ["sub-question 1", "sub-question 2"]`
     const embedChanged = cfg.embedProvider !== undefined || cfg.embedModel !== undefined || cfg.embedBaseUrl !== undefined
     const keysChanged = API_KEY_FIELDS.some(k => cfg[k] !== undefined)
     if (embedChanged || keysChanged) {
+      this.embedError = null
       const before = this.embedKey()
       if (cfg.embedProvider !== undefined) this.embedProvider = cfg.embedProvider
       if (cfg.embedModel !== undefined) this.embedModel = cfg.embedModel
