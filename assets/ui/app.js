@@ -1181,6 +1181,7 @@ async function renderConnectors() {
   $('#connectGoogle').hidden = !c.google || !c.entitled
   $('#connectMicrosoft').hidden = !c.microsoft || !c.entitled
   $('#sharepointForm').hidden = !c.microsoft || !c.entitled
+  $('#s3Connect').hidden = !c.entitled
   const busy = (c.connecting && c.connecting.running) || state.connectors.some(x => x.syncing)
   $('#connectorList').innerHTML =
     (c.connecting ? '<p class="' + (c.connecting.error ? 'notice' : 'hint') + '">' + (c.connecting.error ? 'Couldn’t connect: ' + esc(c.connecting.error) : 'Finish signing in in your browser…') + '</p>' : '') +
@@ -1197,7 +1198,24 @@ $('#sharepointForm').addEventListener('submit', async e => {
   e.preventDefault()
   const site = e.target.site.value.trim()
   if (!site) return
-  try { await send('POST', '/api/connectors', { kind: 'microsoft', siteUrl: site }); e.target.site.value = '' } catch (err) { toast(err.message, true) }
+  try { const r = await send('POST', '/api/connectors', { kind: 'microsoft', siteUrl: site }); if (r && r.url) { location.assign(r.url); return } e.target.site.value = '' } catch (err) { toast(err.message, true) }
+  renderConnectors()
+})
+
+$('#s3Form').addEventListener('submit', async e => {
+  e.preventDefault()
+  const f = e.target
+  const btn = f.querySelector('button[type=submit]')
+  btn.disabled = true
+  btn.textContent = 'Checking the bucket…'
+  try {
+    await send('POST', '/api/connectors', { kind: 's3', ...Object.fromEntries(new FormData(f)) })
+    f.reset()
+    $('#s3Connect').open = false
+    toast('Bucket connected; reading it now')
+  } catch (err) { toast(err.message, true) }
+  btn.disabled = false
+  btn.textContent = 'Connect bucket'
   renderConnectors()
 })
 
@@ -1359,7 +1377,7 @@ const ACTIONS = {
   'export': () => exportResults('csv'),
   'toggle-export': () => { const menu = $('#exportMenu'); menu.hidden = !menu.hidden; $('[data-action="toggle-export"]').setAttribute('aria-expanded', String(!menu.hidden)) },
   'connect-source': async el => {
-    try { await send('POST', '/api/connectors', { kind: el.dataset.kind }) } catch (err) { toast(err.message, true) }
+    try { const r = await send('POST', '/api/connectors', { kind: el.dataset.kind }); if (r && r.url) { location.assign(r.url); return } } catch (err) { toast(err.message, true) }
     renderConnectors()
   },
   'sync-source': async el => { try { await send('POST', '/api/connectors/' + encodeURIComponent(el.dataset.id) + '/sync', {}) } catch (err) { toast(err.message, true) }; renderConnectors() },

@@ -4,11 +4,12 @@
 // Google Drive API v3: https://developers.google.com/drive/api/reference/rest/v3
 // Microsoft Graph delta: https://learn.microsoft.com/graph/api/driveitem-delta
 
+import { createHash, createHmac } from 'node:crypto'
 import { extname } from 'node:path'
 import { isSupportedFile } from '../formats.js'
-import { loopbackAuthorize, tokenRequest } from './oauth.js'
+import { WebCallback, loopbackAuthorize, tokenRequest } from './oauth.js'
 
-export type ConnectorKind = 'gdrive' | 'microsoft'
+export type ConnectorKind = 'gdrive' | 'microsoft' | 's3'
 
 export interface Tokens { access: string; refresh?: string; expiresAt: number }
 
@@ -25,7 +26,13 @@ export interface RemoteFile {
   exportMime?: string
 }
 
-export interface Changes { upserts: RemoteFile[]; removed: string[]; cursor: string }
+export interface Changes {
+  upserts: RemoteFile[]
+  removed: string[]
+  cursor: string
+  /** A complete listing: anything known that isn't in it is gone. */
+  full?: boolean
+}
 
 export interface SourceContext {
   fetch: typeof fetch
@@ -63,15 +70,15 @@ const MS_TOKEN = 'https://login.microsoftonline.com/common/oauth2/v2.0/token'
 const GOOGLE_TOKEN = 'https://oauth2.googleapis.com/token'
 
 /** Runs the browser sign-in for a source and returns its first tokens. */
-export async function authorizeSource(kind: ConnectorKind, ids: ClientIds, openUrl: (url: string) => void | Promise<void>, fetchImpl: typeof fetch = fetch): Promise<Tokens> {
+export async function authorizeSource(kind: ConnectorKind, ids: ClientIds, openUrl: (url: string) => void | Promise<void>, fetchImpl: typeof fetch = fetch, web?: WebCallback): Promise<Tokens> {
   if (kind === 'gdrive') {
     if (!ids.google) throw new Error('Google Drive isn’t set up in this build of Duct')
-    const r = await loopbackAuthorize({ authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth', openUrl, params: { client_id: ids.google.clientId, scope: 'https://www.googleapis.com/auth/drive.readonly', access_type: 'offline', prompt: 'consent' } })
+    const r = await loopbackAuthorize({ authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth', openUrl, web, params: { client_id: ids.google.clientId, scope: 'https://www.googleapis.com/auth/drive.readonly', access_type: 'offline', prompt: 'consent' } })
     const t = await tokenRequest(fetchImpl, GOOGLE_TOKEN, { grant_type: 'authorization_code', code: r.code, redirect_uri: r.redirectUri, code_verifier: r.verifier, client_id: ids.google.clientId, client_secret: ids.google.clientSecret })
     return { access: t.access_token, refresh: t.refresh_token, expiresAt: Date.now() + (t.expires_in ?? 3600) * 1000 }
   }
   if (!ids.microsoft) throw new Error('Microsoft 365 isn’t set up in this build of Duct')
-  const r = await loopbackAuthorize({ authorizeUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize', openUrl, params: { client_id: ids.microsoft.clientId, scope: MS_SCOPE, prompt: 'select_account' } })
+  const r = await loopbackAuthorize({ authorizeUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize', openUrl, web, params: { client_id: ids.microsoft.clientId, scope: MS_SCOPE, prompt: 'select_account' } })
   const t = await tokenRequest(fetchImpl, MS_TOKEN, { grant_type: 'authorization_code', code: r.code, redirect_uri: r.redirectUri, code_verifier: r.verifier, client_id: ids.microsoft.clientId, scope: MS_SCOPE })
   return { access: t.access_token, refresh: t.refresh_token, expiresAt: Date.now() + (t.expires_in ?? 3600) * 1000 }
 }
@@ -150,7 +157,7 @@ export class GoogleDrive extends OAuthSource implements ConnectorSource {
         for (const f of r.files) { const rf = this.toRemote(f); if (rf) upserts.push(rf) }
         page = r.nextPageToken
       } while (page)
-      return { upserts, removed: [], cursor: start.startPageToken }
+      return { upserts, removed: [], cursor: start.startPageToken, full: true }
     }
     const upserts: RemoteFile[] = []
     const removed: string[] = []
@@ -229,10 +236,97 @@ export class MicrosoftDrive extends OAuthSource implements ConnectorSource {
       url = r['@odata.nextLink']
       if (r['@odata.deltaLink']) deltaLink = r['@odata.deltaLink']
     }
-    return { upserts, removed, cursor: deltaLink }
+    return { upserts, removed, cursor: deltaLink, full: cursor === null }
   }
 
   protected downloadUrl(file: RemoteFile): string {
     return `${MicrosoftDrive.API}${this.drive}/items/${encodeURIComponent(file.id)}/content`
+  }
+}
+
+// ---------------------------------------------------------------- Amazon S3 and S3-compatible storage
+
+export interface S3Credentials {
+  bucket: string
+  region: string
+  /** Only files under this prefix ("contracts/"). */
+  prefix?: string
+  /** S3-compatible services (MinIO, Cloudflare R2, Wasabi…): their endpoint, e.g. https://<account>.r2.cloudflarestorage.com. Uses path-style addressing. */
+  endpoint?: string
+  accessKeyId: string
+  secretAccessKey: string
+}
+
+const enc = (s: string) => encodeURIComponent(s).replace(/[!'()*]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase())
+const sha256hex = (data: string | Buffer) => createHash('sha256').update(data).digest('hex')
+const hmac = (key: string | Buffer, data: string) => createHmac('sha256', key).update(data).digest()
+
+/** Signs a GET request with AWS Signature Version 4 (https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv-create-signed-request.html). */
+export function signS3Get(creds: S3Credentials, url: URL, now = new Date()): Record<string, string> {
+  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '')
+  const day = amzDate.slice(0, 8)
+  const payloadHash = sha256hex('')
+  const canonicalUri = url.pathname.split('/').map(seg => enc(decodeURIComponent(seg))).join('/')
+  const canonicalQuery = [...url.searchParams.entries()].map(([k, v]) => [enc(k), enc(v)]).sort(([a, x], [b, y]) => a < b ? -1 : a > b ? 1 : x < y ? -1 : 1).map(([k, v]) => `${k}=${v}`).join('&')
+  const headers: Record<string, string> = { host: url.host, 'x-amz-content-sha256': payloadHash, 'x-amz-date': amzDate }
+  const signed = Object.keys(headers).sort()
+  const canonical = ['GET', canonicalUri, canonicalQuery, signed.map(h => `${h}:${headers[h]}\n`).join(''), signed.join(';'), payloadHash].join('\n')
+  const scope = `${day}/${creds.region}/s3/aws4_request`
+  const toSign = ['AWS4-HMAC-SHA256', amzDate, scope, sha256hex(canonical)].join('\n')
+  const key = hmac(hmac(hmac(hmac(`AWS4${creds.secretAccessKey}`, day), creds.region), 's3'), 'aws4_request')
+  const signature = createHmac('sha256', key).update(toSign).digest('hex')
+  return { 'x-amz-content-sha256': payloadHash, 'x-amz-date': amzDate, Authorization: `AWS4-HMAC-SHA256 Credential=${creds.accessKeyId}/${scope}, SignedHeaders=${signed.join(';')}, Signature=${signature}` }
+}
+
+const xmlText = (s: string) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&')
+const tag = (block: string, name: string) => { const m = new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(block); return m ? xmlText(m[1]) : undefined }
+
+export class S3Source implements ConnectorSource {
+  readonly kind = 's3' as const
+  constructor(private creds: S3Credentials, private ctx: SourceContext) {}
+
+  private url(key = ''): URL {
+    if (this.creds.endpoint) {
+      const base = this.creds.endpoint.replace(/\/+$/, '')
+      return new URL(`${base}/${enc(this.creds.bucket)}/${key.split('/').map(enc).join('/')}`)
+    }
+    return new URL(`https://${this.creds.bucket}.s3.${this.creds.region}.amazonaws.com/${key.split('/').map(enc).join('/')}`)
+  }
+
+  private async get(url: URL, raw = false): Promise<Response> {
+    const res = await this.ctx.fetch(url, { headers: signS3Get(this.creds, url), signal: AbortSignal.timeout(raw ? 300_000 : 30_000) })
+    if (!res.ok) {
+      const code = tag(await res.text().catch(() => ''), 'Code')
+      throw new Error(`S3 answered ${res.status}${code ? ` (${code})` : ''}`)
+    }
+    return res
+  }
+
+  async label(): Promise<string> {
+    return `s3://${this.creds.bucket}/${this.creds.prefix ?? ''}`
+  }
+
+  /** S3 has no change feed: every sync lists the bucket, and unchanged files (same ETag) aren't downloaded. */
+  async changes(): Promise<Changes> {
+    const upserts: RemoteFile[] = []
+    let token: string | undefined
+    do {
+      const url = this.url()
+      url.searchParams.set('list-type', '2')
+      if (this.creds.prefix) url.searchParams.set('prefix', this.creds.prefix)
+      if (token) url.searchParams.set('continuation-token', token)
+      const xml = await (await this.get(url)).text()
+      for (const m of xml.matchAll(/<Contents>([\s\S]*?)<\/Contents>/g)) {
+        const key = tag(m[1], 'Key')
+        if (!key || key.endsWith('/') || !isSupportedFile(key)) continue
+        upserts.push({ id: key, name: key.split('/').pop()!, modified: tag(m[1], 'LastModified') ?? '', size: Number(tag(m[1], 'Size') ?? 0), version: (tag(m[1], 'ETag') ?? '').replace(/"/g, '') })
+      }
+      token = tag(xml, 'IsTruncated') === 'true' ? tag(xml, 'NextContinuationToken') : undefined
+    } while (token)
+    return { upserts, removed: [], cursor: 'listing', full: true }
+  }
+
+  async download(file: RemoteFile): Promise<Buffer> {
+    return Buffer.from(await (await this.get(this.url(file.id), true)).arrayBuffer())
   }
 }

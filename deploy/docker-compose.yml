@@ -1,0 +1,55 @@
+# Duct on your own server, with automatic HTTPS (Caddy + Let's Encrypt).
+#
+#   cp .env.example .env      # then fill it in
+#   docker compose up -d
+#
+# Point DNS for DUCT_DOMAIN at this machine first, and open ports 80 and 443. See docs/deploy.md.
+
+services:
+  duct:
+    image: ${DUCT_IMAGE:-ghcr.io/tensflare/duct:latest}
+    build: ..
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DUCT_PUBLIC_URL: https://${DUCT_DOMAIN}
+      DUCT_TRUST_PROXY: "1"
+    command:
+      - serve
+      - --host=0.0.0.0
+      - --port=3456
+      - --persist=/data/index
+      - --library=/data/library
+      - --allowed-host=${DUCT_DOMAIN}
+      - --watch-root=/docs
+    volumes:
+      - duct-data:/data
+      # Folders to search, read-only. Add more, then watch them from Settings › Library.
+      - ${DUCT_DOCS:-./docs}:/docs:ro
+    expose:
+      - "3456"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3456/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [duct]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DUCT_DOMAIN: ${DUCT_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  duct-data:
+  caddy-data:
+  caddy-config:

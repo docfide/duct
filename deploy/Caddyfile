@@ -1,0 +1,10 @@
+# Caddy fetches and renews the certificate for DUCT_DOMAIN on its own.
+{$DUCT_DOMAIN} {
+	encode zstd gzip
+	# Uploads up to Duct's own limit (--upload-limit, 50 MB by default).
+	request_body {
+		max_size 60MB
+	}
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	reverse_proxy duct:3456
+}

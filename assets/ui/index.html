@@ -252,7 +252,20 @@
               <input type="url" name="site" placeholder="https://yourcompany.sharepoint.com/sites/Legal" aria-label="SharePoint site address">
               <button class="btn" type="submit">Connect SharePoint site</button>
             </form>
-            <p class="hint" id="connectorsUpsell" hidden>Connectors for Google Drive, OneDrive and SharePoint are part of the Team plan.</p>
+            <details class="s3-connect" id="s3Connect" data-admin>
+              <summary>Connect an S3 bucket</summary>
+              <form class="stack-form" id="s3Form">
+                <p class="hint">Amazon S3, or any S3-compatible store: MinIO, Cloudflare R2, Wasabi, Backblaze B2. Use a key that can only list and read this bucket.</p>
+                <label>Bucket <input name="bucket" required autocomplete="off" placeholder="company-documents"></label>
+                <label>Folder (optional) <input name="prefix" autocomplete="off" placeholder="contracts/"></label>
+                <label>Region <input name="region" autocomplete="off" placeholder="eu-west-2 (auto for R2)"></label>
+                <label>Endpoint (S3-compatible stores only) <input name="endpoint" type="url" autocomplete="off" placeholder="https://<account>.r2.cloudflarestorage.com"></label>
+                <label>Access key ID <input name="accessKeyId" required autocomplete="off"></label>
+                <label>Secret access key <input name="secretAccessKey" type="password" required autocomplete="new-password"></label>
+                <button class="btn btn-primary" type="submit">Connect bucket</button>
+              </form>
+            </details>
+            <p class="hint" id="connectorsUpsell" hidden>Connectors for Google Drive, OneDrive, SharePoint and S3 are part of the Team plan.</p>
           </div>
           <h3>Watched folders</h3>
           <div id="settingsSources"></div>

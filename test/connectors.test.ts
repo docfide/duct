@@ -5,16 +5,19 @@ import { join } from 'node:path'
 import { Duct } from '../src/index.js'
 import { ConnectorManager } from '../src/connectors/manager.js'
 import type { TokenVault } from '../src/connectors/manager.js'
-import type { Tokens } from '../src/connectors/sources.js'
+import type { S3Credentials, Tokens } from '../src/connectors/sources.js'
+import { signS3Get } from '../src/connectors/sources.js'
+import { createServer, s3Details } from '../src/server.js'
+import { WebCallback } from '../src/connectors/oauth.js'
 import { makeDocx } from './helpers.js'
 
 const work = mkdtempSync(join(tmpdir(), 'duct-conn-'))
 afterAll(() => rmSync(work, { recursive: true, force: true }))
 
 class MemoryVault implements TokenVault {
-  data: Record<string, Tokens> = {}
+  data: Record<string, Tokens | S3Credentials> = {}
   load() { return JSON.parse(JSON.stringify(this.data)) }
-  save(all: Record<string, Tokens>) { this.data = all }
+  save(all: Record<string, Tokens | S3Credentials>) { this.data = all }
 }
 
 /** Plays the browser: the sign-in page "approves" by calling the loopback redirect. */
@@ -112,8 +115,28 @@ describe('Google Drive', () => {
     expireNext = true
     await manager.sync(c.id)
     expect(tokenCalls.some(t => t.get('grant_type') === 'refresh_token')).toBe(true)
-    expect(vault.data[c.id].access).toBe('access-2')
+    expect((vault.data[c.id] as Tokens).access).toBe('access-2')
     expect(manager.list()[0].fileCount).toBe(2)
+  })
+
+  it('on a public server, sends the admin\'s browser to Google and takes the redirect at /connectors/callback', async () => {
+    const dir = mkdtempSync(join(work, 'w-'))
+    const web = new WebCallback('https://duct.okafor.ng/')
+    const m = new ConnectorManager(duct, { dir, vault, clientIds: { google: { clientId: 'gid', clientSecret: 'gsecret' } }, openUrl: () => { throw new Error('no system browser on a server') }, fetch: googleFetch, entitled: () => true, web })
+    const server = createServer(duct, { authToken: 'admin-token', connectors: m, allowedHosts: '*' }).listen(0)
+    const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`
+    try {
+      const r = await (await fetch(`${base}/api/connectors`, { method: 'POST', headers: { Authorization: 'Bearer admin-token', 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'gdrive' }) })).json() as { url: string }
+      const auth = new URL(r.url)
+      expect(auth.origin).toBe('https://accounts.google.com')
+      expect(auth.searchParams.get('redirect_uri')).toBe('https://duct.okafor.ng/connectors/callback')
+      expect((await fetch(`${base}/connectors/callback?state=forged&code=x`)).status).toBe(400)
+      const back = await fetch(`${base}/connectors/callback?state=${auth.searchParams.get('state')}&code=auth-code`)
+      expect(back.status).toBe(200)
+      for (let i = 0; i < 50 && m.list().length === 0; i++) await new Promise(res => setTimeout(res, 20))
+      expect(m.list()[0].label).toBe('ada@okafor.ng')
+      expect(tokenCalls[0].get('redirect_uri')).toBe('https://duct.okafor.ng/connectors/callback')
+    } finally { server.close() }
   })
 
   it('is a Team feature', async () => {
@@ -171,5 +194,74 @@ describe('OneDrive and SharePoint', () => {
     expect((await duct.search('confidentiality')).length).toBe(0)
     expect(manager.list()[0].fileCount).toBe(1)
     await expect(manager.add('microsoft', { siteUrl: 'https://evil.example/sites/x' })).rejects.toThrow(/SharePoint/)
+  })
+})
+
+// ---------- a fake S3 bucket that checks Signature Version 4 ----------
+
+describe('S3 and S3-compatible storage', () => {
+  const creds = { bucket: 'okafor-docs', region: 'eu-west-2', prefix: 'legal/', accessKeyId: 'AKIDEXAMPLE', secretAccessKey: 'wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY' }
+
+  it('signs requests the way AWS documents', () => {
+    // "GET Bucket (List Objects)" from the S3 Signature Version 4 examples.
+    const h = signS3Get({ bucket: 'examplebucket', region: 'us-east-1', accessKeyId: 'AKIAIOSFODNN7EXAMPLE', secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' }, new URL('https://examplebucket.s3.amazonaws.com/?max-keys=2&prefix=J'), new Date('2013-05-24T00:00:00Z'))
+    expect(h.Authorization).toBe('AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=34b48302e7b5fa45bde8084f4b7868a86f0a534bc59db6670ed5711ef69dc6f7')
+  })
+
+  it('lists, reads only changed objects and drops deleted ones', async () => {
+    let objects: Record<string, { etag: string; body: string }> = {
+      'legal/MSA.txt': { etag: '"e1"', body: 'Indemnity survives termination.' },
+      'legal/NDA.txt': { etag: '"e2"', body: 'Confidentiality lasts three years.' },
+      'legal/': { etag: '"d"', body: '' },
+      'legal/setup.exe': { etag: '"x"', body: '' },
+    }
+    const gets: string[] = []
+    const s3Fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input))
+      const headers = init?.headers as Record<string, string>
+      // Re-sign the same request: a server would reject anything else.
+      const now = headers['x-amz-date'].replace(/^(\d{4})(\d\d)(\d\d)T(\d\d)(\d\d)(\d\d)Z$/, '$1-$2-$3T$4:$5:$6Z')
+      if (signS3Get({ ...creds, endpoint: 'http://localhost:9000' }, url, new Date(now)).Authorization !== headers.Authorization) {
+        return new Response('<Error><Code>SignatureDoesNotMatch</Code></Error>', { status: 403 })
+      }
+      expect(url.pathname.startsWith('/okafor-docs')).toBe(true)   // path-style for custom endpoints
+      if (url.searchParams.get('list-type') === '2') {
+        expect(url.searchParams.get('prefix')).toBe('legal/')
+        const keys = Object.keys(objects)
+        const page = url.searchParams.get('continuation-token') ? keys.slice(2) : keys.slice(0, 2)
+        const more = !url.searchParams.get('continuation-token') && keys.length > 2
+        return new Response(`<?xml version="1.0"?><ListBucketResult>${page.map(k => `<Contents><Key>${k.replace(/&/g, '&amp;')}</Key><LastModified>2026-10-01T00:00:00.000Z</LastModified><ETag>${objects[k].etag.replace(/"/g, '&quot;')}</ETag><Size>${objects[k].body.length}</Size></Contents>`).join('')}<IsTruncated>${more}</IsTruncated>${more ? '<NextContinuationToken>p2</NextContinuationToken>' : ''}</ListBucketResult>`)
+      }
+      const key = decodeURIComponent(url.pathname.replace('/okafor-docs/', ''))
+      gets.push(key)
+      return new Response(objects[key].body)
+    }) as typeof fetch
+
+    const duct = new Duct({ embed: false })
+    const vault = new MemoryVault()
+    const manager = new ConnectorManager(duct, { dir: mkdtempSync(join(work, 's3-')), vault, clientIds: {}, openUrl: () => { throw new Error('S3 needs no browser') }, fetch: s3Fetch, entitled: () => true })
+    await expect(manager.add('s3', { s3: { ...creds, endpoint: 'http://localhost:9000', secretAccessKey: 'wrong' } })).rejects.toThrow(/SignatureDoesNotMatch/)
+    expect(manager.list()).toHaveLength(0)
+    expect(Object.keys(vault.data)).toHaveLength(0)
+
+    const c = await manager.add('s3', { s3: { ...creds, endpoint: 'http://localhost:9000' } })
+    expect(c.label).toBe('s3://okafor-docs/legal/')
+    await manager.sync(c.id)
+    expect(manager.list()[0].fileCount).toBe(2)
+    expect((await duct.search('indemnity'))[0].chunk.metadata).toMatchObject({ connector: 's3', remoteId: 'legal/MSA.txt' })
+
+    gets.length = 0
+    objects = { 'legal/MSA.txt': { etag: '"e3"', body: 'Indemnity ends with the agreement.' } }
+    await manager.sync(c.id)
+    expect(gets).toEqual(['legal/MSA.txt'])
+    expect((await duct.search('confidentiality')).length).toBe(0)
+    expect((await duct.search('agreement')).length).toBe(1)
+    expect(manager.list()[0].fileCount).toBe(1)
+  })
+
+  it('validates the bucket form', () => {
+    expect(() => s3Details({ bucket: 'docs', accessKeyId: 'a', secretAccessKey: 'b', endpoint: 'http://minio.example.com' })).toThrow(/https/)
+    expect(() => s3Details({ bucket: 'Bad_Bucket', accessKeyId: 'a', secretAccessKey: 'b' })).toThrow(/bucket/)
+    expect(s3Details({ bucket: 'docs', accessKeyId: 'a', secretAccessKey: 'b', prefix: '/contracts/' })).toEqual({ bucket: 'docs', region: 'us-east-1', accessKeyId: 'a', secretAccessKey: 'b', prefix: 'contracts/' })
   })
 })

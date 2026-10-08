@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The Docker image keeps its data in `/data` (`DUCT_HOME`) and runs as the unprivileged `node` user.
+
 ### Security
 - Spreadsheets are read with SheetJS 0.20.3 (fixes the prototype-pollution and ReDoS advisories in 0.18.5); pdf.js 6 and sharp 0.35.5 also clear their advisories.
 - `duct serve` listens on `127.0.0.1` by default and refuses other interfaces without `--auth-token`. It accepts only expected `Host` headers, rejects cross-origin writes, and sends a Content-Security-Policy.
@@ -17,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Browsers log in to a token-protected server once (`POST /api/login`, HttpOnly cookie).
 
 ### Added
+- Duct in your own cloud: `deploy/` has Docker Compose with automatic HTTPS (Caddy) and Kubernetes manifests; see docs/deploy.md. Shared servers can sign people in with the organisation's identity provider (OpenID Connect: Google Workspace, Entra ID, Okta…), with admins and members set by email and domain (`--oidc-issuer`, `--admin-email`, `--allow-domain`). An audit log of sign-ins, searches, opens, exports and admin changes (Settings › Audit log, `GET /api/audit`, CSV), kept 365 days; search text only with `--audit-queries`. `--trust-proxy` for running behind a proxy, and `/healthz`.
+- S3 connector: Amazon S3 and S3-compatible stores (MinIO, Cloudflare R2, Wasabi, Backblaze B2), from Settings › Library.
 - Cloud sources (Team): Google Drive (Docs, Sheets and Slides exported), OneDrive and SharePoint sites, read-only and incrementally, from Settings › Library. Results can open the file in the browser. See docs/connectors.md.
 - Hosted AI for Pro and Team: choose "Tensflare" for search by meaning or Ask in Settings › AI, with no API key; credits shown in Settings › Account. Settings sync across devices (search and AI settings and feature switches only, never keys, documents or paths). Settings › Account shows the plan, renewal and payments, and opens the account website signed in for upgrades, plan changes, refunds, team and devices.
 - Send feedback and Copy diagnostics (Settings › About and the Help menu). Diagnostics hold version, OS, settings and error codes, never document content. Crash records (error type and Duct's own stack frames only) are kept on the device and sent only if you include them with feedback. Links to the privacy policy, terms and refund policy in the app.

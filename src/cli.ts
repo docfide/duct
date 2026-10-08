@@ -17,6 +17,7 @@ import { OidcLogin } from './oidc.js'
 import { randomBytes } from 'node:crypto'
 import { SettingsSync } from './sync.js'
 import { ConnectorManager, FileTokenVault } from './connectors/manager.js'
+import { WebCallback } from './connectors/oauth.js'
 import { clientIdsFromEnv } from './connectors/sources.js'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
@@ -555,6 +556,7 @@ program
   .option('--audit-queries', 'Also record search terms and questions in the audit log')
   .option('--audit-days <days>', 'Keep audit entries this many days', (v) => parseInt(v), 365)
   .option('--no-audit', 'Don\'t keep an audit log')
+  .option('--trust-proxy <hops>', 'Behind a reverse proxy: trust this many proxy hops for client addresses and https (env: DUCT_TRUST_PROXY)', (v) => parseInt(v))
   .option('--allowed-host <name>', 'Extra hostname accepted in the Host header, e.g. duct.example.com (repeatable)', (v: string, prev: string[]) => [...prev, v], [] as string[])
   .action(async (options) => {
     try {
@@ -624,6 +626,7 @@ program
         clientIds: clientIdsFromEnv(process.env),
         openUrl: url => { console.log(`\n  Opening sign-in for a cloud source. If it doesn't open, visit:\n  ${chalk.cyan(url)}\n`); openBrowser(url) },
         entitled: () => account.has('team.connectors'),
+        ...(publicUrl ? { web: new WebCallback(publicUrl) } : {}),
       })
       connectors.start()
       const server = createServer(duct, {
@@ -632,6 +635,7 @@ program
         uploadLimitMb: options.uploadLimit,
         watchRoots: options.watchRoot,
         allowedHosts,
+        trustProxy: options.trustProxy ?? (Number(process.env['DUCT_TRUST_PROXY']) || undefined),
         libraryDir: options.library,
         account,
         telemetry,

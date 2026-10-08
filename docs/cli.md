@@ -235,6 +235,16 @@ duct serve --search-mode hybrid --alpha 0.3 --llm ollama
 | `--watch` | Watch this folder from startup, e.g. a mounted shared drive. Repeatable |
 | `--rescan` | Minutes between full rescans of watched folders, for network drives where file events are unreliable (default: 15, `0` = off) |
 | `--member-token` | Token for team members (repeatable; env `DUCT_MEMBER_TOKENS`, comma-separated). Requires `--auth-token` |
+| `--public-url` | This server's public address, e.g. `https://duct.example.com` (env `DUCT_PUBLIC_URL`). Needed for sign-in and for connecting cloud sources from a browser |
+| `--oidc-issuer` | Sign people in with your identity provider's OpenID Connect issuer (env `DUCT_OIDC_ISSUER`). Needs `--oidc-client-id`, `DUCT_OIDC_CLIENT_SECRET`, `--public-url` and an `--admin-email` |
+| `--oidc-client-id` | OIDC client id (env `DUCT_OIDC_CLIENT_ID`) |
+| `--admin-email` | Admin when signing in. Repeatable (env `DUCT_ADMIN_EMAILS`) |
+| `--allow-domain` | Anyone at this email domain may sign in as a member. Repeatable (env `DUCT_ALLOW_DOMAINS`) |
+| `--allow-email` | This person may sign in as a member. Repeatable (env `DUCT_ALLOW_EMAILS`) |
+| `--audit-queries` | Also record the search text in the audit log |
+| `--audit-days` | Days to keep audit entries (default: 365) |
+| `--no-audit` | Don't keep an audit log |
+| `--trust-proxy` | Behind a reverse proxy: the number of proxy hops to trust for client addresses and HTTPS (env `DUCT_TRUST_PROXY`) |
 
 ### Security
 
@@ -262,6 +272,19 @@ duct serve --host 0.0.0.0 \
 - **Members** (`--member-token`) can search, ask, open documents, upload to the library and run OCR. They can't change settings, delete documents, clear the index or change watched folders, and the UI hides those controls.
 - Everyone who can log in can search everything that's indexed. Duct doesn't apply the share's own file permissions, so only watch folders that the whole team may read.
 - Network drives often don't report file changes, so watched folders are also rescanned every `--rescan` minutes.
+
+### Sign-in with your identity provider
+
+Instead of sharing tokens, people can sign in with Google Workspace, Microsoft Entra ID, Okta or any OpenID Connect provider:
+
+```bash
+DUCT_OIDC_CLIENT_SECRET=… DUCT_SESSION_SECRET="$(openssl rand -hex 32)" \
+duct serve --host 0.0.0.0 --public-url https://duct.example.com \
+  --oidc-issuer https://accounts.google.com --oidc-client-id … \
+  --admin-email it@example.com --allow-domain example.com
+```
+
+Every sign-in, search, open, export and admin change is recorded in the audit log. For a complete setup with HTTPS, see [deploy.md](deploy.md).
 
 ### Rate Limiting
 

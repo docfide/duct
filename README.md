@@ -156,7 +156,7 @@ docker run -d -p 3456:3456 \
   duct serve --host 0.0.0.0 --watch /docs --persist /data/index --library /data/library
 ```
 
-See the [Dockerfile](Dockerfile) for build details. Deploy on Railway, Fly.io, or any VPS.
+For a team server with HTTPS and sign-in through your identity provider (Google Workspace, Entra ID, Okta), use the Docker Compose or Kubernetes setup in [`deploy/`](deploy) and follow [docs/deploy.md](docs/deploy.md).
 
 ## Development
 

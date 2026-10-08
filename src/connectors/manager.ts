@@ -7,19 +7,20 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync
 import { join } from 'node:path'
 import type { Duct } from '../index.js'
 import { safeFileName } from '../library.js'
-import { GoogleDrive, MicrosoftDrive, authorizeSource } from './sources.js'
-import type { ClientIds, ConnectorKind, ConnectorSource, RemoteFile, Tokens } from './sources.js'
+import { GoogleDrive, MicrosoftDrive, S3Source, authorizeSource } from './sources.js'
+import type { WebCallback } from './oauth.js'
+import type { ClientIds, ConnectorKind, ConnectorSource, RemoteFile, S3Credentials, Tokens } from './sources.js'
 
 /** Where connector tokens are kept: the system keychain in the desktop app, a private file elsewhere. */
 export interface TokenVault {
-  load(): Record<string, Tokens>
-  save(all: Record<string, Tokens>): void
+  load(): Record<string, Tokens | S3Credentials>
+  save(all: Record<string, Tokens | S3Credentials>): void
 }
 
 export class FileTokenVault implements TokenVault {
   constructor(private path: string) {}
   load() { try { return existsSync(this.path) ? JSON.parse(readFileSync(this.path, 'utf-8')) : {} } catch { return {} } }
-  save(all: Record<string, Tokens>) { writeFileSync(this.path, JSON.stringify(all), { mode: 0o600 }) }
+  save(all: Record<string, Tokens | S3Credentials>) { writeFileSync(this.path, JSON.stringify(all), { mode: 0o600 }) }
 }
 
 export interface ConnectorInfo {
@@ -47,6 +48,8 @@ export interface ConnectorOptions {
   /** Whether connectors are on this plan (entitlement "team.connectors"). */
   entitled: () => boolean
   onChange?: () => void
+  /** On a server in the cloud: sign-ins come back to <public-url>/connectors/callback instead of a loopback port. */
+  web?: WebCallback
 }
 
 export class ConnectorManager {
@@ -76,24 +79,31 @@ export class ConnectorManager {
   private filesDir(id: string) { return join(this.opts.dir, id, 'files') }
 
   private source(c: ConnectorInfo): ConnectorSource {
-    const tokens = this.opts.vault.load()[c.id]
-    if (!tokens) throw new Error('This source needs reconnecting')
+    const secret = this.opts.vault.load()[c.id]
+    if (!secret) throw new Error('This source needs reconnecting')
     const ctx = { fetch: this.fetchImpl, saveTokens: (t: Tokens) => { const all = this.opts.vault.load(); all[c.id] = t; this.opts.vault.save(all) } }
-    return c.kind === 'gdrive' ? new GoogleDrive(tokens, this.opts.clientIds.google, ctx) : new MicrosoftDrive(tokens, this.opts.clientIds.microsoft, ctx, c.drive)
+    if (c.kind === 's3') return new S3Source(secret as S3Credentials, ctx)
+    return c.kind === 'gdrive' ? new GoogleDrive(secret as Tokens, this.opts.clientIds.google, ctx) : new MicrosoftDrive(secret as Tokens, this.opts.clientIds.microsoft, ctx, c.drive)
   }
 
   /** Signs in to a source in the browser, then starts reading it in the background. */
-  async add(kind: ConnectorKind, options: { siteUrl?: string } = {}): Promise<ReturnType<ConnectorManager['list']>[number]> {
+  get web(): WebCallback | undefined { return this.opts.web }
+
+  /** `openUrl` overrides where the sign-in page is sent (a server hands it to the admin's browser). */
+  async add(kind: ConnectorKind, options: { siteUrl?: string; s3?: S3Credentials; openUrl?: (url: string) => void } = {}): Promise<ReturnType<ConnectorManager['list']>[number]> {
     if (!this.opts.entitled()) throw Object.assign(new Error('Connectors are part of the Team plan.'), { status: 403 })
-    const tokens = await authorizeSource(kind, this.opts.clientIds, this.opts.openUrl, this.fetchImpl)
+    if (kind === 's3' && !options.s3) throw new Error('Bucket details are required')
+    const tokens = kind === 's3' ? options.s3! : await authorizeSource(kind, this.opts.clientIds, options.openUrl ?? this.opts.openUrl, this.fetchImpl, this.opts.web)
     const id = `${kind}-${randomBytes(4).toString('hex')}`
     const all = this.opts.vault.load()
     all[id] = tokens
     this.opts.vault.save(all)
-    const info: ConnectorInfo = { id, kind, label: kind === 'gdrive' ? 'Google Drive' : 'Microsoft 365', cursor: null, files: {}, addedAt: new Date().toISOString() }
+    const info: ConnectorInfo = { id, kind, label: kind === 'gdrive' ? 'Google Drive' : kind === 's3' ? 'S3' : 'Microsoft 365', cursor: null, files: {}, addedAt: new Date().toISOString() }
     try {
       const src = this.source(info)
       if (kind === 'microsoft' && options.siteUrl) info.drive = await (src as MicrosoftDrive).resolveSite(options.siteUrl)
+      // S3: check the credentials and bucket now, with one listing.
+      if (kind === 's3') await src.changes(null)
       info.label = await this.source(info).label()
     } catch (err) {
       delete all[id]
@@ -126,7 +136,7 @@ export class ConnectorManager {
       const src = this.source(c)
       const changes = await src.changes(c.cursor)
       // A full listing replaces what we know: anything not listed any more is gone.
-      if (c.cursor === null) {
+      if (changes.full) {
         const listed = new Set(changes.upserts.map(f => f.id))
         for (const known of Object.keys(c.files)) if (!listed.has(known)) changes.removed.push(known)
       }

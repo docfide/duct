@@ -1,5 +1,6 @@
 // OAuth 2.0 for native apps (RFC 8252): the system browser, a one-request loopback listener and PKCE.
 // Used by the connectors (Google Drive, Microsoft OneDrive and SharePoint) to get read-only tokens.
+// A server in the cloud uses a WebCallback instead: the provider redirects to <public-url>/connectors/callback.
 
 import { createHash, randomBytes } from 'node:crypto'
 import http from 'node:http'
@@ -11,15 +12,59 @@ const PAGE = (title: string, text: string) => `<!doctype html><meta charset="utf
 
 export interface LoopbackResult { code: string; redirectUri: string; verifier: string }
 
+type Outcome = { code?: string; error?: string }
+
+/** Receives the provider's redirect on a public server, for sign-ins started in someone else's browser. */
+export class WebCallback {
+  private waiting = new Map<string, (r: Outcome) => void>()
+  readonly redirectUri: string
+  constructor(publicUrl: string) { this.redirectUri = `${publicUrl.replace(/\/+$/, '')}/connectors/callback` }
+
+  wait(state: string): Promise<Outcome> {
+    return new Promise(resolve => this.waiting.set(state, r => { this.waiting.delete(state); resolve(r) }))
+  }
+
+  cancel(state: string, error: string): void { this.waiting.get(state)?.({ error }) }
+
+  /** Handles GET /connectors/callback; false when the state isn't one we're waiting for. */
+  complete(query: URLSearchParams): boolean {
+    const done = this.waiting.get(query.get('state') ?? '')
+    if (!done) return false
+    const code = query.get('code')
+    done(code ? { code } : { error: query.get('error_description') || query.get('error') || 'Authorization failed' })
+    return !!code
+  }
+}
+
+export const callbackPage = (ok: boolean) => ok
+  ? PAGE('Connected to Duct', 'Duct is reading this source now. <a style="color:#a3e635" href="/">Back to Duct</a>')
+  : PAGE('That didn’t work', 'Go back to Duct and try again. <a style="color:#a3e635" href="/">Back to Duct</a>')
+
 /** Opens `authorizeUrl` (with PKCE, state and a loopback redirect added) and waits for the browser to come back. */
 export async function loopbackAuthorize(opts: {
   authorizeUrl: string
   params: Record<string, string>
   openUrl: (url: string) => void | Promise<void>
   timeoutMs?: number
+  web?: WebCallback
 }): Promise<LoopbackResult> {
   const verifier = randomBytes(32).toString('base64url')
   const state = randomBytes(16).toString('base64url')
+  if (opts.web) {
+    const web = opts.web
+    const result = web.wait(state)
+    const timer = setTimeout(() => web.cancel(state, 'Timed out waiting for the browser'), opts.timeoutMs ?? 10 * 60_000)
+    try {
+      const url = new URL(opts.authorizeUrl)
+      for (const [k, v] of Object.entries({ ...opts.params, redirect_uri: web.redirectUri, state, code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256', response_type: 'code' })) url.searchParams.set(k, v)
+      await opts.openUrl(url.toString())
+      const r = await result
+      if (r.error || !r.code) throw new Error(r.error ?? 'Authorization failed')
+      return { code: r.code, redirectUri: web.redirectUri, verifier }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
   let finish!: (r: { code?: string; error?: string }) => void
   const result = new Promise<{ code?: string; error?: string }>(resolve => { finish = resolve })
   const server = http.createServer((req, res) => {

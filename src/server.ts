@@ -22,6 +22,8 @@ import type { TensflareAccount } from './account.js'
 import type { Telemetry } from './telemetry.js'
 import type { SettingsSync } from './sync.js'
 import type { ConnectorManager } from './connectors/manager.js'
+import type { S3Credentials } from './connectors/sources.js'
+import { callbackPage } from './connectors/oauth.js'
 import type { OidcLogin } from './oidc.js'
 import { clearCrashes, collectDiagnostics, listCrashes, sendFeedback, validateFeedback } from './diagnostics.js'
 import { Collections } from './api/collections.js'
@@ -77,6 +79,8 @@ export interface ServerOptions {
   watchRoots?: string[]
   /** Hostnames accepted in the Host header. Defaults to loopback names; '*' accepts any (only with authToken). */
   allowedHosts?: string[] | '*'
+  /** Behind a reverse proxy (Caddy, nginx, a load balancer): how many proxy hops to trust for the client's address and https. */
+  trustProxy?: number
   /** Where uploaded files are kept. Defaults to ~/Duct Library; created on first upload. */
   libraryDir?: string
   /**
@@ -258,6 +262,11 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     res.status(403).json({ error: 'Only an admin can do this.' })
   }
 
+  if (opts?.trustProxy) app.set('trust proxy', opts.trustProxy)
+
+  // For load balancers and orchestrators; says nothing about the index.
+  app.get('/healthz', (_req, res) => { res.json({ ok: true }) })
+
   // Security headers on every response.
   app.use((_req, res, next) => {
     res.setHeader('Content-Security-Policy', CSP)
@@ -306,6 +315,13 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     try { duct.recordAudit({ actor: user.email, role: user.role, action: 'signin' }) } catch {}
   }))
   else app.get('/auth/mode', (_req, res) => { res.json({ oidc: false }) })
+
+  // Connector sign-ins on a public server come back here; the random state ties it to the sign-in an admin started.
+  app.get('/connectors/callback', (req, res) => {
+    const web = opts?.connectors?.web
+    const ok = !!web && web.complete(new URLSearchParams(req.query as Record<string, string>))
+    res.status(ok ? 200 : 400).set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'").type('html').send(callbackPage(ok))
+  })
 
   app.use('/api/', auth)
 
@@ -386,7 +402,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     try { res.json(await account.aiInfo()) } catch (err) { res.status(502).json({ error: (err as Error).message }) }
   })
 
-  // ---------- connectors (Google Drive, OneDrive, SharePoint) ----------
+  // ---------- connectors (Google Drive, OneDrive, SharePoint, S3) ----------
 
   const connectors = opts?.connectors
   let connecting: { kind: string; error?: string; running: boolean } | null = null
@@ -400,14 +416,26 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
   app.post('/api/connectors', adminOnly, (req, res) => {
     if (!connectors) { res.status(404).json({ error: 'Connectors aren’t available here.' }); return }
     const kind = req.body?.kind
-    if (kind !== 'gdrive' && kind !== 'microsoft') { res.status(400).json({ error: 'kind must be gdrive or microsoft' }); return }
+    if (kind !== 'gdrive' && kind !== 'microsoft' && kind !== 's3') { res.status(400).json({ error: 'kind must be gdrive, microsoft or s3' }); return }
     if (!connectors.available().entitled) { res.status(403).json({ error: 'Connectors are part of the Team plan.' }); return }
+    if (kind === 's3') {
+      // No browser sign-in: the keys are checked with one listing before the source is saved.
+      let s3
+      try { s3 = s3Details(req.body) } catch (err) { res.status(400).json({ error: (err as Error).message }); return }
+      audit(res, 'connector-add', 's3', `s3://${s3.bucket}/${s3.prefix ?? ''}`)
+      connectors.add('s3', { s3 }).then(c => res.status(201).json(c), err => res.status(400).json({ error: `Couldn’t read the bucket: ${(err as Error).message}` }))
+      return
+    }
     const siteUrl = typeof req.body?.siteUrl === 'string' && req.body.siteUrl.trim() ? req.body.siteUrl.trim() : undefined
     if (connecting?.running) { res.status(409).json({ error: 'Finish the sign-in that’s already open first.' }); return }
     connecting = { kind, running: true }
     audit(res, 'connector-add', kind, siteUrl)
-    connectors.add(kind, { siteUrl }).then(() => { connecting = null }, err => { connecting = { kind, running: false, error: (err as Error).message } })
-    res.status(202).json({ started: true })
+    // A public server sends the admin's browser to the provider; on the desktop the system browser opens.
+    let handOver: ((url: string) => void) | undefined
+    const signInUrl = connectors.web ? new Promise<string>(resolve => { handOver = resolve }) : null
+    connectors.add(kind, { siteUrl, ...(handOver ? { openUrl: handOver } : {}) }).then(() => { connecting = null }, err => { connecting = { kind, running: false, error: (err as Error).message }; handOver?.('') })
+    if (!signInUrl) { res.status(202).json({ started: true }); return }
+    signInUrl.then(url => url ? res.status(202).json({ started: true, url }) : res.status(400).json({ error: connecting?.error ?? 'Couldn’t start the sign-in' }))
   })
 
   app.post('/api/connectors/:id/sync', adminOnly, (req, res) => {
@@ -868,3 +896,22 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
   return app
 }
 
+
+/** Validates the S3 form. Plain http is only for a store on this machine (a local MinIO): keys never cross a network unencrypted. */
+export function s3Details(body: Record<string, unknown> | undefined): S3Credentials {
+  const str = (k: string) => typeof body?.[k] === 'string' ? (body[k] as string).trim() : ''
+  const bucket = str('bucket'), accessKeyId = str('accessKeyId'), secretAccessKey = str('secretAccessKey')
+  const region = str('region') || 'us-east-1'
+  if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket)) throw new Error('Enter the bucket’s name')
+  if (!accessKeyId || !secretAccessKey) throw new Error('Enter an access key and its secret')
+  if (!/^[a-z0-9-]+$/.test(region)) throw new Error('The region looks wrong (e.g. eu-west-2, or auto for R2)')
+  const endpoint = str('endpoint')
+  if (endpoint) {
+    let u: URL
+    try { u = new URL(endpoint) } catch { throw new Error('The endpoint isn’t a web address') }
+    const local = ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname)
+    if (u.protocol !== 'https:' && !(u.protocol === 'http:' && local)) throw new Error('The endpoint must use https')
+  }
+  const prefix = str('prefix').replace(/^\/+/, '')
+  return { bucket, region, accessKeyId, secretAccessKey, ...(endpoint ? { endpoint } : {}), ...(prefix ? { prefix } : {}) }
+}
