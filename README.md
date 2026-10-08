@@ -175,4 +175,4 @@ Apache 2.0 — see [LICENSE](LICENSE).
 
 ---
 
-Built by [Docfide](https://docfide.com). We build contract software; Duct is our gift to developers who work with documents.
+Built by [Tensflare](https://tensflare.com), which builds trust infrastructure for consequential AI. Website: [duct.tensflare.com](https://duct.tensflare.com).
