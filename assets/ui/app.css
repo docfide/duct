@@ -329,9 +329,30 @@ dialog::backdrop { background: rgba(0,0,0,.55); }
 /* Why this result, and the empty-search help */
 .why-btn { font: inherit; font-family: var(--sans, inherit); font-size: 12px; color: var(--subtle); background: none; border: 0; padding: 0 4px; margin-left: auto; cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
 .why-btn:hover, .why-btn[aria-expanded="true"] { color: var(--lime); }
-.why { font-size: 12px; color: var(--muted); margin-top: 4px; padding: 6px 8px; border-left: 2px solid var(--lime); background: color-mix(in srgb, var(--lime) 6%, transparent); border-radius: 0 var(--r) var(--r) 0; }
+.why { font-size: 12px; color: var(--muted); margin-top: 4px; padding: 6px 8px; border-left: 2px solid var(--lime); background: var(--lime-bg); border-radius: 0 var(--r) var(--r) 0; }
 .link-btn { font: inherit; color: var(--lime); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
 #resultsEmptyText { max-width: 520px; margin: 0 auto; }
 #resultsEmptyText p { margin: 8px 0; }
 .help-lead { font-size: 16px; color: var(--text); }
 .help-coverage { color: var(--muted); }
+
+/* Settings › Privacy: the ledger */
+.ledger-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+.ledger-head h3 { margin: 0; }
+.seg { display: inline-flex; border: 1px solid var(--border2); border-radius: var(--r); overflow: hidden; }
+.seg-btn { font: inherit; font-size: 12px; background: none; color: var(--subtle); border: 0; padding: 5px 10px; cursor: pointer; }
+.seg-btn.active { background: var(--border2); color: var(--text); }
+.ledger-nothing { border: 1px solid var(--border2); border-radius: var(--r); padding: 18px; text-align: center; }
+.ledger-nothing strong { font-size: 22px; color: var(--lime); }
+.ledger-nothing p { color: var(--subtle); margin: 6px 0 0; }
+.ledger-cat { border: 1px solid var(--border2); border-radius: var(--r); padding: 10px 12px; margin: 10px 0; }
+.ledger-cat .hint { margin: 2px 0 8px; }
+.ledger-host { display: flex; justify-content: space-between; gap: 10px; font-size: 12.5px; padding: 3px 0; border-top: 1px solid var(--border); }
+.ledger-host span { color: var(--subtle); white-space: nowrap; }
+.ledger-recent { margin-top: 12px; font-size: 12px; }
+.ledger-recent summary { cursor: pointer; color: var(--subtle); }
+.ledger-entry { display: flex; gap: 10px; align-items: baseline; padding: 3px 0; overflow: hidden; }
+.ledger-entry .when { color: var(--muted); white-space: nowrap; }
+.ledger-entry code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ledger-foot { margin-top: 14px; }
+.offline-note { position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 50; background: var(--s2); color: var(--text); border: 1px solid var(--border2); border-radius: 999px; padding: 6px 14px; font-size: 12.5px; }

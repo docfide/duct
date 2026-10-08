@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, dialog, nativeImage, shell, Notification, ipcMain, globalShortcut, safeStorage } = require('electron')
+const { app, BrowserWindow, Menu, Tray, dialog, nativeImage, shell, Notification, ipcMain, globalShortcut, safeStorage, session } = require('electron')
 const { createIsland } = require('./island.cjs')
 const path = require('path')
 const fs = require('fs')
@@ -13,6 +13,7 @@ let formats = null   // src/formats.ts: the supported file types
 let island = null
 let account = null     // src/account.ts: Sign in with Tensflare
 let telemetry = null   // src/telemetry.ts: anonymous usage counts
+let ledger = null      // src/ledger.ts: what left this computer
 
 const SEARCH_SHORTCUT = 'CommandOrControl+Shift+Space'
 
@@ -144,6 +145,13 @@ function libraryDir() {
 }
 
 async function createDuct() {
+  // First, so every connection Duct makes from here on is in the privacy ledger (Settings › Privacy).
+  ledger = (await import('../dist/ledger.js')).installLedger(app.getPath('userData'))
+  // The windows' own connections (Chromium, e.g. spell-check dictionaries) go in the ledger too.
+  session.defaultSession.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (details, callback) => {
+    try { ledger.record(details.url, details.method, 0) } catch {}
+    callback({})
+  })
   const { Duct } = await import('../dist/index.js')
   library = await import('../dist/library.js')
   formats = await import('../dist/formats.js')
@@ -595,6 +603,7 @@ app.on('before-quit', () => {
   if (tray) tray.destroy()
   if (server) server.close()
   if (telemetry) telemetry.stop()   // saves today's counters
+  if (ledger) ledger.save()
   if (duct) {
     try { duct.close() } catch {}
     duct = null

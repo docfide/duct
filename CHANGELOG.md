@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - No dead ends: a search that finds nothing says what Duct searched, what it couldn't look inside (scans with no text yet, password-protected and unreadable files, files still being read), how many results the filters hid, and "Did you mean" using the spelling in your documents. `GET /api/search` returns this as `help`.
+- The privacy ledger (Settings › Privacy): every connection Duct makes to another computer, recorded on the device by Duct itself: where to, what for (Tensflare, the AI provider you chose, cloud sources, sign-in, web pages you added), how many requests and how much was sent. When nothing left, it says "Nothing." It watches `fetch`, Node's `http`/`https` (used by provider SDKs) and, in the desktop app, the windows' own requests; connections to this computer (a local Ollama) aren't counted. Kept 30 days; `GET`/`DELETE /api/ledger`.
+- Offline: Duct says "You're offline. Everything in Duct is still searchable."
 - "Why this result?": each result can show the words that matched as written in the passage (including other forms, such as "termination" for "terminate"), a file-name match, or a match by meaning (`why` in the API).
 
 ### Fixed

@@ -1298,7 +1298,62 @@ async function renderTelemetry() {
   $('#telemetryReport').textContent = t.report ? JSON.stringify(t.report, null, 2) : ''
 }
 
+// ---------- privacy ledger ----------
+
+const LEDGER_WHAT = {
+  tensflare: 'Sign-in checks, the anonymous usage count if it’s on, feedback you chose to send, and hosted AI questions. Never your files.',
+  ai: 'The question and the passages needed to answer it, or text to index for search by meaning: only because you chose this provider.',
+  cloud: 'Requests to read the sources you connected. Files come in; nothing of yours goes out.',
+  signin: 'Signing in to a service you connected.',
+  web: 'Fetching web pages you added to Duct.',
+}
+let ledgerDays = 1
+
+const kb = n => n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(1) + ' MB'
+
+async function renderLedger() {
+  const box = $('#ledgerBody')
+  $$('[data-ledger-days]').forEach(b => b.classList.toggle('active', Number(b.dataset.ledgerDays) === ledgerDays))
+  let l
+  try { l = await json('/api/ledger?days=' + ledgerDays) } catch (err) { box.innerHTML = '<p class="hint">' + esc(err.message) + '</p>'; return }
+  if (!l.recording) { box.innerHTML = '<p class="hint">This server doesn’t keep a ledger.</p>'; return }
+  const period = ledgerDays === 1 ? 'today' : 'in the last ' + ledgerDays + ' days'
+  const byCat = {}
+  for (const d of l.days) for (const h of d.hosts) {
+    const c = byCat[h.category] ||= {}
+    const e = c[h.host] ||= { host: h.host, requests: 0, bytesOut: 0 }
+    e.requests += h.requests
+    e.bytesOut += h.bytesOut
+  }
+  const cats = Object.keys(byCat)
+  const body = cats.length === 0
+    ? '<div class="ledger-nothing"><strong>Nothing.</strong><p>Duct made no connections to other computers ' + period + '. Your documents, searches and settings stayed here.</p></div>'
+    : '<p class="hint">Every connection Duct made ' + period + ', by what it was for. Anything not listed didn’t happen.</p>' +
+      ['tensflare', 'ai', 'cloud', 'signin', 'web'].filter(c => byCat[c]).map(c =>
+        '<div class="ledger-cat"><div class="ledger-cat-head"><strong>' + esc(l.labels[c]) + '</strong></div><p class="hint">' + esc(LEDGER_WHAT[c]) + '</p>' +
+        Object.values(byCat[c]).sort((a, b) => b.requests - a.requests).map(h =>
+          '<div class="ledger-host"><code>' + esc(h.host) + '</code><span>' + esc(plural(h.requests, 'request')) + (h.bytesOut ? ' · ' + kb(h.bytesOut) + ' sent' : '') + '</span></div>').join('') + '</div>').join('')
+  const recent = l.recent.length
+    ? '<details class="ledger-recent"><summary>Latest connections</summary>' + l.recent.map(e =>
+        '<div class="ledger-entry"><span class="when">' + esc(new Date(e.at).toLocaleString()) + '</span><code>' + esc(e.method) + ' ' + esc(e.host) + esc(e.path || '') + '</code>' + (e.bytesOut ? '<span class="hint">' + kb(e.bytesOut) + '</span>' : '') + '</div>').join('') + '</details>'
+    : ''
+  box.innerHTML = body + recent +
+    '<p class="hint ledger-foot">Duct keeps this record itself, on this device, from every connection it makes. Tensflare never sees it. Recording since ' + esc(new Date(l.since).toLocaleString()) + '; kept 30 days. <button class="link-btn" data-action="clear-ledger">Clear</button></p>'
+}
+
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-ledger-days]')
+  if (b) { ledgerDays = Number(b.dataset.ledgerDays); renderLedger() }
+})
+
+// Offline: say so, and that nothing is lost.
+const updateOnline = () => { $('#offlineNote').hidden = navigator.onLine }
+window.addEventListener('online', updateOnline)
+window.addEventListener('offline', updateOnline)
+updateOnline()
+
 function showTab(tab) {
+  if (tab === 'privacy') renderLedger()
   if (tab === 'account') renderAccount()
   if (tab === 'about') renderCrashSummary()
   if (tab === 'audit') renderAudit()
@@ -1426,6 +1481,7 @@ const ACTIONS = {
   'finish-welcome': () => { rememberWelcome(); showApp() },
   'show-attention': () => { state.docFilter = 'attention'; setView('documents') },
   'search-for': el => { $('#q').value = el.dataset.q; state.query = el.dataset.q; runSearch() },
+  'clear-ledger': async () => { try { await json('/api/ledger', { method: 'DELETE' }) } catch (err) { toast(err.message, true) }; renderLedger() },
   'clear-filters': () => { state.group = null; state.source = null; state.tags = []; state.date = null; renderSidebar(); runSearch() },
   'ask-instead': () => { const q = state.query; setMode('ask'); ask(q) },
   'close-preview': () => closePreview(),

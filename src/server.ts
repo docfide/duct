@@ -24,6 +24,7 @@ import type { SettingsSync } from './sync.js'
 import type { ConnectorManager } from './connectors/manager.js'
 import type { S3Credentials } from './connectors/sources.js'
 import { callbackPage } from './connectors/oauth.js'
+import { currentLedger, LEDGER_CATEGORY_LABELS } from './ledger.js'
 import type { OidcLogin } from './oidc.js'
 import { clearCrashes, collectDiagnostics, listCrashes, sendFeedback, validateFeedback } from './diagnostics.js'
 import { Collections } from './api/collections.js'
@@ -447,6 +448,20 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
   app.delete('/api/connectors/:id', adminOnly, async (req, res) => {
     if (!connectors || !(await connectors.remove(req.params['id'] as string))) { res.status(404).json({ error: 'No such source' }); return }
     audit(res, 'connector-remove', req.params['id'] as string)
+    res.json({ ok: true })
+  })
+
+  // ---------- the privacy ledger: what left this computer ----------
+
+  app.get('/api/ledger', adminOnly, (req, res) => {
+    const ledger = currentLedger()
+    if (!ledger) { res.json({ recording: false, days: [], recent: [], labels: LEDGER_CATEGORY_LABELS }); return }
+    const days = Math.min(30, Math.max(1, parseInt(String(req.query['days'])) || 7))
+    res.json({ recording: true, since: new Date(ledger.since).toISOString(), days: ledger.summary(days), recent: ledger.recent(50), labels: LEDGER_CATEGORY_LABELS })
+  })
+
+  app.delete('/api/ledger', adminOnly, (_req, res) => {
+    currentLedger()?.clear()
     res.json({ ok: true })
   })
 

@@ -467,3 +467,24 @@ POST /api/unwatch
 ```
 
 **Response:** `{ "ok": true }`
+
+
+## `GET /api/ledger`
+
+The privacy ledger (admin): every connection this Duct process made to another computer, recorded locally.
+
+```
+GET /api/ledger?days=7
+```
+
+```json
+{
+  "recording": true,
+  "since": "2026-10-08T09:00:00.000Z",
+  "days": [{ "day": "2026-10-08", "hosts": [{ "host": "api.openai.com", "category": "ai", "requests": 12, "bytesOut": 48211, "lastAt": 1791450000000 }] }],
+  "recent": [{ "at": 1791450000000, "host": "telemetry.tensflare.com", "category": "tensflare", "method": "POST", "path": "/v1/duct/report", "bytesOut": 612 }],
+  "labels": { "tensflare": "Tensflare (account, usage counts, feedback, hosted AI)", "ai": "AI provider you chose" }
+}
+```
+
+Categories: `tensflare`, `ai`, `cloud`, `signin`, `web`. Paths are kept only for Tensflare's own endpoints, since other paths can name files. Requests to this computer itself aren't recorded. `DELETE /api/ledger` clears it.

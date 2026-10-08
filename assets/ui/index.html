@@ -9,6 +9,7 @@
   <script type="module" src="/ui/app.js"></script>
 </head>
 <body>
+  <div class="offline-note" id="offlineNote" role="status" hidden>You’re offline. Everything in Duct is still searchable.</div>
   <!-- First run: shown until something has been added (or the person skips it). -->
   <section id="welcome" class="welcome" hidden aria-labelledby="welcomeTitle">
     <div class="welcome-card">
@@ -175,6 +176,7 @@
         <button role="tab" class="tab" data-tab="ai" data-admin>AI</button>
         <button role="tab" class="tab" data-tab="library">Library</button>
         <button role="tab" class="tab" data-tab="account" data-admin>Account</button>
+        <button role="tab" class="tab" data-tab="privacy" data-admin>Privacy</button>
         <button role="tab" class="tab" data-tab="audit" data-admin>Audit log</button>
         <button role="tab" class="tab" data-tab="about">About</button>
       </nav>
@@ -272,6 +274,17 @@
           <button class="btn btn-ghost" data-action="watch-folder" data-requires="watch">Watch a folder</button>
           <h3 data-admin>Danger zone</h3>
           <button class="btn btn-danger" data-action="clear-index" data-admin>Clear the index</button>
+        </section>
+        <section class="panel" data-panel="privacy" hidden>
+          <div class="ledger-head">
+            <h3>What left this computer</h3>
+            <div class="seg" role="group" aria-label="Period">
+              <button class="seg-btn active" data-ledger-days="1">Today</button>
+              <button class="seg-btn" data-ledger-days="7">7 days</button>
+              <button class="seg-btn" data-ledger-days="30">30 days</button>
+            </div>
+          </div>
+          <div id="ledgerBody"></div>
         </section>
         <section class="panel" data-panel="audit" hidden>
           <div id="auditList"></div>

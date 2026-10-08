@@ -18,6 +18,7 @@ import { randomBytes } from 'node:crypto'
 import { SettingsSync } from './sync.js'
 import { ConnectorManager, FileTokenVault } from './connectors/manager.js'
 import { WebCallback } from './connectors/oauth.js'
+import { installLedger } from './ledger.js'
 import { clientIdsFromEnv } from './connectors/sources.js'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
@@ -610,6 +611,7 @@ program
       const allowedHosts = loopback
         ? ['localhost', '127.0.0.1', '::1', ...options.allowedHost]
         : options.allowedHost.length > 0 ? ['localhost', '127.0.0.1', '::1', ...options.allowedHost] : '*' as const
+      installLedger(dataDir(options.persist))
       const account = accountFor(dataDir(options.persist))
       const channel = existsSync('/.dockerenv') ? 'docker' : 'server'
       const crashDir = join(dataDir(options.persist), 'crashes')
