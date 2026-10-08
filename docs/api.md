@@ -283,6 +283,7 @@ curl -X PUT localhost:3456/api/features -H 'Content-Type: application/json' \
 | `ocrOnDemand` | `POST /api/ocr` answers 403 |
 | `export` | `GET /api/export` answers 403 |
 | `diff` | `GET /api/diff` answers 403 |
+| `developerApi` | every [`/v1` route](developer-api.md) answers 403 |
 | `formats.<family>` | files of that family (`document`, `spreadsheet`, `presentation`, `ebook`, `email`, `text`, `code`, `image`, `archive`) are skipped when indexing and hidden from search |
 
 A refused request answers `403 {"error": "…", "feature": "ask"}`. `GET /api/info` also carries `features`.

@@ -341,6 +341,61 @@ program
     }
   })
 
+const keys = program.command('keys').description('API keys for the developer API (/v1)')
+
+keys
+  .command('create')
+  .description('Create an API key; it is shown once')
+  .requiredOption('--name <name>', 'What the key is for, e.g. "website search"')
+  .option('--scopes <list>', 'Comma-separated: search, write, admin', 'search')
+  .option('--collections <list>', 'Limit the key to these collections (default: all)')
+  .option('--persist <path>', 'Index directory (default: $DUCT_HOME or ~/.duct)')
+  .action((options) => {
+    const duct = new Duct({ persistPath: dataDir(options.persist), embed: false })
+    try {
+      const scopes = String(options.scopes).split(',').map(s => s.trim()).filter(Boolean)
+      const bad = scopes.filter(s => !['search', 'write', 'admin'].includes(s))
+      if (bad.length || !scopes.length) throw new Error(`Unknown scope: ${bad.join(', ') || '(none)'}. Use search, write or admin.`)
+      const collections = options.collections ? String(options.collections).split(',').map(s => s.trim()).filter(Boolean) : null
+      const { id, key } = duct.createApiKey(options.name, scopes, collections)
+      console.log(`\n  ${chalk.green('✓')} Key ${chalk.bold(id)} (${scopes.join(', ')}${collections ? `; ${collections.join(', ')}` : ''})\n`)
+      console.log(`  ${key}\n`)
+      console.log(chalk.dim('  Copy it now: only its hash is stored. Use it as "Authorization: Bearer <key>".\n'))
+    } catch (err) {
+      console.error(`  ${chalk.red('✗')} ${chalk.red((err as Error).message)}`)
+      process.exitCode = 1
+    } finally {
+      duct.close()
+    }
+  })
+
+keys
+  .command('list')
+  .description('List API keys')
+  .option('--persist <path>', 'Index directory (default: $DUCT_HOME or ~/.duct)')
+  .action((options) => {
+    const duct = new Duct({ persistPath: dataDir(options.persist), embed: false })
+    const list = duct.listApiKeys()
+    if (!list.length) console.log(chalk.dim('\n  No API keys. Create one with: duct keys create --name "my app"\n'))
+    for (const k of list) {
+      const used = k.lastUsedAt ? `last used ${new Date(k.lastUsedAt).toISOString().slice(0, 16).replace('T', ' ')}` : 'never used'
+      console.log(`  ${chalk.bold(k.id)}  ${k.name.padEnd(24)} ${k.scopes.join(',').padEnd(18)} ${(k.collections?.join(',') ?? 'all collections').padEnd(20)} ${chalk.dim(used)}`)
+    }
+    duct.close()
+  })
+
+keys
+  .command('revoke')
+  .description('Revoke an API key')
+  .argument('<id>', 'Key id from "duct keys list"')
+  .option('--persist <path>', 'Index directory (default: $DUCT_HOME or ~/.duct)')
+  .action((id: string, options) => {
+    const duct = new Duct({ persistPath: dataDir(options.persist), embed: false })
+    if (duct.revokeApiKey(id)) console.log(`  ${chalk.green('✓')} Revoked ${id}`)
+    else { console.error(`  ${chalk.red('✗')} No key ${id}`); process.exitCode = 1 }
+    duct.close()
+  })
+
 program
   .command('features')
   .description('Show which features are on, or switch them: duct features ask=off formats.image=off')

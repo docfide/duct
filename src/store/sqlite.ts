@@ -45,6 +45,30 @@ export interface NewDocument {
   chunkMetadata: Record<string, unknown>
 }
 
+export interface StoredApiKey {
+  id: string
+  name: string
+  scopes: string[]
+  /** Collections the key may use; null means all. */
+  collections: string[] | null
+  createdAt: number
+  lastUsedAt: number | null
+}
+
+interface ApiKeyRow {
+  id: string
+  name: string
+  key_hash: string
+  scopes: string
+  collections: string | null
+  created_at: number
+  last_used_at: number | null
+}
+
+function toApiKey(r: ApiKeyRow): StoredApiKey {
+  return { id: r.id, name: r.name, scopes: r.scopes.split(' ').filter(Boolean), collections: r.collections ? JSON.parse(r.collections) : null, createdAt: r.created_at, lastUsedAt: r.last_used_at }
+}
+
 interface DocumentRow {
   id: number
   path: string
@@ -203,6 +227,16 @@ export class SqliteStore {
       CREATE INDEX IF NOT EXISTS versions_path ON versions(path, version);
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS sources (path TEXT PRIMARY KEY, kind TEXT NOT NULL, added_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS api_keys (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        key_hash TEXT NOT NULL UNIQUE,
+        scopes TEXT NOT NULL,
+        collections TEXT,
+        created_at INTEGER NOT NULL,
+        last_used_at INTEGER,
+        revoked_at INTEGER
+      );
     `)
     // v1 -> v2: chunks gained a page number. Re-extract PDFs and slide decks so their chunks get one.
     const columns = this.db.prepare('PRAGMA table_info(chunks)').all() as unknown as { name: string }[]
@@ -332,6 +366,69 @@ export class SqliteStore {
   lastVersions(path: string): { version: number; content: string; createdAt: number }[] {
     const rows = this.db.prepare('SELECT version, content, created_at FROM versions WHERE path = ? ORDER BY version DESC LIMIT 2').all(path) as unknown as { version: number; content: string; created_at: number }[]
     return rows.reverse().map(r => ({ version: r.version, content: r.content, createdAt: r.created_at }))
+  }
+
+  /** The newest stored text of a document, if versions are kept for it. */
+  latestContent(path: string): string | undefined {
+    const row = this.db.prepare('SELECT content FROM versions WHERE path = ? ORDER BY version DESC LIMIT 1').get(path) as { content: string } | undefined
+    return row?.content
+  }
+
+  /** One page of documents, newest first, and the total. */
+  pageDocuments(limit: number, offset: number): { documents: StoredDocument[]; total: number } {
+    const rows = this.db.prepare('SELECT * FROM documents ORDER BY indexed_at DESC, id DESC LIMIT ? OFFSET ?').all(limit, offset) as unknown as DocumentRow[]
+    const total = (this.db.prepare('SELECT count(*) AS n FROM documents').get() as { n: number }).n
+    return { documents: rows.map(r => this.toDocument(r)), total }
+  }
+
+  /**
+   * For each metadata field, how many matching documents have each value (top `limit` values). Matching means
+   * the keyword query matches the text, or every document when the query is empty.
+   */
+  facetCounts(query: string, fields: string[], limit: number, filter?: Record<string, unknown>, scope?: SearchScope): Record<string, Record<string, number>> {
+    const where = filterClause(filter, scope)
+    const out: Record<string, Record<string, number>> = {}
+    if (!where) return out
+    const fts = query.trim() ? toFtsQuery(query) : null
+    if (query.trim() && !fts) return out
+    for (const field of fields) {
+      if (/["\\]/.test(field)) continue
+      const value = `json_extract(d.chunk_metadata, '$."${field}"')`
+      const rows = (fts
+        ? this.db.prepare(`
+            SELECT ${value} AS v, count(DISTINCT d.id) AS n FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid JOIN documents d ON d.id = c.document_id
+            WHERE chunks_fts MATCH ?${where.sql} AND ${value} IS NOT NULL GROUP BY v ORDER BY n DESC, v LIMIT ?`).all(fts, ...where.params, limit)
+        : this.db.prepare(`
+            SELECT ${value} AS v, count(*) AS n FROM documents d
+            WHERE d.status != 'failed'${where.sql} AND ${value} IS NOT NULL GROUP BY v ORDER BY n DESC, v LIMIT ?`).all(...where.params, limit)
+      ) as { v: string | number; n: number }[]
+      out[field] = Object.fromEntries(rows.map(r => [String(r.v), r.n]))
+    }
+    return out
+  }
+
+  // ---------- API keys ----------
+
+  addApiKey(key: { id: string; name: string; keyHash: string; scopes: string[]; collections: string[] | null }): void {
+    this.db.prepare('INSERT INTO api_keys (id, name, key_hash, scopes, collections, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(key.id, key.name, key.keyHash, key.scopes.join(' '), key.collections ? JSON.stringify(key.collections) : null, Date.now())
+  }
+
+  listApiKeys(): StoredApiKey[] {
+    return (this.db.prepare('SELECT * FROM api_keys WHERE revoked_at IS NULL ORDER BY created_at').all() as unknown as ApiKeyRow[]).map(toApiKey)
+  }
+
+  apiKeyByHash(keyHash: string): StoredApiKey | undefined {
+    const row = this.db.prepare('SELECT * FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL').get(keyHash) as ApiKeyRow | undefined
+    return row ? toApiKey(row) : undefined
+  }
+
+  touchApiKey(id: string): void {
+    this.db.prepare('UPDATE api_keys SET last_used_at = ? WHERE id = ?').run(Date.now(), id)
+  }
+
+  revokeApiKey(id: string): boolean {
+    return Number(this.db.prepare('UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL').run(Date.now(), id).changes) > 0
   }
 
   // ---------- keyword search ----------

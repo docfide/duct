@@ -28,6 +28,8 @@ export interface Features {
   export: boolean
   /** Compare versions of a document. */
   diff: boolean
+  /** The developer API (/v1): collections, API keys and indexing your own text by id. */
+  developerApi: boolean
   /** File types Duct reads, by family. Off: those files are skipped when indexing and hidden from search. */
   formats: Record<FormatKind, boolean>
 }
@@ -37,7 +39,7 @@ export type FeatureName = Exclude<keyof Features, 'formats'>
 export const FORMAT_KINDS: FormatKind[] = ['document', 'spreadsheet', 'presentation', 'ebook', 'email', 'text', 'code', 'image', 'archive']
 
 export const FEATURE_NAMES: FeatureName[] = [
-  'ask', 'semanticSearch', 'schemaExtraction', 'fileNameSearch', 'webPages', 'uploads', 'watchedFolders', 'ocrOnDemand', 'export', 'diff',
+  'ask', 'semanticSearch', 'schemaExtraction', 'fileNameSearch', 'webPages', 'uploads', 'watchedFolders', 'ocrOnDemand', 'export', 'diff', 'developerApi',
 ]
 
 /** Labels for settings screens and error messages. */
@@ -52,6 +54,7 @@ export const FEATURE_LABELS: Record<FeatureName, string> = {
   ocrOnDemand: 'OCR on request',
   export: 'Export',
   diff: 'Version comparison',
+  developerApi: 'Developer API',
 }
 
 export function defaultFeatures(): Features {

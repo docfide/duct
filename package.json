@@ -1,7 +1,7 @@
 {
   "name": "@docfide/duct",
   "version": "0.2.0",
-  "description": "Document intelligence pipeline — extract, chunk, embed, and search any document format",
+  "description": "Document intelligence pipeline \u2014 extract, chunk, embed, and search any document format",
   "type": "module",
   "bin": {
     "duct": "./dist/cli.js"
@@ -14,6 +14,10 @@
     "./library": {
       "types": "./dist/library.d.ts",
       "import": "./dist/library.js"
+    },
+    "./client": {
+      "types": "./dist/api/client.d.ts",
+      "import": "./dist/api/client.js"
     }
   },
   "files": [

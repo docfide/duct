@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, watch } from 'node:fs'
 import type { FSWatcher } from 'node:fs'
 import { readdir } from 'node:fs/promises'
@@ -11,6 +11,7 @@ import { chunk } from './chunk/index.js'
 import { extractUrl, isUrl } from './extract/web.js'
 import { extractTablesFromContent } from './extract/table.js'
 import { SqliteStore } from './store/sqlite.js'
+import type { StoredApiKey } from './store/sqlite.js'
 import { terminateOcr } from './ocr/index.js'
 import { HybridSearcher, reciprocalRankFusion } from './search/hybrid.js'
 import { SimpleReranker, NoopReranker } from './search/reranker.js'
@@ -117,6 +118,17 @@ function inIgnoredFolder(path: string, root: string): boolean {
   return path.slice(root.length).split(/[\\/]/).slice(0, -1).some(part => part && isIgnoredDirectory(part))
 }
 
+/** Text given directly rather than read from a file (see indexText()). */
+export interface TextInput {
+  text?: string
+  /** Text per page; results then carry page numbers. */
+  pages?: string[]
+  title?: string
+  metadata?: Record<string, unknown>
+  /** 'md' chunks by heading-aware rules where configured; default 'txt'. */
+  format?: 'txt' | 'md'
+}
+
 type IndexOutcome = { status: 'indexed' | 'no-text' | 'skipped' | 'failed'; chunks: number; error?: string }
 
 const MAX_REPORTED_FAILURES = 50
@@ -212,6 +224,87 @@ export class Duct {
     else if (reenabled) this.rescanSources().catch(err => safeWarn(`  Rescan failed: ${(err as Error).message}`))
     if (this.features.semanticSearch && !before.semanticSearch) this.embedPending().catch(() => {})
     return this.getFeatures()
+  }
+
+  /** Where this index is stored, or undefined for an in-memory index. */
+  get dataDir(): string | undefined {
+    return this.persistPath
+  }
+
+  /** Whether search by meaning is available (an embedding model is set up and the feature is on). */
+  semanticAvailable(): boolean {
+    return this.activeEmbedder !== null
+  }
+
+  /**
+   * Indexes text that isn't a file, under `path` as its key (the developer API uses its own ids). Unchanged
+   * text is skipped. It is searchable by keyword at once; embeddings, if any, follow in the background.
+   */
+  async indexText(path: string, input: TextInput): Promise<{ status: 'indexed' | 'no-text' | 'unchanged'; chunks: number }> {
+    const format = input.format ?? 'txt'
+    const content = input.pages ? input.pages.join('\n\n') : (input.text ?? '')
+    const metadata = { ...(input.metadata ?? {}) }
+    const hash = hashBytes(JSON.stringify([content, input.pages ? input.pages.length : 0, input.title ?? null, metadata, format]))
+    const result = await this.withLock(path, async () => {
+      const existing = this.store.getDocument(path)
+      if (existing && existing.contentHash === hash && existing.status !== 'failed') return { status: 'unchanged' as const, chunks: existing.chunkCount }
+      const doc: ExtractedDocument = { path, format, content, metadata: {}, ...(input.pages ? { pages: input.pages } : {}) }
+      const chunks = this.chunkDocument(doc, path)
+      const chunkMetadata = { ...metadata, ...(input.title ? { title: input.title } : {}) }
+      for (const c of chunks) c.metadata = chunkMetadata
+      const status = chunks.length > 0 ? 'indexed' as const : 'no-text' as const
+      this.store.replaceDocument({
+        path, displayName: input.title || path, source: 'api', format, size: Buffer.byteLength(content), mtimeMs: null,
+        contentHash: hash, status, metadata, chunkMetadata,
+      }, chunks)
+      this.store.addVersion(path, hash, content)
+      return { status, chunks: chunks.length }
+    })
+    if (result.status !== 'unchanged' && this.activeEmbedder) this.embedPending().catch(() => {})
+    return result
+  }
+
+  /** The stored text of a document (kept for text added with indexText() and for version comparison). */
+  documentText(path: string): string | undefined {
+    return this.store.latestContent(path)
+  }
+
+  /** One page of documents, newest first. */
+  pageDocuments(limit: number, offset: number): { documents: DocumentInfo[]; total: number } {
+    const page = this.store.pageDocuments(limit, offset)
+    return { documents: page.documents.map(({ id: _id, mtimeMs: _m, contentHash: _h, ...info }) => info), total: page.total }
+  }
+
+  /** Counts of metadata values among documents matching the keyword query (all documents for an empty query). */
+  facets(query: string, fields: string[], limit = 20, filter?: Record<string, unknown>, scope?: SearchScope): Record<string, Record<string, number>> {
+    const allowed = enabledFormats(this.features)
+    if (allowed) scope = { ...scope, formats: scope?.formats ? scope.formats.filter(f => allowed.includes(f)) : allowed }
+    if (scope?.formats && scope.formats.length === 0) return Object.fromEntries(fields.map(f => [f, {}]))
+    return this.store.facetCounts(query, fields, limit, filter && Object.keys(filter).length ? filter : undefined, scope)
+  }
+
+  /** Creates an API key for the developer API. The key itself is returned once and only its hash is stored. */
+  createApiKey(name: string, scopes: string[], collections: string[] | null = null): { id: string; key: string } {
+    const id = randomBytes(6).toString('hex')
+    const key = `duct_${id}_${randomBytes(24).toString('base64url')}`
+    this.store.addApiKey({ id, name, keyHash: hashBytes(key), scopes, collections })
+    return { id, key }
+  }
+
+  listApiKeys(): StoredApiKey[] {
+    return this.store.listApiKeys()
+  }
+
+  revokeApiKey(id: string): boolean {
+    return this.store.revokeApiKey(id)
+  }
+
+  /** The key's record if `key` is a live API key. Updates its last-used time at most once a minute. */
+  verifyApiKey(key: string): StoredApiKey | undefined {
+    if (!/^duct_[0-9a-f]{12}_[\w-]{32}$/.test(key)) return undefined
+    const found = this.store.apiKeyByHash(hashBytes(key))
+    if (found && (!found.lastUsedAt || Date.now() - found.lastUsedAt > 60_000)) this.store.touchApiKey(found.id)
+    return found
   }
 
   /** Throws FeatureDisabledError when the feature is off. */
@@ -1041,3 +1134,4 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
 export { HybridSearcher, reciprocalRankFusion, extractUrl, isUrl, extractTablesFromContent }
 export { FeatureDisabledError, FEATURE_NAMES, FEATURE_LABELS, FORMAT_KINDS, defaultFeatures } from './features.js'
 export type { Features, FeaturesPatch, FeatureName } from './features.js'
+export type { StoredApiKey } from './store/sqlite.js'

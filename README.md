@@ -39,6 +39,7 @@ No API keys required. No configuration files. Works offline.
 | **Watch Mode** | Auto-index files as they're added or modified |
 | **Schema Extraction** | Extract structured fields from documents via LLM |
 | **Diff Tracking** | Line-level changes between document versions |
+| **Developer API** | Versioned `/v1` REST API with API keys and scopes, collections, your own ids, filters, facets and pagination; OpenAPI spec and TypeScript/Python clients |
 | **Export API** | Search results in JSON or CSV |
 | **Web UI** | Search with page numbers and highlighted snippets; PDFs open at the page with matches highlighted |
 | **Desktop island** | The mascot lives in the MacBook notch: indexing progress, quick search (⌘⇧Space), drop files to add them |
@@ -52,6 +53,7 @@ No API keys required. No configuration files. Works offline.
 | Guide | Contents |
 |-------|---------|
 | [CLI Reference](docs/cli.md) | All commands: index, search, ask, watch, extract, diff, serve |
+| [Developer API](docs/developer-api.md) | Add document search to your app: collections, API keys, `/v1` REST, TypeScript and Python clients |
 | [API Reference](docs/api.md) | REST endpoints for the web server |
 | [Library API](docs/library.md) | Programmatic usage in Node.js/TypeScript |
 | [Search](docs/search.md) | BM25, vector, hybrid, re-ranking, HyDE |

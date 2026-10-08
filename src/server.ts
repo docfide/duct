@@ -15,6 +15,8 @@ import { VERSION } from './version.js'
 import { viewerHtml } from './viewer.js'
 import { ACCEPT_ATTRIBUTE, FORMATS, SUPPORTED_SUMMARY, isSupportedFile } from './formats.js'
 import { islandHtml } from './island.js'
+import { createApiRouter } from './api/v1.js'
+import { Collections } from './api/collections.js'
 import { FEATURE_LABELS, FEATURE_NAMES, FORMAT_KINDS, FeatureDisabledError } from './features.js'
 import type { FeatureName } from './features.js'
 
@@ -74,6 +76,8 @@ export interface ServerOptions {
    * the system keychain). Keys are otherwise kept in memory only.
    */
   onSecrets?: (keys: Partial<Record<typeof API_KEY_FIELDS[number], string>>) => void
+  /** Developer API collections. Defaults to <index>/collections (in memory for an in-memory index). */
+  collections?: Collections
 }
 
 /** 403 for a switched-off feature, otherwise `status` with the error's message. */
@@ -220,7 +224,11 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     next()
   })
 
+  // The developer API: its own keys, scopes, body parsing and rate limit (see src/api/v1.ts and docs/developer-api.md).
+  app.use('/v1', createApiRouter(duct, opts?.collections ?? new Collections(duct), { adminToken: token, uploadLimitMb: maxMb }))
+
   app.use(express.json({ limit: '10mb' }))
+
   app.use('/api/', apiLimiter)
 
   // Browser login: exchanges the token for an HttpOnly cookie so the UI works on a protected server.

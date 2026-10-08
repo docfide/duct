@@ -157,6 +157,18 @@ Output shows `+` for added lines and `-` for removed lines since the previous in
 
 ---
 
+## `duct keys`
+
+API keys for the [developer API](developer-api.md). A key is shown once; only its hash is stored in the index.
+
+```bash
+duct keys create --name "website search" --scopes search --collections help
+duct keys list
+duct keys revoke <id>
+```
+
+Scopes are `search`, `write` and `admin`.
+
 ## `duct features`
 
 Shows which features are on, or switches them. Changes are saved with the index.

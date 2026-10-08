@@ -165,6 +165,9 @@ const FEATURE_GROUPS = [
     ['export', 'Export results', 'Download search results as CSV or JSON.'],
     ['diff', 'Compare versions', 'Show what changed between the last two versions of a document.'],
   ] },
+  { title: 'Developers', items: [
+    ['developerApi', 'Developer API', 'The /v1 API for apps: collections, API keys, and indexing your own text by id.'],
+  ] },
 ]
 const KIND_LABELS = { document: 'Documents (PDF, Word, Pages, Markdown, HTML…)', spreadsheet: 'Spreadsheets', presentation: 'Presentations', ebook: 'E-books', email: 'Email', text: 'Text, CSV, JSON and subtitles', code: 'Source code', image: 'Images and SVG', archive: 'ZIP archives' }
 const DESKTOP_PREFS = [
