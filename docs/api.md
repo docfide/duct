@@ -514,3 +514,18 @@ Adds a chat exported with WhatsApp's **Export chat** (with media): multipart fie
 ```
 
 The conversation is one document with a section per day. Each attachment has the metadata `whatsappChat`, `whatsappSender` and `whatsappSentAt` (ISO time), its display name is `<file> · from <sender>`, and its modified time is when it was sent. `skipped` counts files Duct doesn't read (voice notes, stickers). The size limit is 1 GB or `--upload-limit`, whichever is larger.
+
+
+## `GET /api/deadlines`
+
+The deadlines radar: dates documents say something expires, is due or renews on, read on this computer from the words before each date ("expires on", "due by", "no later than", "renews"); dates after "dated", "signed", "issued" and similar are left out. `?days=365` (how far ahead) and `?pastDays=30`.
+
+```json
+{
+  "passed": [{ "path": "/docs/INV-2041.pdf", "name": "INV-2041.pdf", "format": "pdf", "page": 1, "date": "2026-10-02", "kind": "due", "text": "Amount due by \u000202/10/2026\u0003." }],
+  "soon": [{ "name": "Ikoyi office lease.docx", "date": "2026-10-20", "kind": "expires", "text": "This lease expires on \u000220 October 2026\u0003." }],
+  "later": []
+}
+```
+
+`kind` is `expires`, `due` or `renews`. `soon` is the next 30 days; one entry per document, date and kind. Off when the `deadlines` feature is switched off (403).

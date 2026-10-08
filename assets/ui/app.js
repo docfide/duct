@@ -183,6 +183,7 @@ const FEATURE_GROUPS = [
   { title: 'Results', items: [
     ['export', 'Export results', 'Download search results as CSV or JSON.'],
     ['diff', 'Compare versions', 'Show what changed between the last two versions of a document.'],
+    ['deadlines', 'Deadlines radar', 'Expiry, due and renewal dates from your documents on the home screen, worked out on this computer.'],
   ] },
   { title: 'Developers', items: [
     ['developerApi', 'Developer API', 'The /v1 API for apps: collections, API keys, and indexing your own text by id.'],
@@ -537,6 +538,7 @@ function renderHome() {
     if (discoveryFor !== ready.length) { discoveryFor = ready.length; loadDiscovery(true).then(d => renderTry('#homeTry', d)) }
     else renderTry('#homeTry', discovery)
   } else renderTry('#homeTry', null)
+  renderRadar(ready.length)
   const recent = ready.slice().sort((x, y) => y.indexedAt - x.indexedAt).slice(0, 8)
   $('#recent').innerHTML = recent.length ? '<h2>Recently added</h2>' + recent.map(d =>
     '<button class="recent-item" data-open-doc="' + esc(d.path) + '">' + badge(d.format) + '<span class="name">' + esc(d.displayName || fileName(d.path)) + '</span><span class="when">' + timeAgo(d.indexedAt) + '</span></button>').join('') : ''
@@ -1086,6 +1088,65 @@ function setProgress(done, total, current) {
   $('#welcomeCurrent').textContent = current || ' '
 }
 
+// ---------- the deadlines radar ----------
+
+let radar = null
+let radarFor = -1          // the document count the radar was read for
+let radarAt = 0
+let radarAll = false
+const RADAR_KIND = { expires: 'Expires', due: 'Due', renews: 'Renews' }
+const RADAR_PASSED = { expires: 'Expired', due: 'Due date passed', renews: 'Renewed' }
+
+function dayDiff(iso) {
+  const [y, m, d] = iso.split('-').map(Number)
+  const today = new Date()
+  return Math.round((Date.UTC(y, m - 1, d) - Date.UTC(today.getFullYear(), today.getMonth(), today.getDate())) / 86400000)
+}
+function whenText(iso) {
+  const n = dayDiff(iso)
+  return n === 0 ? 'today' : n === 1 ? 'tomorrow' : n === -1 ? 'yesterday' : n > 0 ? 'in ' + n + ' days' : -n + ' days ago'
+}
+
+async function renderRadar(docCount) {
+  const box = $('#homeRadar')
+  if (!feature('deadlines') || !docCount || state.activity.indexing) { box.hidden = true; return }
+  // Read again when the library changes, and at most every 10 minutes otherwise (dates move on).
+  if (radarFor !== docCount || Date.now() - radarAt > 600000) {
+    radarFor = docCount
+    radarAt = Date.now()
+    try { radar = await json('/api/deadlines') } catch { radar = null }
+  }
+  const r = radar
+  if (!r || !(r.passed.length + r.soon.length + r.later.length)) { box.hidden = true; return }
+  const items = radarAll ? [...r.passed, ...r.soon, ...r.later] : [...r.passed.slice(0, 2), ...r.soon.slice(0, 5)]
+  const shown = items.length ? items : r.later.slice(0, 3)
+  const summary = []
+  if (r.soon.length) summary.push(plural(r.soon.length, 'date') + ' in the next 30 days')
+  if (r.passed.length) summary.push(r.passed.length + ' passed recently')
+  if (!summary.length) summary.push('Nothing in the next 30 days')
+  state.radarItems = shown
+  box.hidden = false
+  box.innerHTML = '<div class="radar-head"><h2>Coming up</h2><span class="hint">' + esc(summary.join(' · ')) + '</span></div>' +
+    '<ol class="radar-list">' + shown.map((d, i) => {
+      const n = dayDiff(d.date)
+      const date = new Date(d.date + 'T00:00:00').toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: n > 300 || n < -300 ? 'numeric' : undefined })
+      return '<li><button class="radar-item' + (n < 0 ? ' passed' : n <= 7 ? ' near' : '') + '" data-radar="' + i + '">' +
+        '<span class="radar-date"><strong>' + esc(date) + '</strong><small>' + esc(whenText(d.date)) + '</small></span>' +
+        '<span class="radar-body"><span class="radar-title"><span class="radar-kind">' + esc((n < 0 ? RADAR_PASSED : RADAR_KIND)[d.kind]) + '</span> ' + esc(d.name) + (d.page ? ' <span class="hint">' + esc(pageRef({ page: d.page, documentFormat: d.format })) + '</span>' : '') + '</span>' +
+        '<span class="radar-text">' + markSnippet(d.text) + '</span></span></button></li>'
+    }).join('') + '</ol>' +
+    (r.passed.length + r.soon.length + r.later.length > shown.length || radarAll ? '<button class="link-btn" data-action="radar-toggle">' + (radarAll ? 'Show less' : 'Show all ' + (r.passed.length + r.soon.length + r.later.length) + ', up to a year ahead') + '</button>' : '') +
+    '<p class="hint radar-foot">Read from the words next to each date, on this computer. Duct can’t tell whether an invoice was paid; check the document.</p>'
+}
+
+document.addEventListener('click', e => {
+  const item = e.target.closest('[data-radar]')
+  if (!item) return
+  const d = state.radarItems[Number(item.dataset.radar)]
+  const dateWords = (d.text.match(/\u0002([^\u0003]*)\u0003/) || [])[1]
+  openDocument(d.path, d.page, dateWords ? [dateWords] : [])
+})
+
 // ---------- the first minute: what Duct found, and a first search ----------
 
 let discovery = null
@@ -1573,6 +1634,7 @@ const ACTIONS = {
     if (!$('#welcome').hidden) { rememberWelcome(); showApp() }
     $('#q').value = el.dataset.q; state.query = el.dataset.q; runSearch()
   },
+  'radar-toggle': () => { radarAll = !radarAll; renderRadar(radarFor) },
   'clear-ledger': async () => { try { await json('/api/ledger', { method: 'DELETE' }) } catch (err) { toast(err.message, true) }; renderLedger() },
   'clear-filters': () => { state.group = null; state.source = null; state.tags = []; state.date = null; renderSidebar(); runSearch() },
   'ask-instead': () => { const q = state.query; setMode('ask'); ask(q) },

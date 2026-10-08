@@ -632,6 +632,19 @@ export class SqliteStore {
     return [...merged.values()].sort((a, b) => b.score - a.score).slice(0, limit)
   }
 
+  // ---------- the deadlines radar ----------
+
+  /** Passages that mention expiry, due dates or renewals, for `Duct.deadlines` to read dates from. */
+  deadlineCandidates(limit: number): { path: string; name: string; format: string; page: number | null; heading: string | null; content: string }[] {
+    return this.db.prepare(`
+      SELECT d.path, d.display_name AS name, d.format, c.page, c.heading, c.content
+      FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid JOIN documents d ON d.id = c.document_id
+      WHERE chunks_fts MATCH ? AND d.status = 'indexed'
+      LIMIT ?
+    `).all(// The index holds Porter stems, so prefixes are stems too ("termin*" for terminates, "laps*" for lapses).
+      'expir* OR due OR deadlin* OR renew* OR payabl* OR termin* OR laps* OR "valid until" OR "no later than" OR "on or before" OR "closing date"', limit) as { path: string; name: string; format: string; page: number | null; heading: string | null; content: string }[]
+  }
+
   // ---------- a first look at the library ----------
 
   /** Each readable document's name, format and opening text, newest first (for `Duct.discover`). */

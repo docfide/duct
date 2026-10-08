@@ -632,6 +632,12 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     try { res.json(await duct.discover()) } catch (err) { res.status(500).json({ error: (err as Error).message }) }
   })
 
+  // The deadlines radar: expiry, due and renewal dates read from documents (?days=365&pastDays=30).
+  app.get('/api/deadlines', needs('deadlines'), (req, res) => {
+    const num = (v: unknown, d: number, max: number) => Math.min(max, Math.max(0, parseInt(String(v)) || d))
+    try { res.json(duct.deadlines({ days: num(req.query['days'], 365, 3650), pastDays: num(req.query['pastDays'], 30, 365) })) } catch (err) { sendError(res, err) }
+  })
+
   app.post('/api/ask', needs('ask'), async (req, res) => {
     const { question, topK = 5, agentic } = req.body
     if (!question) { res.status(400).json({ error: 'Question is required' }); return }

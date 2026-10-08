@@ -18,6 +18,8 @@ import { SimpleReranker, NoopReranker } from './search/reranker.js'
 import { createLLMProvider, OpenAILLM, GeminiLLM } from './qa/provider.js'
 import { createEmbedder } from './embed/factory.js'
 import { recurringNames, summarizeKinds, triesFor } from './discover.js'
+import { excerpt as deadlineExcerpt, findDeadlines, radarFrom } from './deadlines.js'
+import type { Deadline, Radar } from './deadlines.js'
 import type { Discovery } from './discover.js'
 import type { EmbedProvider } from './embed/factory.js'
 import type { SearchHelp,
@@ -718,6 +720,22 @@ export class Duct {
   }
 
   /**
+   * The deadlines radar: dates in documents that something expires, is due or renews on, read from the words
+   * next to each date on this computer. Grouped into recently passed (last `pastDays`), the next 30 days, and
+   * later (up to `days` ahead).
+   */
+  deadlines(options: { days?: number; pastDays?: number; now?: Date } = {}): Radar {
+    this.requireFeature('deadlines')
+    const items: Deadline[] = []
+    for (const c of this.store.deadlineCandidates(20_000)) {
+      for (const f of findDeadlines(c.content)) {
+        items.push({ path: c.path, name: c.name, format: c.format, ...(c.page != null ? { page: c.page } : {}), ...(c.heading ? { heading: c.heading } : {}), date: f.date, kind: f.kind, text: deadlineExcerpt(c.content, f) })
+      }
+    }
+    return radarFrom(items, options.now ?? new Date(), options.days ?? 365, options.pastDays ?? 30)
+  }
+
+  /**
    * A first look at the library: how many invoices, contracts, CVs… (from names and opening text, on this
    * computer), and a few searches that find something in it. Looks at the newest 5,000 documents.
    */
@@ -1207,3 +1225,4 @@ export type { Features, FeaturesPatch, FeatureName } from './features.js'
 export type { AuditEntry, StoredApiKey } from './store/sqlite.js'
 export type { SearchResult, SearchHelp, MatchReason, SearchScope } from './types.js'
 export type { Discovery, DocumentKind } from './discover.js'
+export type { Deadline, DeadlineKind, Radar } from './deadlines.js'
