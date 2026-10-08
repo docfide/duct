@@ -196,13 +196,36 @@ async function startServer() {
   const { SettingsSync } = await import('../dist/sync.js')
   const sync = new SettingsSync(duct, account, app.getPath('userData'))
   sync.start()
+  // Cloud sources (Team): tokens encrypted with the OS keychain, like the account's.
+  const { ConnectorManager } = await import('../dist/connectors/manager.js')
+  const { clientIdsFromEnv } = await import('../dist/connectors/sources.js')
+  const vaultFile = path.join(app.getPath('userData'), 'connectors.bin')
+  let vaultMemory = {}
+  const connectors = new ConnectorManager(duct, {
+    dir: path.join(app.getPath('userData'), 'connectors'),
+    vault: {
+      load() {
+        if (!safeStorage.isEncryptionAvailable()) return vaultMemory
+        try { return fs.existsSync(vaultFile) ? JSON.parse(safeStorage.decryptString(fs.readFileSync(vaultFile))) : {} } catch { return {} }
+      },
+      save(all) {
+        vaultMemory = all
+        if (safeStorage.isEncryptionAvailable()) fs.writeFileSync(vaultFile, safeStorage.encryptString(JSON.stringify(all)), { mode: 0o600 })
+      },
+    },
+    clientIds: clientIdsFromEnv(process.env),
+    openUrl: url => shell.openExternal(url),
+    entitled: () => account.has('team.connectors'),
+    onChange: () => refreshPage(),
+  })
+  connectors.start()
   telemetry = new Telemetry({
     dir: app.getPath('userData'), channel: 'desktop', duct,
     plan: () => account.status().plan,
     prefs: () => ({ island: islandEnabled(), sounds: soundsEnabled() }),
   })
   telemetry.start()
-  const expressApp = createServer(duct, { uploadLimitMb: 100, libraryDir: libraryDir(), onSecrets: saveSecrets, account, telemetry, crashDir: crashDir(), channel: 'desktop', sync })
+  const expressApp = createServer(duct, { uploadLimitMb: 100, libraryDir: libraryDir(), onSecrets: saveSecrets, account, telemetry, crashDir: crashDir(), channel: 'desktop', sync, connectors })
   return new Promise((resolve) => {
     server = expressApp.listen(0, '127.0.0.1', () => {
       serverUrl = `http://127.0.0.1:${server.address().port}`

@@ -238,6 +238,20 @@
         <section class="panel" data-panel="library" hidden>
           <div class="kv"><span>Library folder</span><code id="libraryDir"></code></div>
           <p class="hint">Files you add are copied here. Watched folders stay where they are.</p>
+          <div id="cloudSources" hidden>
+            <h3>Cloud sources</h3>
+            <p class="hint">Duct reads these directly, read-only, and keeps a private local copy to search. Documents never pass through Tensflare.</p>
+            <div id="connectorList"></div>
+            <div class="about-actions" data-admin>
+              <button class="btn" data-action="connect-source" data-kind="gdrive" id="connectGoogle">Connect Google Drive</button>
+              <button class="btn" data-action="connect-source" data-kind="microsoft" id="connectMicrosoft">Connect OneDrive</button>
+            </div>
+            <form class="inline-form" id="sharepointForm" data-admin>
+              <input type="url" name="site" placeholder="https://yourcompany.sharepoint.com/sites/Legal" aria-label="SharePoint site address">
+              <button class="btn" type="submit">Connect SharePoint site</button>
+            </form>
+            <p class="hint" id="connectorsUpsell" hidden>Connectors for Google Drive, OneDrive and SharePoint are part of the Team plan.</p>
+          </div>
           <h3>Watched folders</h3>
           <div id="settingsSources"></div>
           <button class="btn btn-ghost" data-action="watch-folder" data-requires="watch">Watch a folder</button>

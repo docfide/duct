@@ -55,6 +55,7 @@ No API keys required. No configuration files. Works offline.
 | [CLI Reference](docs/cli.md) | All commands: index, search, ask, watch, extract, diff, serve |
 | [Developer API](docs/developer-api.md) | Add document search to your app: collections, API keys, `/v1` REST, TypeScript and Python clients |
 | [API Reference](docs/api.md) | REST endpoints for the web server |
+| [Cloud sources](docs/connectors.md) | Google Drive, OneDrive and SharePoint |
 | [Library API](docs/library.md) | Programmatic usage in Node.js/TypeScript |
 | [Search](docs/search.md) | BM25, vector, hybrid, re-ranking, HyDE |
 | [Q&A](docs/qa.md) | LLM providers, agentic retrieval, configuration |

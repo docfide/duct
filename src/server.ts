@@ -21,6 +21,7 @@ import { createApiRouter } from './api/v1.js'
 import type { TensflareAccount } from './account.js'
 import type { Telemetry } from './telemetry.js'
 import type { SettingsSync } from './sync.js'
+import type { ConnectorManager } from './connectors/manager.js'
 import { clearCrashes, collectDiagnostics, listCrashes, sendFeedback, validateFeedback } from './diagnostics.js'
 import { Collections } from './api/collections.js'
 import { FEATURE_LABELS, FEATURE_NAMES, FORMAT_KINDS, FeatureDisabledError } from './features.js'
@@ -96,6 +97,8 @@ export interface ServerOptions {
   feedbackUrl?: string
   /** Settings sync between the account's devices (Pro and Team). */
   sync?: SettingsSync
+  /** Google Drive, OneDrive and SharePoint sources (Team). */
+  connectors?: ConnectorManager
 }
 
 /** 403 for a switched-off feature, otherwise `status` with the error's message. */
@@ -338,6 +341,40 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
   app.get('/api/account/ai', async (_req, res) => {
     if (!account || !account.status().signedIn || !account.has('ai.hosted')) { res.json({ entitled: false }); return }
     try { res.json(await account.aiInfo()) } catch (err) { res.status(502).json({ error: (err as Error).message }) }
+  })
+
+  // ---------- connectors (Google Drive, OneDrive, SharePoint) ----------
+
+  const connectors = opts?.connectors
+  let connecting: { kind: string; error?: string; running: boolean } | null = null
+
+  app.get('/api/connectors', (_req, res) => {
+    if (!connectors) { res.json({ available: false, connectors: [] }); return }
+    res.json({ available: true, ...connectors.available(), connectors: connectors.list(), connecting })
+  })
+
+  // Opens the provider's sign-in in the browser on this machine; the page polls GET /api/connectors.
+  app.post('/api/connectors', adminOnly, (req, res) => {
+    if (!connectors) { res.status(404).json({ error: 'Connectors aren’t available here.' }); return }
+    const kind = req.body?.kind
+    if (kind !== 'gdrive' && kind !== 'microsoft') { res.status(400).json({ error: 'kind must be gdrive or microsoft' }); return }
+    if (!connectors.available().entitled) { res.status(403).json({ error: 'Connectors are part of the Team plan.' }); return }
+    const siteUrl = typeof req.body?.siteUrl === 'string' && req.body.siteUrl.trim() ? req.body.siteUrl.trim() : undefined
+    if (connecting?.running) { res.status(409).json({ error: 'Finish the sign-in that’s already open first.' }); return }
+    connecting = { kind, running: true }
+    connectors.add(kind, { siteUrl }).then(() => { connecting = null }, err => { connecting = { kind, running: false, error: (err as Error).message } })
+    res.status(202).json({ started: true })
+  })
+
+  app.post('/api/connectors/:id/sync', adminOnly, (req, res) => {
+    if (!connectors) { res.status(404).end(); return }
+    connectors.sync(req.params['id'] as string).catch(() => {})
+    res.status(202).json({ started: true })
+  })
+
+  app.delete('/api/connectors/:id', adminOnly, async (req, res) => {
+    if (!connectors || !(await connectors.remove(req.params['id'] as string))) { res.status(404).json({ error: 'No such source' }); return }
+    res.json({ ok: true })
   })
 
   app.get('/api/sync', (_req, res) => {

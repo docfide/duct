@@ -14,6 +14,8 @@ import { Telemetry } from './telemetry.js'
 import { installCrashHandlers } from './diagnostics.js'
 import { setHostedAi } from './hosted.js'
 import { SettingsSync } from './sync.js'
+import { ConnectorManager, FileTokenVault } from './connectors/manager.js'
+import { clientIdsFromEnv } from './connectors/sources.js'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { VERSION } from './version.js'
@@ -582,6 +584,14 @@ program
       setHostedAi(account.hostedAi())
       const sync = new SettingsSync(duct, account, dataDir(options.persist))
       sync.start()
+      const connectors = new ConnectorManager(duct, {
+        dir: join(dataDir(options.persist), 'connectors'),
+        vault: new FileTokenVault(join(dataDir(options.persist), 'connector-tokens.json')),
+        clientIds: clientIdsFromEnv(process.env),
+        openUrl: url => { console.log(`\n  Opening sign-in for a cloud source. If it doesn't open, visit:\n  ${chalk.cyan(url)}\n`); openBrowser(url) },
+        entitled: () => account.has('team.connectors'),
+      })
+      connectors.start()
       const server = createServer(duct, {
         authToken: token,
         memberTokens,
@@ -594,6 +604,7 @@ program
         crashDir,
         channel,
         sync,
+        connectors,
       })
       server.listen(options.port, options.host, () => {
         const shownHost = loopback ? 'localhost' : options.host

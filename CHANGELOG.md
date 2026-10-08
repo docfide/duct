@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Browsers log in to a token-protected server once (`POST /api/login`, HttpOnly cookie).
 
 ### Added
+- Cloud sources (Team): Google Drive (Docs, Sheets and Slides exported), OneDrive and SharePoint sites, read-only and incrementally, from Settings › Library. Results can open the file in the browser. See docs/connectors.md.
 - Hosted AI for Pro and Team: choose "Tensflare" for search by meaning or Ask in Settings › AI, with no API key; credits shown in Settings › Account. Settings sync across devices (search and AI settings and feature switches only, never keys, documents or paths). Settings › Account shows the plan, renewal and payments, and opens the account website signed in for upgrades, plan changes, refunds, team and devices.
 - Send feedback and Copy diagnostics (Settings › About and the Help menu). Diagnostics hold version, OS, settings and error codes, never document content. Crash records (error type and Duct's own stack frames only) are kept on the device and sent only if you include them with feedback. Links to the privacy policy, terms and refund policy in the app.
 - Sign in with Tensflare (optional, for paid features): OAuth 2.0 with PKCE in the system browser, an Ed25519-signed entitlement that works offline for 30 days, Settings › Account, and `duct account signin|status|signout`. Tokens are kept in the system keychain (desktop) or a private file.

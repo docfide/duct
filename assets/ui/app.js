@@ -390,12 +390,14 @@ async function renderMascots() {
 // ---------- data ----------
 
 async function loadData() {
-  const [docs, sources, activity, tags] = await Promise.all([
+  const [docs, sources, activity, tags, connectors] = await Promise.all([
     json('/api/documents'),
     json('/api/sources'),
     json('/api/activity'),
     json('/api/tags').catch(() => ({ tags: [] })),
+    json('/api/connectors').catch(() => ({ connectors: [] })),
   ])
+  state.connectors = connectors.connectors || []
   state.docs = docs.documents || []
   state.allTags = tags.tags || []
   state.tags = state.tags.filter(t => state.allTags.some(x => x.tag === t))
@@ -440,6 +442,9 @@ function renderSidebar() {
   if (libraryCount) sources.push({ label: 'Duct Library', under: state.info.libraryDir, count: libraryCount })
   for (const s of state.sources) {
     sources.push({ label: fileName(s.path), title: s.path, under: s.path, count: ready.filter(d => d.path.startsWith(s.path)).length, watched: true })
+  }
+  for (const c of state.connectors || []) {
+    sources.push({ label: (c.kind === 'gdrive' ? 'Google Drive' : c.drive ? 'SharePoint' : 'OneDrive'), title: c.label, under: c.filesDir, count: ready.filter(d => d.path.startsWith(c.filesDir)).length })
   }
   $('#sourceList').innerHTML = sources.map(s =>
     '<div class="source-row"><button class="side-item' + (state.source && state.source.under === s.under ? ' active' : '') + '" data-under="' + esc(s.under) + '" data-label="' + esc(s.label) + '" title="' + esc(s.title || s.under) + '">' +
@@ -648,6 +653,7 @@ function renderPreview(r) {
     renderTagEditor(c.documentPath) +
     '<div class="actions"><button class="btn btn-primary" data-act="open">' + (link ? 'Open link' : c.page ? 'Open at ' + esc(pageRef(c)) : 'Open') + '</button>' +
     (desktop && desktop.revealDocument && !link ? '<button class="btn" data-act="reveal">Show in folder</button>' : '') +
+    (c.metadata && typeof c.metadata.webUrl === 'string' && /^https:\/\//.test(c.metadata.webUrl) ? '<a class="btn" href="' + esc(c.metadata.webUrl) + '" target="_blank" rel="noopener">Open in ' + (c.metadata.connector === 'gdrive' ? 'Google Drive' : 'Microsoft 365') + '</a>' : '') +
     '<button class="btn" data-act="copy-passage">Copy passage</button>' +
     (feature('export') ? '<button class="btn" data-act="collect">Collect</button>' : '') + '</div>' +
     '<p class="passage-label">Matching passage</p><div class="passage">' + highlight(c.content, terms(r)) + '</div>' +
@@ -1026,6 +1032,7 @@ async function openSettings(tab = 'general') {
   const notice = $('#embedNotice')
   notice.hidden = !state.activity.embeddingError
   notice.textContent = state.activity.embeddingError ? 'Search by meaning is paused: ' + state.activity.embeddingError + '. Keyword search still works.' : ''
+  renderConnectors()
   $('#settingsSources').innerHTML = state.sources.length ? state.sources.map(s => '<div class="kv"><code>' + esc(s.path) + '</code></div>').join('') : '<p class="hint">None yet.</p>'
   $$('[data-desktop]', dialog).forEach(el => { el.hidden = !desktop })
   updateUrlFields()
@@ -1152,6 +1159,41 @@ async function aiAndSyncHtml() {
   }
   return html
 }
+
+// ---------- cloud sources (connectors) ----------
+
+let connectorPoll = null
+let connectorsBusy = false
+async function renderConnectors() {
+  clearTimeout(connectorPoll)
+  let c
+  try { c = await json('/api/connectors') } catch { c = { available: false } }
+  state.connectors = c.connectors || []
+  $('#cloudSources').hidden = !c.available
+  if (!c.available) return
+  $('#connectorsUpsell').hidden = c.entitled
+  $('#connectGoogle').hidden = !c.google || !c.entitled
+  $('#connectMicrosoft').hidden = !c.microsoft || !c.entitled
+  $('#sharepointForm').hidden = !c.microsoft || !c.entitled
+  const busy = (c.connecting && c.connecting.running) || state.connectors.some(x => x.syncing)
+  $('#connectorList').innerHTML =
+    (c.connecting ? '<p class="' + (c.connecting.error ? 'notice' : 'hint') + '">' + (c.connecting.error ? 'Couldn’t connect: ' + esc(c.connecting.error) : 'Finish signing in in your browser…') + '</p>' : '') +
+    state.connectors.map(x => '<div class="kv connector-row"><span><strong>' + esc(x.label) + '</strong><br><small class="hint">' +
+      (x.syncing ? 'Reading…' : esc(plural(x.fileCount, 'file')) + (x.lastSync ? ' · updated ' + esc(timeAgo(Date.parse(x.lastSync))) : '')) +
+      (x.error ? ' · <span class="warn">' + esc(x.error) + '</span>' : '') + '</small></span>' +
+      (isAdmin() ? '<span class="row-actions"><button class="btn btn-sm" data-action="sync-source" data-id="' + esc(x.id) + '">Sync now</button><button class="btn btn-sm btn-danger" data-action="disconnect-source" data-id="' + esc(x.id) + '">Disconnect</button></span>' : '') + '</div>').join('')
+  if (busy && $('#settings').open) connectorPoll = setTimeout(renderConnectors, 2000)
+  if (connectorsBusy && !busy) refreshAll()   // a sync just finished: new documents to show
+  connectorsBusy = busy
+}
+
+$('#sharepointForm').addEventListener('submit', async e => {
+  e.preventDefault()
+  const site = e.target.site.value.trim()
+  if (!site) return
+  try { await send('POST', '/api/connectors', { kind: 'microsoft', siteUrl: site }); e.target.site.value = '' } catch (err) { toast(err.message, true) }
+  renderConnectors()
+})
 
 async function renderTelemetry() {
   let t
@@ -1297,6 +1339,16 @@ const ACTIONS = {
   'toggle-sidebar': () => $('#sidebar').classList.toggle('open'),
   'export': () => exportResults('csv'),
   'toggle-export': () => { const menu = $('#exportMenu'); menu.hidden = !menu.hidden; $('[data-action="toggle-export"]').setAttribute('aria-expanded', String(!menu.hidden)) },
+  'connect-source': async el => {
+    try { await send('POST', '/api/connectors', { kind: el.dataset.kind }) } catch (err) { toast(err.message, true) }
+    renderConnectors()
+  },
+  'sync-source': async el => { try { await send('POST', '/api/connectors/' + encodeURIComponent(el.dataset.id) + '/sync', {}) } catch (err) { toast(err.message, true) }; renderConnectors() },
+  'disconnect-source': async el => {
+    if (!confirm('Disconnect this source?\n\nIts documents leave Duct and the local copies are deleted. Nothing changes in the cloud.')) return
+    try { await json('/api/connectors/' + encodeURIComponent(el.dataset.id), { method: 'DELETE' }); toast('Disconnected') } catch (err) { toast(err.message, true) }
+    renderConnectors()
+  },
   'open-feedback': () => openFeedback(),
   'copy-diagnostics': () => copyDiagnostics(),
   'send-feedback': () => sendFeedbackNow(),

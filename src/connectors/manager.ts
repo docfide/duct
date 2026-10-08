@@ -1,0 +1,196 @@
+// Connected sources: each keeps a local copy of its readable files under <data>/connectors/<id>/files and indexes
+// them like any other document (source "connector", with the file's web address in its metadata). Changes are
+// fetched incrementally from the source's cursor; files deleted there are removed here.
+
+import { randomBytes } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import type { Duct } from '../index.js'
+import { safeFileName } from '../library.js'
+import { GoogleDrive, MicrosoftDrive, authorizeSource } from './sources.js'
+import type { ClientIds, ConnectorKind, ConnectorSource, RemoteFile, Tokens } from './sources.js'
+
+/** Where connector tokens are kept: the system keychain in the desktop app, a private file elsewhere. */
+export interface TokenVault {
+  load(): Record<string, Tokens>
+  save(all: Record<string, Tokens>): void
+}
+
+export class FileTokenVault implements TokenVault {
+  constructor(private path: string) {}
+  load() { try { return existsSync(this.path) ? JSON.parse(readFileSync(this.path, 'utf-8')) : {} } catch { return {} } }
+  save(all: Record<string, Tokens>) { writeFileSync(this.path, JSON.stringify(all), { mode: 0o600 }) }
+}
+
+export interface ConnectorInfo {
+  id: string
+  kind: ConnectorKind
+  label: string
+  /** SharePoint: the site's document library; OneDrive and Google: unset. */
+  drive?: string
+  cursor: string | null
+  files: Record<string, { version: string; name: string }>
+  addedAt: string
+  lastSync?: string
+  syncing?: boolean
+  error?: string
+}
+
+export const MAX_FILE_BYTES = 100 * 1024 * 1024
+
+export interface ConnectorOptions {
+  dir: string
+  vault: TokenVault
+  clientIds: ClientIds
+  openUrl: (url: string) => void | Promise<void>
+  fetch?: typeof fetch
+  /** Whether connectors are on this plan (entitlement "team.connectors"). */
+  entitled: () => boolean
+  onChange?: () => void
+}
+
+export class ConnectorManager {
+  private state: ConnectorInfo[]
+  private running = new Map<string, Promise<void>>()
+  private fetchImpl: typeof fetch
+
+  constructor(private duct: Duct, private opts: ConnectorOptions) {
+    this.fetchImpl = opts.fetch ?? fetch
+    mkdirSync(opts.dir, { recursive: true })
+    try { this.state = JSON.parse(readFileSync(join(opts.dir, 'connectors.json'), 'utf-8')) } catch { this.state = [] }
+    for (const c of this.state) c.syncing = false
+  }
+
+  private persist(): void {
+    writeFileSync(join(this.opts.dir, 'connectors.json'), JSON.stringify(this.state, null, 2))
+  }
+
+  available(): { google: boolean; microsoft: boolean; entitled: boolean } {
+    return { google: !!this.opts.clientIds.google, microsoft: !!this.opts.clientIds.microsoft, entitled: this.opts.entitled() }
+  }
+
+  list() {
+    return this.state.map(({ files, cursor: _c, ...c }) => ({ ...c, fileCount: Object.keys(files).length, filesDir: this.filesDir(c.id) }))
+  }
+
+  private filesDir(id: string) { return join(this.opts.dir, id, 'files') }
+
+  private source(c: ConnectorInfo): ConnectorSource {
+    const tokens = this.opts.vault.load()[c.id]
+    if (!tokens) throw new Error('This source needs reconnecting')
+    const ctx = { fetch: this.fetchImpl, saveTokens: (t: Tokens) => { const all = this.opts.vault.load(); all[c.id] = t; this.opts.vault.save(all) } }
+    return c.kind === 'gdrive' ? new GoogleDrive(tokens, this.opts.clientIds.google, ctx) : new MicrosoftDrive(tokens, this.opts.clientIds.microsoft, ctx, c.drive)
+  }
+
+  /** Signs in to a source in the browser, then starts reading it in the background. */
+  async add(kind: ConnectorKind, options: { siteUrl?: string } = {}): Promise<ReturnType<ConnectorManager['list']>[number]> {
+    if (!this.opts.entitled()) throw Object.assign(new Error('Connectors are part of the Team plan.'), { status: 403 })
+    const tokens = await authorizeSource(kind, this.opts.clientIds, this.opts.openUrl, this.fetchImpl)
+    const id = `${kind}-${randomBytes(4).toString('hex')}`
+    const all = this.opts.vault.load()
+    all[id] = tokens
+    this.opts.vault.save(all)
+    const info: ConnectorInfo = { id, kind, label: kind === 'gdrive' ? 'Google Drive' : 'Microsoft 365', cursor: null, files: {}, addedAt: new Date().toISOString() }
+    try {
+      const src = this.source(info)
+      if (kind === 'microsoft' && options.siteUrl) info.drive = await (src as MicrosoftDrive).resolveSite(options.siteUrl)
+      info.label = await this.source(info).label()
+    } catch (err) {
+      delete all[id]
+      this.opts.vault.save(all)
+      throw err
+    }
+    this.state.push(info)
+    this.persist()
+    this.sync(id).catch(() => {})
+    return this.list().find(c => c.id === id)!
+  }
+
+  /** Fetches changes and updates the local copies and the index. One run per source at a time. */
+  sync(id: string): Promise<void> {
+    const existing = this.running.get(id)
+    if (existing) return existing
+    const run = this.runSync(id).finally(() => this.running.delete(id))
+    this.running.set(id, run)
+    return run
+  }
+
+  private async runSync(id: string): Promise<void> {
+    const c = this.state.find(x => x.id === id)
+    if (!c) throw new Error('No such source')
+    c.syncing = true
+    c.error = undefined
+    this.opts.onChange?.()
+    try {
+      if (!this.opts.entitled()) throw new Error('Connectors are part of the Team plan; reading is paused.')
+      const src = this.source(c)
+      const changes = await src.changes(c.cursor)
+      // A full listing replaces what we know: anything not listed any more is gone.
+      if (c.cursor === null) {
+        const listed = new Set(changes.upserts.map(f => f.id))
+        for (const known of Object.keys(c.files)) if (!listed.has(known)) changes.removed.push(known)
+      }
+      for (const remoteId of changes.removed) await this.removeFile(c, remoteId)
+      for (const f of changes.upserts) {
+        if (c.files[f.id]?.version === f.version) continue
+        try { await this.fetchFile(c, src, f) } catch (err) { c.error = `Some files couldn’t be read: ${(err as Error).message}` }
+      }
+      c.cursor = changes.cursor
+      c.lastSync = new Date().toISOString()
+    } catch (err) {
+      c.error = (err as Error).message
+    } finally {
+      c.syncing = false
+      this.persist()
+      this.opts.onChange?.()
+    }
+  }
+
+  private async fetchFile(c: ConnectorInfo, src: ConnectorSource, f: RemoteFile): Promise<void> {
+    if (f.size && f.size > MAX_FILE_BYTES) return
+    const dir = join(this.filesDir(c.id), f.id.replace(/[^\w.-]/g, '_'))
+    // A renamed file: drop the old copy first.
+    if (existsSync(dir)) {
+      for (const old of readdirSync(dir)) await this.duct.removeDocument(join(dir, old))
+      rmSync(dir, { recursive: true, force: true })
+    }
+    const bytes = await src.download(f)
+    if (bytes.length > MAX_FILE_BYTES) return
+    mkdirSync(dir, { recursive: true })
+    const path = join(dir, safeFileName(f.name))
+    writeFileSync(path, bytes)
+    await this.duct.index(path, { connector: c.kind, connectorId: c.id, remoteId: f.id, ...(f.webUrl ? { webUrl: f.webUrl } : {}) }, { source: 'connector', displayName: f.name })
+    c.files[f.id] = { version: f.version, name: f.name }
+  }
+
+  private async removeFile(c: ConnectorInfo, remoteId: string): Promise<void> {
+    const dir = join(this.filesDir(c.id), remoteId.replace(/[^\w.-]/g, '_'))
+    if (existsSync(dir)) {
+      for (const f of readdirSync(dir)) await this.duct.removeDocument(join(dir, f))
+      rmSync(dir, { recursive: true, force: true })
+    }
+    delete c.files[remoteId]
+  }
+
+  /** Disconnects a source: its local copies leave the index and the disk, and its tokens are deleted. */
+  async remove(id: string): Promise<boolean> {
+    const c = this.state.find(x => x.id === id)
+    if (!c) return false
+    await this.running.get(id)?.catch(() => {})
+    for (const remoteId of Object.keys(c.files)) await this.removeFile(c, remoteId)
+    rmSync(join(this.opts.dir, id), { recursive: true, force: true })
+    const all = this.opts.vault.load()
+    delete all[id]
+    this.opts.vault.save(all)
+    this.state = this.state.filter(x => x.id !== id)
+    this.persist()
+    return true
+  }
+
+  /** Reads every source now and then every `minutes`. */
+  start(minutes = 15): void {
+    const all = () => { for (const c of this.state) this.sync(c.id).catch(() => {}) }
+    all()
+    setInterval(all, minutes * 60_000).unref()
+  }
+}
