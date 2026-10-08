@@ -11,7 +11,7 @@ import { chunk } from './chunk/index.js'
 import { extractUrl, isUrl } from './extract/web.js'
 import { extractTablesFromContent } from './extract/table.js'
 import { SqliteStore } from './store/sqlite.js'
-import type { StoredApiKey, StoredDocument } from './store/sqlite.js'
+import type { AuditEntry, StoredApiKey, StoredDocument } from './store/sqlite.js'
 import { terminateOcr } from './ocr/index.js'
 import { HybridSearcher, reciprocalRankFusion } from './search/hybrid.js'
 import { SimpleReranker, NoopReranker } from './search/reranker.js'
@@ -281,6 +281,20 @@ export class Duct {
     if (allowed) scope = { ...scope, formats: scope?.formats ? scope.formats.filter(f => allowed.includes(f)) : allowed }
     if (scope?.formats && scope.formats.length === 0) return Object.fromEntries(fields.map(f => [f, {}]))
     return this.store.facetCounts(query, fields, limit, filter && Object.keys(filter).length ? filter : undefined, scope)
+  }
+
+  /** Records who did what, for the server's audit log (see src/server.ts). */
+  recordAudit(e: { actor: string; role?: string; action: string; target?: string; detail?: string }): void {
+    this.store.addAudit({ at: Date.now(), ...e })
+  }
+
+  auditLog(opts: { before?: number; limit?: number; actor?: string; action?: string } = {}): AuditEntry[] {
+    return this.store.listAudit({ ...opts, limit: Math.min(1000, opts.limit ?? 200) })
+  }
+
+  /** Deletes audit entries older than `days`. */
+  pruneAudit(days: number): number {
+    return this.store.pruneAudit(Date.now() - days * 86_400_000)
   }
 
   /** Creates an API key for the developer API. The key itself is returned once and only its hash is stored. */
@@ -1152,4 +1166,4 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
 export { HybridSearcher, reciprocalRankFusion, extractUrl, isUrl, extractTablesFromContent }
 export { FeatureDisabledError, FEATURE_NAMES, FEATURE_LABELS, FORMAT_KINDS, defaultFeatures } from './features.js'
 export type { Features, FeaturesPatch, FeatureName } from './features.js'
-export type { StoredApiKey } from './store/sqlite.js'
+export type { AuditEntry, StoredApiKey } from './store/sqlite.js'

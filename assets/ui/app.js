@@ -44,6 +44,12 @@ const rawFetch = window.fetch.bind(window)
 let loginPromise = null
 
 async function login() {
+  // A server with organisation sign-in sends people to their identity provider instead of asking for a token.
+  const mode = await rawFetch('/auth/mode').then(r => r.json()).catch(() => ({}))
+  if (mode.oidc) {
+    window.location.href = '/auth/login?next=' + encodeURIComponent(window.location.pathname + window.location.search)
+    return new Promise(() => {})
+  }
   const token = window.prompt('This Duct server needs an access token:')
   if (!token) throw new Error('Access token required')
   const res = await rawFetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) })
@@ -1195,6 +1201,18 @@ $('#sharepointForm').addEventListener('submit', async e => {
   renderConnectors()
 })
 
+// ---------- audit log (shared servers, admins) ----------
+
+const AUDIT_LABELS = { signin: 'Signed in', search: 'Searched', ask: 'Asked', open: 'Opened', upload: 'Added', delete: 'Removed', ocr: 'Read with OCR', export: 'Exported', tags: 'Tagged', settings: 'Changed settings', features: 'Changed features', 'clear-index': 'Cleared the index', watch: 'Watched a folder', unwatch: 'Stopped watching', 'connector-add': 'Connected a source', 'connector-remove': 'Disconnected a source' }
+async function renderAudit() {
+  const box = $('#auditList')
+  let a
+  try { a = await json('/api/audit?limit=100') } catch (err) { box.innerHTML = '<p class="hint">' + esc(err.message) + '</p>'; return }
+  if (!a.enabled) { box.innerHTML = '<p class="hint">The audit log is kept on shared servers (with an access token or sign-in).</p>'; return }
+  box.innerHTML = '<p class="hint">Who did what on this server, newest first. ' + (a.queries ? 'Search terms are recorded.' : 'Search terms aren’t recorded.') + ' <a href="/api/audit?format=csv">Download CSV</a></p>' +
+    (a.entries.length ? '<div class="audit-table">' + a.entries.map(e => '<div class="audit-row"><span class="when">' + esc(new Date(e.at).toLocaleString()) + '</span><span class="who">' + esc(e.actor) + '</span><span>' + esc(AUDIT_LABELS[e.action] || e.action) + (e.target ? ' <code>' + esc(fileName(e.target)) + '</code>' : '') + (e.detail ? ' <span class="hint">' + esc(e.detail) + '</span>' : '') + '</span></div>').join('') + '</div>' : '<p class="hint">Nothing yet.</p>')
+}
+
 async function renderTelemetry() {
   let t
   try { t = await json('/api/telemetry') } catch { t = { available: false } }
@@ -1212,6 +1230,7 @@ async function renderTelemetry() {
 function showTab(tab) {
   if (tab === 'account') renderAccount()
   if (tab === 'about') renderCrashSummary()
+  if (tab === 'audit') renderAudit()
   $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab))
   $$('.panel').forEach(p => { p.hidden = p.dataset.panel !== tab })
 }
@@ -1349,6 +1368,10 @@ const ACTIONS = {
     try { await json('/api/connectors/' + encodeURIComponent(el.dataset.id), { method: 'DELETE' }); toast('Disconnected') } catch (err) { toast(err.message, true) }
     renderConnectors()
   },
+  'sign-out': async () => {
+    await rawFetch('/auth/logout', { method: 'POST' }).catch(() => {})
+    window.location.href = '/auth/login'
+  },
   'open-feedback': () => openFeedback(),
   'copy-diagnostics': () => copyDiagnostics(),
   'send-feedback': () => sendFeedbackNow(),
@@ -1432,6 +1455,11 @@ async function start() {
   $$('[data-bind="version"]').forEach(el => { el.textContent = 'v' + state.info.version })
   if (!isAdmin()) $$('[data-admin]').forEach(el => { el.hidden = true })
   $('#askSetup').hidden = state.config.llmProvider !== 'none'
+  json('/api/me').then(me => {
+    if (!me.user) return
+    $('#signedInAs').hidden = false
+    $('#signedInEmail').textContent = me.user
+  }).catch(() => {})
   applyFeatures()
   renderSidebar()
   renderStatus()

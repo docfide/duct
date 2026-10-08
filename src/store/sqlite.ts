@@ -45,6 +45,8 @@ export interface NewDocument {
   chunkMetadata: Record<string, unknown>
 }
 
+export interface AuditEntry { id: number; at: number; actor: string; role: string | null; action: string; target: string | null; detail: string | null }
+
 export interface StoredApiKey {
   id: string
   name: string
@@ -269,6 +271,16 @@ export class SqliteStore {
       CREATE TABLE IF NOT EXISTS sources (path TEXT PRIMARY KEY, kind TEXT NOT NULL, added_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS tags (path TEXT NOT NULL, tag TEXT NOT NULL, PRIMARY KEY (path, tag));
       CREATE INDEX IF NOT EXISTS tags_tag ON tags(tag);
+      CREATE TABLE IF NOT EXISTS audit (
+        id INTEGER PRIMARY KEY,
+        at INTEGER NOT NULL,
+        actor TEXT NOT NULL,
+        role TEXT,
+        action TEXT NOT NULL,
+        target TEXT,
+        detail TEXT
+      );
+      CREATE INDEX IF NOT EXISTS audit_at ON audit(at);
       CREATE TABLE IF NOT EXISTS api_keys (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -480,6 +492,27 @@ export class SqliteStore {
   }
 
   // ---------- API keys ----------
+
+  // ---------- audit log ----------
+
+  addAudit(e: { at: number; actor: string; role?: string; action: string; target?: string; detail?: string }): void {
+    this.db.prepare('INSERT INTO audit (at, actor, role, action, target, detail) VALUES (?, ?, ?, ?, ?, ?)').run(e.at, e.actor, e.role ?? null, e.action, e.target ?? null, e.detail ?? null)
+  }
+
+  listAudit(opts: { before?: number; limit: number; actor?: string; action?: string }): AuditEntry[] {
+    let sql = 'SELECT id, at, actor, role, action, target, detail FROM audit WHERE 1 = 1'
+    const params: (string | number)[] = []
+    if (opts.before) { sql += ' AND id < ?'; params.push(opts.before) }
+    if (opts.actor) { sql += ' AND actor = ?'; params.push(opts.actor) }
+    if (opts.action) { sql += ' AND action = ?'; params.push(opts.action) }
+    sql += ' ORDER BY id DESC LIMIT ?'
+    params.push(opts.limit)
+    return this.db.prepare(sql).all(...params) as unknown as AuditEntry[]
+  }
+
+  pruneAudit(olderThan: number): number {
+    return Number(this.db.prepare('DELETE FROM audit WHERE at < ?').run(olderThan).changes)
+  }
 
   addApiKey(key: { id: string; name: string; keyHash: string; scopes: string[]; collections: string[] | null }): void {
     this.db.prepare('INSERT INTO api_keys (id, name, key_hash, scopes, collections, created_at) VALUES (?, ?, ?, ?, ?, ?)')

@@ -22,6 +22,7 @@ import type { TensflareAccount } from './account.js'
 import type { Telemetry } from './telemetry.js'
 import type { SettingsSync } from './sync.js'
 import type { ConnectorManager } from './connectors/manager.js'
+import type { OidcLogin } from './oidc.js'
 import { clearCrashes, collectDiagnostics, listCrashes, sendFeedback, validateFeedback } from './diagnostics.js'
 import { Collections } from './api/collections.js'
 import { FEATURE_LABELS, FEATURE_NAMES, FORMAT_KINDS, FeatureDisabledError } from './features.js'
@@ -99,6 +100,13 @@ export interface ServerOptions {
   sync?: SettingsSync
   /** Google Drive, OneDrive and SharePoint sources (Team). */
   connectors?: ConnectorManager
+  /** Sign-in with the organisation's identity provider (OpenID Connect) for a shared server. */
+  oidc?: OidcLogin
+  /**
+   * The audit log: on by default for a shared server (token or sign-in). `queries` also records search
+   * terms and questions; `days` is how long entries are kept (default 365).
+   */
+  audit?: false | { queries?: boolean; days?: number }
 }
 
 /** 403 for a switched-off feature, otherwise `status` with the error's message. */
@@ -205,7 +213,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     legacyHeaders: false,
     message: { error: 'Too many requests. Rate limit: 120 requests per minute.' },
     // Only a shared (token-protected) server is rate limited; a local-only one serves just this machine.
-    skip: () => !token,
+    skip: () => !token && !opts?.oidc,
   })
 
   const memberTokens = opts?.memberTokens ?? []
@@ -218,14 +226,31 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     return null
   }
 
+  const oidc = opts?.oidc
   function auth(req: express.Request, res: express.Response, next: express.NextFunction): void {
-    // Without a token the server only serves this machine, and its user is the admin.
-    if (!token) { res.locals.role = 'admin'; return next() }
+    // Without a token or sign-in the server only serves this machine, and its user is the admin.
+    if (!token && !oidc) { res.locals.role = 'admin'; res.locals.actor = 'local'; return next() }
     const header = req.headers['authorization']
     const bearer = typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : undefined
-    const role = roleFor(bearer) ?? roleFor(readCookie(req.headers.cookie, 'duct_token'))
-    if (role) { res.locals.role = role; return next() }
-    res.status(401).json({ error: 'Unauthorized. Provide a valid Bearer token.' })
+    const role = token ? (roleFor(bearer) ?? roleFor(readCookie(req.headers.cookie, 'duct_token'))) : null
+    if (role) { res.locals.role = role; res.locals.actor = `${role}-token`; return next() }
+    const user = oidc?.session(req)
+    if (user) { res.locals.role = user.role; res.locals.actor = user.email; return next() }
+    res.status(401).json({ error: oidc ? 'Sign in first.' : 'Unauthorized. Provide a valid Bearer token.', ...(oidc ? { login: '/auth/login' } : {}) })
+  }
+
+  // The audit log (shared servers): who did what, never document contents. Queries only when opted in.
+  const auditOn = opts?.audit !== false && (!!token || !!oidc)
+  const auditQueries = opts?.audit ? !!opts.audit.queries : false
+  const audit = (res: express.Response, action: string, target?: string, detail?: string) => {
+    if (!auditOn) return
+    try { duct.recordAudit({ actor: String(res.locals.actor ?? 'unknown'), role: res.locals.role, action, target: target?.slice(0, 1000), detail: detail?.slice(0, 1000) }) } catch {}
+  }
+  if (auditOn) {
+    const days = opts?.audit ? opts.audit.days ?? 365 : 365
+    const prune = () => { try { duct.pruneAudit(days) } catch {} }
+    prune()
+    setInterval(prune, 24 * 3600_000).unref()
   }
 
   function adminOnly(_req: express.Request, res: express.Response, next: express.NextFunction): void {
@@ -277,6 +302,11 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     res.json({ ok: true })
   })
 
+  if (oidc) app.use('/auth', oidc.router(user => {
+    try { duct.recordAudit({ actor: user.email, role: user.role, action: 'signin' }) } catch {}
+  }))
+  else app.get('/auth/mode', (_req, res) => { res.json({ oidc: false }) })
+
   app.use('/api/', auth)
 
   /** Answers 403 when a feature is switched off in Settings. */
@@ -286,7 +316,20 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
   }
 
   app.get('/api/me', (_req, res) => {
-    res.json({ role: res.locals.role, auth: !!token })
+    res.json({ role: res.locals.role, auth: !!token || !!oidc, ...(oidc && String(res.locals.actor).includes('@') ? { user: res.locals.actor } : {}) })
+  })
+
+  // The audit log, newest first: ?before=<id>&actor=&action=&limit=, or ?format=csv for the lot (admin).
+  app.get('/api/audit', adminOnly, (req, res) => {
+    const q = req.query
+    if (q['format'] === 'csv') {
+      const rows = duct.auditLog({ limit: 1000, actor: q['actor'] as string | undefined, action: q['action'] as string | undefined })
+      const cell = (v: unknown) => { let t = v == null ? '' : String(v); if (/^[=+\-@]/.test(t)) t = "'" + t; return `"${t.replace(/"/g, '""')}"` }
+      res.type('text/csv').setHeader('Content-Disposition', 'attachment; filename="duct-audit.csv"')
+      res.send('\ufeff' + [['time', 'actor', 'role', 'action', 'target', 'detail'], ...rows.map(r => [new Date(r.at).toISOString(), r.actor, r.role, r.action, r.target, r.detail])].map(r => r.map(cell).join(',')).join('\r\n'))
+      return
+    }
+    res.json({ enabled: auditOn, queries: auditQueries, entries: duct.auditLog({ before: Number(q['before']) || undefined, limit: Number(q['limit']) || 100, actor: q['actor'] as string | undefined, action: q['action'] as string | undefined }) })
   })
 
   // Everything the UI needs to know about this server, so the page itself can be a static file.
@@ -362,6 +405,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     const siteUrl = typeof req.body?.siteUrl === 'string' && req.body.siteUrl.trim() ? req.body.siteUrl.trim() : undefined
     if (connecting?.running) { res.status(409).json({ error: 'Finish the sign-in that’s already open first.' }); return }
     connecting = { kind, running: true }
+    audit(res, 'connector-add', kind, siteUrl)
     connectors.add(kind, { siteUrl }).then(() => { connecting = null }, err => { connecting = { kind, running: false, error: (err as Error).message } })
     res.status(202).json({ started: true })
   })
@@ -374,6 +418,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
 
   app.delete('/api/connectors/:id', adminOnly, async (req, res) => {
     if (!connectors || !(await connectors.remove(req.params['id'] as string))) { res.status(404).json({ error: 'No such source' }); return }
+    audit(res, 'connector-remove', req.params['id'] as string)
     res.json({ ok: true })
   })
 
@@ -447,6 +492,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     try {
       const features = duct.setFeatures(req.body)
       opts?.sync?.changed()
+      audit(res, 'features', undefined, JSON.stringify(req.body).slice(0, 500))
       res.json({ ok: true, features })
     } catch (err) {
       sendError(res, err, 400)
@@ -485,6 +531,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
         const results = []
         for (const file of files) {
           results.push(await addToLibrary(duct, libraryDir, file.path, { originalName: file.originalname, metadata: meta, move: true }))
+          audit(res, 'upload', file.originalname)
         }
         res.json({ results })
       } catch (err) {
@@ -502,6 +549,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     try {
       const results = await duct.search(q, topK, filter, scopeFrom(req.query))
       telemetry?.record('searches')
+      audit(res, 'search', undefined, auditQueries ? q : undefined)
       res.json({ results })
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })
@@ -514,6 +562,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     try {
       const result = agentic ? await duct.agenticSearch(question) : await duct.ask(question, topK)
       telemetry?.record('ask')
+      audit(res, 'ask', undefined, auditQueries ? String(question) : undefined)
       res.json(result)
     } catch (err) {
       sendError(res, err)
@@ -538,6 +587,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     if (!doc) { res.status(404).json({ error: 'Document not found' }); return }
     try {
       await duct.removeDocument(doc.path)
+      audit(res, 'delete', doc.path)
       // Library copies belong to Duct and are deleted; anything else (watched folders) is only unindexed.
       const resolved = resolve(doc.path)
       if (doc.source === 'library' && isInside(resolved, libraryDir) && resolved !== libraryDir) {
@@ -568,6 +618,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     // The browser's PDF viewer needs plugin/object access; nothing else on this response may run.
     res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; object-src 'self'; frame-ancestors 'none'")
     telemetry?.record('opens')
+    audit(res, 'open', doc.path)
     res.sendFile(doc.path, { dotfiles: 'allow', headers: { 'Cache-Control': 'no-store' } })
   })
 
@@ -578,6 +629,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     try {
       const result = await duct.index(doc.path, undefined, { ocr: true, force: true })
       telemetry?.record('ocr')
+      audit(res, 'ocr', doc.path)
       res.json({ ...result, document: duct.getDocument(doc.path) })
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })
@@ -597,6 +649,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     if (!path || !duct.listSources().some(s => s.path === path)) { res.status(404).json({ error: 'Not a watched folder' }); return }
     try {
       await duct.removeSource(path)
+      audit(res, 'unwatch', path)
       res.json({ ok: true })
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })
@@ -618,6 +671,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     try {
       duct.configure(req.body)
       opts?.sync?.changed()
+      audit(res, 'settings', undefined, Object.keys(req.body ?? {}).map(k => API_KEY_FIELDS.includes(k as never) ? `${k} (set)` : k).join(', '))
       const keys = Object.fromEntries(API_KEY_FIELDS.filter(k => typeof req.body?.[k] === 'string' && req.body[k]).map(k => [k, req.body[k] as string]))
       if (Object.keys(keys).length) opts?.onSecrets?.(keys)
       res.json({ ok: true, config: publicConfig() })
@@ -633,6 +687,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
   app.delete('/api/clear', adminOnly, async (_req, res) => {
     try {
       await duct.clear()
+      audit(res, 'clear-index')
       res.json({ ok: true })
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })
@@ -653,7 +708,9 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
       return
     }
     try {
-      res.json({ path, tags: duct.setTags(path, tags) })
+      const saved = duct.setTags(path, tags)
+      audit(res, 'tags', path, saved.join(', '))
+      res.json({ path, tags: saved })
     } catch (err) {
       sendError(res, err, 404)
     }
@@ -686,6 +743,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     try {
       const topK = Math.min(500, parseInt(req.query.topK as string) || 100)
       const results = await duct.search(q, topK, parseMetadata(req.query.filter as string), scopeFrom(req.query))
+      audit(res, 'export', undefined, auditQueries ? q : `${results.length} results`)
       await sendExport(res, results.map(exportItem), (req.query.format as string) || 'csv', `Search: ${q}`)
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })
@@ -710,6 +768,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
       })
     }
     try {
+      audit(res, 'export', undefined, `${out.length} collected passages`)
       await sendExport(res, out, typeof format === 'string' ? format : 'docx', typeof title === 'string' && title.trim() ? title.trim().slice(0, 200) : 'Collected passages')
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })
@@ -765,6 +824,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     }
     try {
       // Indexing the folder's existing files can take a while; progress is reported by /api/activity.
+      for (const d of directories) audit(res, 'watch', d)
       duct.watch(directories).catch(err => console.error(`  Watch failed: ${(err as Error).message}`))
       res.json({ ok: true, watching: directories })
     } catch (err) {

@@ -175,10 +175,12 @@
         <button role="tab" class="tab" data-tab="ai" data-admin>AI</button>
         <button role="tab" class="tab" data-tab="library">Library</button>
         <button role="tab" class="tab" data-tab="account" data-admin>Account</button>
+        <button role="tab" class="tab" data-tab="audit" data-admin>Audit log</button>
         <button role="tab" class="tab" data-tab="about">About</button>
       </nav>
       <div class="settings-panels">
         <section class="panel" data-panel="general">
+          <p class="hint" id="signedInAs" hidden>Signed in to this server as <strong id="signedInEmail"></strong>. <button class="link" data-action="sign-out">Sign out</button></p>
           <label class="check" data-admin><input type="checkbox" data-setting="ocr"> <span><strong>Read scanned pages and images (OCR)</strong><small>Slower to index. Without it, scans are listed under Needs attention so you can read them one by one.</small></span></label>
           <label class="check"><input type="checkbox" id="mascotToggle"> <span><strong>Show the mascot</strong><small>Only on this device.</small></span></label>
           <div id="telemetryBox" hidden>
@@ -257,6 +259,9 @@
           <button class="btn btn-ghost" data-action="watch-folder" data-requires="watch">Watch a folder</button>
           <h3 data-admin>Danger zone</h3>
           <button class="btn btn-danger" data-action="clear-index" data-admin>Clear the index</button>
+        </section>
+        <section class="panel" data-panel="audit" hidden>
+          <div id="auditList"></div>
         </section>
         <section class="panel" data-panel="account" hidden>
           <div id="accountBody"></div>

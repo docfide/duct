@@ -13,6 +13,8 @@ import { FileAccountStorage, TensflareAccount } from './account.js'
 import { Telemetry } from './telemetry.js'
 import { installCrashHandlers } from './diagnostics.js'
 import { setHostedAi } from './hosted.js'
+import { OidcLogin } from './oidc.js'
+import { randomBytes } from 'node:crypto'
 import { SettingsSync } from './sync.js'
 import { ConnectorManager, FileTokenVault } from './connectors/manager.js'
 import { clientIdsFromEnv } from './connectors/sources.js'
@@ -544,6 +546,15 @@ program
   .option('--watch <dir>', 'Watch this folder from startup, e.g. a mounted shared drive (repeatable)', (v: string, prev: string[]) => [...prev, v], [] as string[])
   .option('--rescan <minutes>', 'Also rescan watched folders on a timer, for network drives where file events are unreliable (0 = off)', (v) => parseFloat(v), 15)
   .option('--member-token <token>', 'Token for team members: search, open and upload, but no settings or deletes (repeatable; env: DUCT_MEMBER_TOKENS, comma-separated)', (v: string, prev: string[]) => [...prev, v], [] as string[])
+  .option('--public-url <url>', 'This server\'s public address (needed for sign-in), e.g. https://duct.example.com (env: DUCT_PUBLIC_URL)')
+  .option('--oidc-issuer <url>', 'Sign people in with your identity provider (OpenID Connect issuer URL; env: DUCT_OIDC_ISSUER)')
+  .option('--oidc-client-id <id>', 'OIDC client id (env: DUCT_OIDC_CLIENT_ID)')
+  .option('--admin-email <email>', 'Admin when signing in (repeatable; env: DUCT_ADMIN_EMAILS, comma-separated)', (v: string, prev: string[]) => [...prev, v], [] as string[])
+  .option('--allow-domain <domain>', 'Members: anyone with an email at this domain (repeatable; env: DUCT_ALLOW_DOMAINS)', (v: string, prev: string[]) => [...prev, v], [] as string[])
+  .option('--allow-email <email>', 'Members: this person (repeatable; env: DUCT_ALLOW_EMAILS)', (v: string, prev: string[]) => [...prev, v], [] as string[])
+  .option('--audit-queries', 'Also record search terms and questions in the audit log')
+  .option('--audit-days <days>', 'Keep audit entries this many days', (v) => parseInt(v), 365)
+  .option('--no-audit', 'Don\'t keep an audit log')
   .option('--allowed-host <name>', 'Extra hostname accepted in the Host header, e.g. duct.example.com (repeatable)', (v: string, prev: string[]) => [...prev, v], [] as string[])
   .action(async (options) => {
     try {
@@ -553,10 +564,33 @@ program
         console.error(`  ${chalk.red('✗')} ${chalk.red('Member tokens need an admin token too: set --auth-token or DUCT_AUTH_TOKEN.')}`)
         process.exit(1)
       }
+      const list = (flag: string[], env?: string) => [...flag, ...(env ?? '').split(',').map(s => s.trim()).filter(Boolean)]
+      const issuer = options.oidcIssuer || process.env['DUCT_OIDC_ISSUER']
+      const publicUrl = options.publicUrl || process.env['DUCT_PUBLIC_URL']
+      let oidc: OidcLogin | undefined
+      if (issuer) {
+        const clientId = options.oidcClientId || process.env['DUCT_OIDC_CLIENT_ID']
+        const clientSecret = process.env['DUCT_OIDC_CLIENT_SECRET']
+        if (!clientId || !clientSecret || !publicUrl) {
+          console.error(`  ${chalk.red('✗')} ${chalk.red('Sign-in needs --oidc-client-id, DUCT_OIDC_CLIENT_SECRET and --public-url.')}`)
+          process.exit(1)
+        }
+        const admins = list(options.adminEmail, process.env['DUCT_ADMIN_EMAILS'])
+        if (admins.length === 0) {
+          console.error(`  ${chalk.red('✗')} ${chalk.red('Sign-in needs at least one --admin-email.')}`)
+          process.exit(1)
+        }
+        let sessionSecret = process.env['DUCT_SESSION_SECRET'] ?? ''
+        if (sessionSecret.length < 32) {
+          sessionSecret = randomBytes(32).toString('hex')
+          console.log(`    ${chalk.yellow('!')} DUCT_SESSION_SECRET isn't set: people will need to sign in again after a restart.`)
+        }
+        oidc = new OidcLogin({ issuer, clientId, clientSecret, publicUrl, admins, allowDomains: list(options.allowDomain, process.env['DUCT_ALLOW_DOMAINS']), allowEmails: list(options.allowEmail, process.env['DUCT_ALLOW_EMAILS']), sessionSecret })
+      }
       const loopback = ['127.0.0.1', 'localhost', '::1'].includes(options.host)
-      if (!loopback && !token) {
+      if (!loopback && !token && !oidc) {
         console.error(`  ${chalk.red('✗')} ${chalk.red(`Refusing to listen on ${options.host} without authentication.`)}`)
-        console.error(`    ${chalk.dim('Set --auth-token <token> or DUCT_AUTH_TOKEN, or keep the default --host 127.0.0.1.')}`)
+        console.error(`    ${chalk.dim('Set --auth-token <token> or DUCT_AUTH_TOKEN, or sign-in with --oidc-issuer, or keep the default --host 127.0.0.1.')}`)
         process.exit(1)
       }
       const embed = embedOption(options.embed)
@@ -605,11 +639,14 @@ program
         channel,
         sync,
         connectors,
+        oidc,
+        audit: options.audit === false ? false : { queries: !!options.auditQueries, days: options.auditDays },
       })
       server.listen(options.port, options.host, () => {
         const shownHost = loopback ? 'localhost' : options.host
         console.log(`\n  ${chalk.green('✓')} ${chalk.bold('Duct server running at')} ${chalk.cyan(`http://${shownHost}:${options.port}`)}`)
         if (token) console.log(`    ${chalk.dim('Auth:')} token required`)
+        if (oidc) console.log(`    ${chalk.dim('Sign-in:')} ${issuer} (${publicUrl}/auth/callback)`)
         if (options.watchRoot.length > 0) console.log(`    ${chalk.dim('Watch roots:')} ${options.watchRoot.join(', ')}`)
         if (memberTokens.length > 0) console.log(`    ${chalk.dim('Members:')} ${memberTokens.length} token(s)`)
         // Resume folders watched earlier (via `duct watch` or the API), add --watch folders, then keep them in sync.

@@ -1,0 +1,114 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import type { Server } from 'node:http'
+import type { AddressInfo } from 'node:net'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { Duct } from '../src/index.js'
+import { createServer } from '../src/server.js'
+import { OidcLogin } from '../src/oidc.js'
+
+const ISSUER = 'https://login.example.com'
+let duct: Duct
+let server: Server
+let base: string
+let nonces: Map<string, string>
+let nextEmail: string
+
+/** A fake identity provider: discovery and a token endpoint that signs the person in as `nextEmail`. */
+const idpFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+  const url = String(input)
+  if (url === `${ISSUER}/.well-known/openid-configuration`) return Response.json({ issuer: ISSUER, authorization_endpoint: `${ISSUER}/authorize`, token_endpoint: `${ISSUER}/token` })
+  if (url === `${ISSUER}/token`) {
+    const form = new URLSearchParams(String(init?.body))
+    expect(form.get('client_secret')).toBe('secret')
+    expect(form.get('code_verifier')).toBeTruthy()
+    const claims = { iss: ISSUER, aud: 'duct-server', nonce: nonces.get(form.get('code')!), exp: Math.floor(Date.now() / 1000) + 300, email: nextEmail, email_verified: true }
+    return Response.json({ id_token: `h.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.s` })
+  }
+  return new Response('not found', { status: 404 })
+}) as typeof fetch
+
+async function start(audit: { queries?: boolean } = {}) {
+  const docs = mkdtempSync(join(tmpdir(), 'duct-cloud-'))
+  mkdirSync(docs, { recursive: true })
+  writeFileSync(join(docs, 'policy.txt'), 'The travel policy covers economy flights.')
+  duct = new Duct({ embed: false })
+  await duct.index(docs)
+  const oidc = new OidcLogin({ issuer: ISSUER, clientId: 'duct-server', clientSecret: 'secret', publicUrl: 'http://duct.test', admins: ['boss@okafor.ng'], allowDomains: ['okafor.ng'], allowEmails: ['auditor@external.com'], sessionSecret: 'x'.repeat(40) }, idpFetch)
+  server = createServer(duct, { oidc, allowedHosts: '*', audit, libraryDir: join(docs, 'lib') }).listen(0, '127.0.0.1')
+  await new Promise(r => server.once('listening', r))
+  base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+}
+
+beforeEach(() => { nonces = new Map(); nextEmail = 'chidi@okafor.ng' })
+afterEach(() => { server?.close(); duct?.close() })
+
+/** Signs in through the fake provider and returns the session cookie. */
+async function signIn(email: string): Promise<string> {
+  nextEmail = email
+  const start = await fetch(`${base}/auth/login?next=/`, { redirect: 'manual' })
+  const stateCookie = start.headers.getSetCookie()[0].split(';')[0]
+  const auth = new URL(start.headers.get('location')!)
+  expect(auth.origin + auth.pathname).toBe(`${ISSUER}/authorize`)
+  expect(auth.searchParams.get('redirect_uri')).toBe('http://duct.test/auth/callback')
+  const code = 'c-' + Math.random()
+  nonces.set(code, auth.searchParams.get('nonce')!)
+  const back = await fetch(`${base}/auth/callback?code=${code}&state=${auth.searchParams.get('state')}`, { redirect: 'manual', headers: { Cookie: stateCookie } })
+  if (back.status !== 303) return `status:${back.status}`
+  return back.headers.getSetCookie().find(c => c.startsWith('duct_session='))!.split(';')[0]
+}
+
+describe('Duct in your cloud: sign-in', () => {
+  it('requires sign-in and tells the page where to go', async () => {
+    await start()
+    const res = await fetch(`${base}/api/stats`)
+    expect(res.status).toBe(401)
+    expect((await res.json()).login).toBe('/auth/login')
+    expect(await (await fetch(`${base}/auth/mode`)).json()).toEqual({ oidc: true })
+  })
+
+  it('signs people in with the identity provider and gives roles by email and domain', async () => {
+    await start()
+    const member = await signIn('chidi@okafor.ng')
+    expect(await (await fetch(`${base}/api/me`, { headers: { Cookie: member } })).json()).toEqual({ role: 'member', auth: true, user: 'chidi@okafor.ng' })
+    expect((await fetch(`${base}/api/clear`, { method: 'DELETE', headers: { Cookie: member } })).status).toBe(403)
+    const admin = await signIn('boss@okafor.ng')
+    expect((await (await fetch(`${base}/api/me`, { headers: { Cookie: admin } })).json()).role).toBe('admin')
+    expect(await signIn('auditor@external.com')).toMatch(/^duct_session=/)
+    expect(await signIn('stranger@elsewhere.com')).toBe('status:403')
+  })
+
+  it('rejects a callback from another browser and a forged session', async () => {
+    await start()
+    const start1 = await fetch(`${base}/auth/login`, { redirect: 'manual' })
+    const auth = new URL(start1.headers.get('location')!)
+    nonces.set('c1', auth.searchParams.get('nonce')!)
+    expect((await fetch(`${base}/auth/callback?code=c1&state=${auth.searchParams.get('state')}`, { redirect: 'manual' })).status).toBe(400)
+    const forged = 'duct_session=' + Buffer.from(JSON.stringify({ e: 'boss@okafor.ng', r: 'admin', x: Date.now() + 1e6 })).toString('base64url') + '.bad'
+    expect((await fetch(`${base}/api/stats`, { headers: { Cookie: forged } })).status).toBe(401)
+  })
+})
+
+describe('Duct in your cloud: audit log', () => {
+  it('records who did what, without search terms unless asked', async () => {
+    await start()
+    const member = await signIn('chidi@okafor.ng')
+    const admin = await signIn('boss@okafor.ng')
+    await fetch(`${base}/api/search?q=travel`, { headers: { Cookie: member } })
+    const log = await (await fetch(`${base}/api/audit`, { headers: { Cookie: admin } })).json()
+    expect(log.enabled).toBe(true)
+    expect(log.entries.map((e: { actor: string; action: string }) => `${e.actor} ${e.action}`)).toEqual(['chidi@okafor.ng search', 'boss@okafor.ng signin', 'chidi@okafor.ng signin'])
+    expect(JSON.stringify(log)).not.toContain('travel')
+    expect((await fetch(`${base}/api/audit`, { headers: { Cookie: member } })).status).toBe(403)
+    const csv = await (await fetch(`${base}/api/audit?format=csv`, { headers: { Cookie: admin } })).text()
+    expect(csv).toContain('"chidi@okafor.ng","member","search"')
+  })
+
+  it('records search terms when the admin opted in', async () => {
+    await start({ queries: true })
+    const member = await signIn('chidi@okafor.ng')
+    await fetch(`${base}/api/search?q=travel`, { headers: { Cookie: member } })
+    expect(duct.auditLog()[0]).toMatchObject({ action: 'search', detail: 'travel' })
+  })
+})
