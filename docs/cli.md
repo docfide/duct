@@ -157,6 +157,30 @@ Output shows `+` for added lines and `-` for removed lines since the previous in
 
 ---
 
+## `duct account`
+
+Sign in with Tensflare. Optional: everything local works without an account; paid features need one.
+
+```bash
+duct account signin    # opens the sign-in page in your browser
+duct account status    # email, plan, and how long paid features work offline
+duct account signout
+```
+
+The session is kept in `account.json` in the index folder, readable only by you (the desktop app uses the system keychain).
+
+## `duct telemetry`
+
+Anonymous usage counts: a daily report of versions, features and library size in ranges, never document text, file names, paths or searches. They are off unless you turn them on.
+
+```bash
+duct telemetry show    # the exact report that would be sent
+duct telemetry on
+duct telemetry off     # no requests at all
+```
+
+`DO_NOT_TRACK=1` or `DUCT_TELEMETRY=0` turn them off whatever the setting, and they never run in CI. `duct serve` and the desktop app send at most one report a day; the command line never sends.
+
 ## `duct keys`
 
 API keys for the [developer API](developer-api.md). A key is shown once; only its hash is stored in the index.

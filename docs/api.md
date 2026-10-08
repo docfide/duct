@@ -294,6 +294,14 @@ curl -X PUT localhost:3456/api/features -H 'Content-Type: application/json' \
 
 A refused request answers `403 {"error": "…", "feature": "ask"}`. `GET /api/info` also carries `features`.
 
+## `GET /api/account`, `POST /api/account/signin`, `POST /api/account/signout`
+
+Sign in with Tensflare. `signin` (admin) opens the sign-in page in the browser of the machine running Duct and returns `202`; poll `GET /api/account` for `{ signedIn, email, plan, entitlements, expiresAt, signingIn, signInError }`.
+
+## `GET /api/telemetry` / `PUT /api/telemetry`
+
+Usage-count status and the exact report that would be sent. `PUT { "enabled": true | false }` (admin).
+
 ## `GET /api/stats`
 
 Get document and chunk counts.

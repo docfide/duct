@@ -18,6 +18,8 @@ import { islandHtml } from './island.js'
 import { EXPORT_TYPES, exportFileName, isExportFormat, renderExport } from './export.js'
 import type { ExportItem } from './export.js'
 import { createApiRouter } from './api/v1.js'
+import type { TensflareAccount } from './account.js'
+import type { Telemetry } from './telemetry.js'
 import { Collections } from './api/collections.js'
 import { FEATURE_LABELS, FEATURE_NAMES, FORMAT_KINDS, FeatureDisabledError } from './features.js'
 import type { FeatureName } from './features.js'
@@ -80,6 +82,10 @@ export interface ServerOptions {
   onSecrets?: (keys: Partial<Record<typeof API_KEY_FIELDS[number], string>>) => void
   /** Developer API collections. Defaults to <index>/collections (in memory for an in-memory index). */
   collections?: Collections
+  /** "Sign in with Tensflare" for this install (optional; everything local works without it). */
+  account?: TensflareAccount
+  /** Anonymous usage counts (src/telemetry.ts). Without it the server counts and sends nothing. */
+  telemetry?: Telemetry
 }
 
 /** 403 for a switched-off feature, otherwise `status` with the error's message. */
@@ -285,6 +291,45 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     })
   })
 
+  // ---------- account and usage counts ----------
+
+  const account = opts?.account
+  const telemetry = opts?.telemetry
+  let signIn: { running: boolean; error?: string } = { running: false }
+
+  app.get('/api/account', (_req, res) => {
+    if (!account) { res.json({ available: false }); return }
+    res.json({ available: true, ...account.status(), signingIn: signIn.running, ...(signIn.error ? { signInError: signIn.error } : {}) })
+  })
+
+  // Opens the Tensflare sign-in page in the browser and returns at once; the page polls GET /api/account.
+  app.post('/api/account/signin', adminOnly, (_req, res) => {
+    if (!account) { res.status(404).json({ error: 'Accounts are not available on this server.' }); return }
+    if (!signIn.running) {
+      signIn = { running: true }
+      account.signIn().then(() => { signIn = { running: false } }, err => { signIn = { running: false, error: (err as Error).message } })
+    }
+    res.status(202).json({ started: true })
+  })
+
+  app.post('/api/account/signout', adminOnly, async (_req, res) => {
+    if (account) await account.signOut()
+    signIn = { running: false }
+    res.json({ ok: true })
+  })
+
+  app.get('/api/telemetry', (_req, res) => {
+    if (!telemetry) { res.json({ available: false }); return }
+    res.json({ available: true, ...telemetry.status(), report: telemetry.report() })
+  })
+
+  app.put('/api/telemetry', adminOnly, (req, res) => {
+    if (!telemetry) { res.status(404).json({ error: 'Usage counts are not available here.' }); return }
+    if (typeof req.body?.enabled !== 'boolean') { res.status(400).json({ error: 'Send { "enabled": true | false }' }); return }
+    telemetry.setEnabled(req.body.enabled)
+    res.json({ available: true, ...telemetry.status() })
+  })
+
   app.get('/api/features', (_req, res) => {
     res.json({ features: duct.getFeatures(), names: FEATURE_NAMES, labels: FEATURE_LABELS, formatKinds: FORMAT_KINDS })
   })
@@ -345,6 +390,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     const filter = parseMetadata(req.query.filter as string)
     try {
       const results = await duct.search(q, topK, filter, scopeFrom(req.query))
+      telemetry?.record('searches')
       res.json({ results })
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })
@@ -356,6 +402,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     if (!question) { res.status(400).json({ error: 'Question is required' }); return }
     try {
       const result = agentic ? await duct.agenticSearch(question) : await duct.ask(question, topK)
+      telemetry?.record('ask')
       res.json(result)
     } catch (err) {
       sendError(res, err)
@@ -409,6 +456,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     res.setHeader('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${name}`)
     // The browser's PDF viewer needs plugin/object access; nothing else on this response may run.
     res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; object-src 'self'; frame-ancestors 'none'")
+    telemetry?.record('opens')
     res.sendFile(doc.path, { dotfiles: 'allow', headers: { 'Cache-Control': 'no-store' } })
   })
 
@@ -418,6 +466,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     if (!doc || doc.source === 'url') { res.status(404).json({ error: 'Document not found' }); return }
     try {
       const result = await duct.index(doc.path, undefined, { ocr: true, force: true })
+      telemetry?.record('ocr')
       res.json({ ...result, document: duct.getDocument(doc.path) })
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })

@@ -11,6 +11,8 @@ let serverUrl = ''
 let library = null
 let formats = null   // src/formats.ts: the supported file types
 let island = null
+let account = null     // src/account.ts: Sign in with Tensflare
+let telemetry = null   // src/telemetry.ts: anonymous usage counts
 
 const SEARCH_SHORTCUT = 'CommandOrControl+Shift+Space'
 
@@ -154,9 +156,38 @@ async function createDuct() {
   return duct
 }
 
+// The account's tokens are encrypted with the OS keychain, like API keys. Without a keychain they last for this session.
+function accountStorage() {
+  const file = path.join(app.getPath('userData'), 'account.bin')
+  let memory = null
+  return {
+    load() {
+      if (!safeStorage.isEncryptionAvailable()) return memory
+      try { return fs.existsSync(file) ? JSON.parse(safeStorage.decryptString(fs.readFileSync(file))) : null } catch { return null }
+    },
+    save(state) {
+      memory = state
+      if (!safeStorage.isEncryptionAvailable()) return
+      if (!state) { fs.rmSync(file, { force: true }); return }
+      fs.writeFileSync(file, safeStorage.encryptString(JSON.stringify(state)), { mode: 0o600 })
+    },
+  }
+}
+
 async function startServer() {
   const { createServer } = await import('../dist/server.js')
-  const expressApp = createServer(duct, { uploadLimitMb: 100, libraryDir: libraryDir(), onSecrets: saveSecrets })
+  const { TensflareAccount } = await import('../dist/account.js')
+  const { Telemetry } = await import('../dist/telemetry.js')
+  account = new TensflareAccount({ storage: accountStorage(), openUrl: url => shell.openExternal(url) })
+  account.refresh().catch(() => {})
+  setInterval(() => { account.refresh().catch(() => {}) }, 60 * 60 * 1000).unref()
+  telemetry = new Telemetry({
+    dir: app.getPath('userData'), channel: 'desktop', duct,
+    plan: () => account.status().plan,
+    prefs: () => ({ island: islandEnabled(), sounds: soundsEnabled() }),
+  })
+  telemetry.start()
+  const expressApp = createServer(duct, { uploadLimitMb: 100, libraryDir: libraryDir(), onSecrets: saveSecrets, account, telemetry })
   return new Promise((resolve) => {
     server = expressApp.listen(0, '127.0.0.1', () => {
       serverUrl = `http://127.0.0.1:${server.address().port}`
@@ -456,6 +487,7 @@ async function openDocument(filePath, page, terms) {
     await viewer.loadURL(`${serverUrl}/viewer?path=${encodeURIComponent(doc.path)}&page=${pageNumber}&terms=${encodeURIComponent(JSON.stringify(safeTerms))}`)
     return true
   }
+  telemetry?.record('opens')
   return (await shell.openPath(doc.path)) === ''
 }
 
@@ -524,6 +556,7 @@ app.on('before-quit', () => {
   if (island) { island.destroy(); island = null }
   if (tray) tray.destroy()
   if (server) server.close()
+  if (telemetry) telemetry.stop()   // saves today's counters
   if (duct) {
     try { duct.close() } catch {}
     duct = null

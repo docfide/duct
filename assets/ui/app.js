@@ -1017,6 +1017,7 @@ async function openSettings(tab = 'general') {
   $('#mascotToggle').checked = mascotEnabled()
   try { state.info.features = (await json('/api/features')).features } catch {}
   renderFeatureList(desktop && desktop.getPrefs ? await desktop.getPrefs().catch(() => null) : null)
+  renderTelemetry()
   $('#libraryDir').textContent = state.info.libraryDir
   $('#keyStorage').textContent = desktop ? 'Keys are stored in your system keychain and never written to disk in plain text.' : 'Keys are kept in memory until the server restarts. They are never written to disk.'
   $('#keys').innerHTML = KEY_FIELDS.map(([field, label]) =>
@@ -1032,7 +1033,53 @@ async function openSettings(tab = 'general') {
   if (!dialog.open) dialog.showModal()
 }
 
+// ---------- account (Sign in with Tensflare) and usage counts ----------
+
+const ENTITLEMENT_LABELS = { 'ai.hosted': 'Search by meaning and AI answers without your own API key', 'sync.devices': 'Sync settings and sources across devices', 'team.workspace': 'Shared team search', 'team.connectors': 'Connectors (Drive, SharePoint, S3…)', 'team.sso': 'Google and Microsoft sign-in for your team', 'enterprise.byoc': 'Deployment in your own cloud', 'enterprise.offline_licence': 'Offline licence', 'enterprise.scim': 'User provisioning' }
+let accountPoll = null
+
+async function renderAccount() {
+  const box = $('#accountBody')
+  let a
+  try { a = await json('/api/account') } catch { a = { available: false } }
+  clearTimeout(accountPoll)
+  if (!a.available) { box.innerHTML = '<p class="hint">Accounts aren’t available on this server.</p>'; return }
+  if (a.signingIn) {
+    box.innerHTML = '<div class="account-card"><strong>Finish signing in in your browser…</strong><p class="hint">A Tensflare page opened in your browser. Come back here when it says you’re signed in.</p></div>'
+    accountPoll = setTimeout(() => { if ($('#settings').open) renderAccount() }, 2000)
+    return
+  }
+  if (!a.signedIn) {
+    box.innerHTML = '<div class="account-card"><strong>You don’t need an account to use Duct</strong>' +
+      '<p class="hint">Everything on this computer works signed out: every file type, OCR, search, the viewer, watched folders and local AI models. Sign in with Tensflare only for paid features such as AI without your own API key, sync and team search.</p>' +
+      (a.signInError ? '<p class="notice">Sign-in didn’t finish: ' + esc(a.signInError) + '</p>' : '') +
+      '<div><button class="btn btn-primary" data-action="account-signin">Sign in with Tensflare</button></div></div>'
+    return
+  }
+  const until = a.expiresAt ? new Date(a.expiresAt).toLocaleDateString() : ''
+  box.innerHTML = '<div class="account-card"><span class="plan">' + esc(a.plan) + '</span><strong>' + esc(a.email || 'Signed in') + '</strong>' +
+    (a.needsReconnect ? '<p class="notice">Connect to the internet to keep paid features working. Everything local still works.</p>' : '') +
+    (a.entitlements.length ? '<ul>' + a.entitlements.map(e => '<li>' + esc(ENTITLEMENT_LABELS[e] || e) + '</li>').join('') + '</ul>' : '<p class="hint">Your plan is Free. Everything local is included.</p>') +
+    (until && !a.needsReconnect ? '<p class="hint">Paid features keep working offline until ' + esc(until) + '.</p>' : '') +
+    '<div><button class="btn" data-action="account-signout">Sign out</button></div></div>'
+}
+
+async function renderTelemetry() {
+  let t
+  try { t = await json('/api/telemetry') } catch { t = { available: false } }
+  $('#telemetryBox').hidden = !t.available
+  if (!t.available) return
+  const toggle = $('#telemetryToggle')
+  toggle.checked = !!t.enabled
+  toggle.disabled = !!t.blockedBy || !isAdmin()
+  $('#telemetryHelp').textContent = t.blockedBy
+    ? 'Off: ' + t.blockedBy + '.'
+    : 'A daily count of versions, features and library size (in ranges) so Tensflare knows what to improve. Never your documents, file names or searches.'
+  $('#telemetryReport').textContent = t.report ? JSON.stringify(t.report, null, 2) : ''
+}
+
 function showTab(tab) {
+  if (tab === 'account') renderAccount()
   $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab))
   $$('.panel').forEach(p => { p.hidden = p.dataset.panel !== tab })
 }
@@ -1051,6 +1098,11 @@ $('#settings').addEventListener('change', async e => {
   if (el.id === 'mascotToggle') {
     try { localStorage.setItem('duct.mascot', el.checked ? 'on' : 'off') } catch {}
     renderMascots()
+    return
+  }
+  if (el.id === 'telemetryToggle') {
+    try { await send('PUT', '/api/telemetry', { enabled: el.checked }); toast(el.checked ? 'Usage counts on' : 'Usage counts off: nothing is sent') } catch (err) { el.checked = !el.checked; toast(err.message, true) }
+    renderTelemetry()
     return
   }
   if (el.dataset.feature || el.dataset.formatKind) {
@@ -1150,6 +1202,14 @@ const ACTIONS = {
   'toggle-sidebar': () => $('#sidebar').classList.toggle('open'),
   'export': () => exportResults('csv'),
   'toggle-export': () => { const menu = $('#exportMenu'); menu.hidden = !menu.hidden; $('[data-action="toggle-export"]').setAttribute('aria-expanded', String(!menu.hidden)) },
+  'account-signin': async () => {
+    try { await send('POST', '/api/account/signin', {}); renderAccount() } catch (err) { toast(err.message, true) }
+  },
+  'account-signout': async () => {
+    if (!confirm('Sign out of Tensflare on this device?\n\nEverything local keeps working.')) return
+    try { await send('POST', '/api/account/signout', {}); toast('Signed out') } catch (err) { toast(err.message, true) }
+    renderAccount()
+  },
   'show-collected': () => { renderCollected(); $('#collectDialog').showModal() },
   'clear-collected': () => {
     if (!confirm('Clear all collected passages?')) return

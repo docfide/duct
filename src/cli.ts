@@ -9,6 +9,10 @@ import { Duct, FEATURE_LABELS, FEATURE_NAMES, FORMAT_KINDS } from './index.js'
 import type { FeaturesPatch } from './index.js'
 import type { DuctConfig } from './types.js'
 import { createServer } from './server.js'
+import { FileAccountStorage, TensflareAccount } from './account.js'
+import { Telemetry } from './telemetry.js'
+import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { VERSION } from './version.js'
 
 /** --embed <provider> picks a provider, --no-embed turns embeddings off, neither auto-detects from API keys. */
@@ -21,6 +25,22 @@ function embedOption(value: string | boolean | undefined): DuctConfig['embed'] {
 /** Where the CLI keeps its index unless --persist is given: $DUCT_HOME, else ~/.duct. */
 function dataDir(persist?: string): string {
   return persist || process.env['DUCT_HOME'] || join(homedir(), '.duct')
+}
+
+/** Opens a URL in the default browser (best effort; the URL is printed too). */
+function openBrowser(url: string): void {
+  const [cmd, args] = process.platform === 'darwin' ? ['open', [url]] : process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]] : ['xdg-open', [url]]
+  try { spawn(cmd, args as string[], { stdio: 'ignore', detached: true }).on('error', () => {}).unref() } catch {}
+}
+
+function accountFor(dir: string, open = true): TensflareAccount {
+  return new TensflareAccount({
+    storage: new FileAccountStorage(join(dir, 'account.json')),
+    openUrl: url => {
+      console.log(`\n  Opening the Tensflare sign-in page. If it doesn't open, visit:\n  ${chalk.cyan(url)}\n`)
+      if (open) openBrowser(url)
+    },
+  })
 }
 
 const program = new Command()
@@ -341,6 +361,75 @@ program
     }
   })
 
+const account = program.command('account').description('Sign in with Tensflare (optional: only paid features need it)')
+
+account
+  .command('signin')
+  .description('Sign in in your browser')
+  .option('--persist <path>', 'Index directory (default: $DUCT_HOME or ~/.duct)')
+  .action(async (options) => {
+    try {
+      const status = await accountFor(dataDir(options.persist)).signIn()
+      console.log(`  ${chalk.green('✓')} Signed in as ${chalk.bold(status.email ?? 'your account')} (${status.plan})`)
+    } catch (err) {
+      console.error(`  ${chalk.red('✗')} ${chalk.red((err as Error).message)}`)
+      process.exitCode = 1
+    }
+  })
+
+account
+  .command('signout')
+  .description('Sign out and forget this device\'s session')
+  .option('--persist <path>', 'Index directory (default: $DUCT_HOME or ~/.duct)')
+  .action(async (options) => {
+    await accountFor(dataDir(options.persist), false).signOut()
+    console.log(`  ${chalk.green('✓')} Signed out. Everything local keeps working.`)
+  })
+
+account
+  .command('status')
+  .description('Show who is signed in and what the plan includes')
+  .option('--persist <path>', 'Index directory (default: $DUCT_HOME or ~/.duct)')
+  .action(async (options) => {
+    const a = accountFor(dataDir(options.persist), false)
+    const s = await a.refresh()
+    if (!s.signedIn) { console.log(chalk.dim('\n  Not signed in. Everything local works without an account. Sign in with: duct account signin\n')); return }
+    console.log(`\n  ${chalk.bold(s.email ?? 'Signed in')}  ${s.plan}${s.needsReconnect ? chalk.yellow('  (reconnect to keep paid features)') : ''}`)
+    if (s.entitlements.length) console.log(`  ${chalk.dim('Includes:')} ${s.entitlements.join(', ')}`)
+    if (s.expiresAt) console.log(`  ${chalk.dim('Works offline until:')} ${new Date(s.expiresAt).toISOString().slice(0, 10)}\n`)
+  })
+
+const telemetryCmd = program.command('telemetry').description('Anonymous usage counts: show exactly what is sent, or turn them on or off')
+
+telemetryCmd
+  .command('show')
+  .description('Print the report that would be sent next')
+  .option('--persist <path>', 'Index directory (default: $DUCT_HOME or ~/.duct)')
+  .action((options) => {
+    const duct = new Duct({ persistPath: dataDir(options.persist), embed: false })
+    const t = new Telemetry({ dir: dataDir(options.persist), channel: 'cli', duct, plan: () => accountFor(dataDir(options.persist), false).status().plan })
+    const s = t.status()
+    console.log(`\n  Usage counts are ${s.enabled ? chalk.green('on') : chalk.dim('off')}${s.blockedBy ? chalk.dim(` (${s.blockedBy})`) : ''}. ${s.enabled ? 'This is sent at most once a day:' : 'Nothing is sent. If they were on, this would be sent at most once a day:'}\n`)
+    console.log(JSON.stringify(t.report(), null, 2))
+    console.log(chalk.dim(`\n  Never sent: document text, file or folder names, paths, searches, questions, URLs, or exact counts.\n`))
+    duct.close()
+  })
+
+for (const [name, on] of [['on', true], ['off', false]] as const) {
+  telemetryCmd
+    .command(name)
+    .description(on ? 'Turn usage counts on' : 'Turn usage counts off (no requests are made at all)')
+    .option('--persist <path>', 'Index directory (default: $DUCT_HOME or ~/.duct)')
+    .action((options) => {
+      const duct = new Duct({ persistPath: dataDir(options.persist), embed: false })
+      const t = new Telemetry({ dir: dataDir(options.persist), channel: 'cli', duct })
+      t.setEnabled(on)
+      const s = t.status()
+      console.log(`  ${chalk.green('✓')} Usage counts ${on ? 'on' : 'off'}${on && s.blockedBy ? chalk.yellow(` (but ${s.blockedBy}, so nothing is sent)`) : ''}`)
+      duct.close()
+    })
+}
+
 const keys = program.command('keys').description('API keys for the developer API (/v1)')
 
 keys
@@ -480,6 +569,10 @@ program
       const allowedHosts = loopback
         ? ['localhost', '127.0.0.1', '::1', ...options.allowedHost]
         : options.allowedHost.length > 0 ? ['localhost', '127.0.0.1', '::1', ...options.allowedHost] : '*' as const
+      const account = accountFor(dataDir(options.persist))
+      const telemetry = new Telemetry({ dir: dataDir(options.persist), channel: existsSync('/.dockerenv') ? 'docker' : 'server', duct, plan: () => account.status().plan })
+      telemetry.start()
+      account.refresh().catch(() => {})
       const server = createServer(duct, {
         authToken: token,
         memberTokens,
@@ -487,6 +580,8 @@ program
         watchRoots: options.watchRoot,
         allowedHosts,
         libraryDir: options.library,
+        account,
+        telemetry,
       })
       server.listen(options.port, options.host, () => {
         const shownHost = loopback ? 'localhost' : options.host
