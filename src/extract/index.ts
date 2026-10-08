@@ -68,7 +68,7 @@ async function extractPdf(path: string): Promise<ExtractedDocument> {
   const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs')
   const buffer = readFileSync(path)
   const data: Uint8Array = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)
-  const pdf = await getDocument({ data }).promise
+  const pdf = await getDocument({ data, verbosity: 0 }).promise
   const textParts: string[] = []
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i)

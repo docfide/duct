@@ -818,8 +818,12 @@ body.member .admin-only { display: none !important; }
 
         <!-- ASK PANEL -->
         <div style="margin-top:32px;">
-          <div class="sec-label">Agentic QA</div>
-          <div class="chat-panel">
+          <!-- Labs: AI answers are optional and need an LLM, so they stay out of the way of search. -->
+          <div class="sec-label">
+            <span>Labs · Ask your documents</span>
+            <span style="color:var(--lime);cursor:pointer;" id="labsToggle" onclick="toggleLabs()">[show]</span>
+          </div>
+          <div class="chat-panel" id="labsPanel" style="display:none;">
             <div class="chat-msgs" id="chatMessages">
               <div class="msg a">
                 Ask questions about your documents. Make sure you configure an LLM provider in the settings.
@@ -942,6 +946,13 @@ body.member .admin-only { display: none !important; }
     if (files && files.length > 0) await handleFilesDrop(files)
   })
   dropZone.addEventListener('click', () => document.getElementById('fileInput').click())
+
+  function toggleLabs() {
+    const panel = document.getElementById('labsPanel')
+    const open = panel.style.display === 'none'
+    panel.style.display = open ? 'flex' : 'none'
+    document.getElementById('labsToggle').textContent = open ? '[hide]' : '[show]'
+  }
 
   function toggleDocs() {
     const dl = document.getElementById('docList')

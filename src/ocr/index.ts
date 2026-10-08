@@ -71,7 +71,7 @@ export async function ocrPdf(pdfPath: string): Promise<string[] | null> {
 
   const buffer = readFileSync(pdfPath)
   const data: Uint8Array = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)
-  const pdf = await pdfjsLib.getDocument({ data }).promise
+  const pdf = await pdfjsLib.getDocument({ data, verbosity: 0 }).promise
   // pdf.js renders in Node through its own canvas factory (backed by @napi-rs/canvas).
   const factory = (pdf as unknown as { canvasFactory: PdfCanvasFactory }).canvasFactory
 

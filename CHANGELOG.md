@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Live indexing progress (`duct.activity()`, `GET /api/activity`) in the dashboard and mascot.
 - **Run OCR** button for files with no text (`POST /api/ocr`), and a watched-folders list with remove buttons (`GET`/`DELETE /api/sources`).
 - A per-viewer switch to hide the mascot.
+- `npm run bench -- <folder> [queries.json]`: indexing speed, search latency and top-3 accuracy on your own documents.
 - Team server: `duct serve --watch <dir>` watches a shared folder from startup, `--rescan <minutes>` catches changes that network drives don't report, and `--member-token` gives colleagues search, open and upload access without admin rights.
 - SQLite index (`duct.db`): loads instantly, saves incrementally, and skips unchanged files (timestamp, size, content hash). Older JSON indexes are migrated automatically.
 - Remembered watched folders: `restoreSources()`, `listSources()`, `removeSource()`. Changes made while Duct was closed are caught up on, and deleted or moved files leave the index.
@@ -30,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `embed: false` / `--no-embed` disable embeddings; `EmbeddingProvider.embedQuery` for query-specific embeddings (Cohere).
 
 ### Changed
+- "Ask your documents" moved into a collapsed **Labs** section; search is the main experience.
+- CI runs the tests on Linux, macOS and Windows.
 - The CLI keeps one index in `$DUCT_HOME` or `~/.duct`, so `duct index` then `duct search` works across runs.
 - Keyword search uses FTS5: stemming ("terminate" finds "termination"), accent-insensitive matching, quoted phrases, and Chinese, Japanese and Korean text. Metadata filters apply before results are limited.
 - OCR is optional and offline: images and scanned PDFs are flagged `needsOcr` unless OCR is on, and the English model is bundled. Single-page scans are now detected.
@@ -38,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Requires Node.js 22.13 or later.
 
 ### Fixed
+- The README now states the actual license (Apache 2.0).
+- pdf.js no longer floods the console with font warnings.
 - Slides in `.pptx` files were ordered as text (slide 10 before slide 2), and words split across text runs were merged.
 - The server stayed unresponsive while indexing many small files.
 - Filenames containing quotes could break out of HTML attributes in the web UI.

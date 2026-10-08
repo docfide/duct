@@ -14,11 +14,13 @@ npm run typecheck             # tsc --noEmit
 npm run build                 # tsc → dist/
 npm run electron:dev          # build, then launch Electron
 npm run icons                 # regenerate app/tray icons from assets/mascot SVGs
+npm run bench -- <folder> [queries.json] [--ocr]   # index speed, search latency, top-3 accuracy (needs a build)
+npx electron-builder --mac dir -c.mac.identity=null # unsigned packaged app in release/ for local testing
 ```
 
 When launching Electron from a VS Code terminal, unset `ELECTRON_RUN_AS_NODE` first (`env -u ELECTRON_RUN_AS_NODE npm run electron:start`). Otherwise Electron runs as plain Node and `require('electron')` fails.
 
-CI (`.github/workflows/ci.yml`) runs only typecheck and build, not tests, so run `npm test` yourself. Publishing to npm and GHCR happens on a GitHub release (`publish.yml`).
+CI (`.github/workflows/ci.yml`) runs typecheck and tests on Linux, macOS and Windows, plus a build. Publishing to npm and GHCR happens on a GitHub release (`publish.yml`). Desktop installers aren't built in CI yet: signing and notarization need Apple and Windows certificates.
 
 ## Layout
 
@@ -80,7 +82,6 @@ docs/             User docs: cli, api, library, search, qa
 - Tests run offline with no API keys. Keep new tests that way: use fixtures in `test/fixtures/`, temp dirs, and fake local servers (see the fake Ollama in `test/index-store.test.ts`). Never let tests touch `~/.duct` or `~/Duct Library`; pass `persistPath`/`libraryDir` explicitly.
 - Note user-visible changes in `CHANGELOG.md` (Keep a Changelog format).
 
-## Known inconsistencies
+## Known gaps
 
-- License: `package.json` and `LICENSE` say Apache-2.0, but the README footer says MIT.
 - The CSP still allows `'unsafe-inline'` scripts because the page uses inline `onclick` handlers; moving them to `addEventListener` would allow a nonce-based CSP.

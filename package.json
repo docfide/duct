@@ -32,7 +32,8 @@
     "electron:start": "electron electron/main.cjs",
     "electron:build": "npm run build && electron-builder --mac --linux --win",
     "electron:build:mac": "npm run build && electron-builder --mac",
-    "icons": "node scripts/build-icons.mjs"
+    "icons": "node scripts/build-icons.mjs",
+    "bench": "node scripts/bench.mjs"
   },
   "build": {
     "appId": "com.docfide.duct",
