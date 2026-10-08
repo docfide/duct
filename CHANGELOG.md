@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Live indexing progress (`duct.activity()`, `GET /api/activity`) in the dashboard and mascot.
 - **Run OCR** button for files with no text (`POST /api/ocr`), and a watched-folders list with remove buttons (`GET`/`DELETE /api/sources`).
 - A per-viewer switch to hide the mascot.
+- Team server: `duct serve --watch <dir>` watches a shared folder from startup, `--rescan <minutes>` catches changes that network drives don't report, and `--member-token` gives colleagues search, open and upload access without admin rights.
 - SQLite index (`duct.db`): loads instantly, saves incrementally, and skips unchanged files (timestamp, size, content hash). Older JSON indexes are migrated automatically.
 - Remembered watched folders: `restoreSources()`, `listSources()`, `removeSource()`. Changes made while Duct was closed are caught up on, and deleted or moved files leave the index.
 - The Library: uploads and "Add Files" are kept in `~/Duct Library` under their real names; identical files are reported as duplicates. Use `addToLibrary` from `@docfide/duct/library` and `--library <dir>`.

@@ -654,6 +654,16 @@ Return ONLY a JSON array of strings, like: ["sub-question 1", "sub-question 2"]`
     return refreshed
   }
 
+  /**
+   * Re-checks every watched folder for changes without relying on file events, which network drives
+   * (SMB/NFS) often don't deliver. Cheap when nothing changed: unchanged files are skipped by timestamp.
+   */
+  async rescanSources(): Promise<void> {
+    for (const source of this.store.listSources()) {
+      if (source.kind === 'watch' && existsSync(source.path)) await this.reconcile(source.path)
+    }
+  }
+
   listSources(): { path: string; kind: string }[] {
     return this.store.listSources()
   }

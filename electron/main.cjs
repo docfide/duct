@@ -331,6 +331,10 @@ app.whenReady().then(async () => {
 
   // Catch up on watched folders (files added, changed or deleted while Duct was closed), then keep watching.
   duct.restoreSources(refreshPage).then(refreshPage).catch(err => console.error('Could not restore watched folders:', err))
+  // Safety net for missed file events (network drives, sleep/wake): recheck watched folders every 30 minutes.
+  setInterval(() => {
+    duct?.rescanSources().then(refreshPage).catch(err => console.error('Rescan failed:', err))
+  }, 30 * 60 * 1000).unref()
 })
 
 app.on('window-all-closed', () => {

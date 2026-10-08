@@ -43,8 +43,13 @@ const CSP = [
 ].join('; ')
 
 export interface ServerOptions {
-  /** Require this token (Bearer header or login cookie) on every /api request. */
+  /** Require this token (Bearer header or login cookie) on every /api request. Its holders are admins. */
   authToken?: string
+  /**
+   * Extra tokens for team members (requires authToken). Members can search, ask, open, upload and run OCR,
+   * but can't change settings, delete documents, clear the index or change watched folders.
+   */
+  memberTokens?: string[]
   uploadLimitMb?: number
   /** Directories POST /api/watch may watch (and their subfolders). Empty or unset disables watching through the API. */
   watchRoots?: string[]
@@ -127,13 +132,29 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     skip: () => !token,
   })
 
+  const memberTokens = opts?.memberTokens ?? []
+  if (memberTokens.length > 0 && !token) throw new Error('memberTokens require an authToken for admins')
+
+  function roleFor(given: string | undefined): 'admin' | 'member' | null {
+    if (!given) return null
+    if (token && sameToken(given, token)) return 'admin'
+    if (memberTokens.some(t => sameToken(given, t))) return 'member'
+    return null
+  }
+
   function auth(req: express.Request, res: express.Response, next: express.NextFunction): void {
-    if (!token) return next()
+    // Without a token the server only serves this machine, and its user is the admin.
+    if (!token) { res.locals.role = 'admin'; return next() }
     const header = req.headers['authorization']
     const bearer = typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : undefined
-    const cookie = readCookie(req.headers.cookie, 'duct_token')
-    if ((bearer && sameToken(bearer, token)) || (cookie && sameToken(cookie, token))) return next()
+    const role = roleFor(bearer) ?? roleFor(readCookie(req.headers.cookie, 'duct_token'))
+    if (role) { res.locals.role = role; return next() }
     res.status(401).json({ error: 'Unauthorized. Provide a valid Bearer token.' })
+  }
+
+  function adminOnly(_req: express.Request, res: express.Response, next: express.NextFunction): void {
+    if (res.locals.role === 'admin') return next()
+    res.status(403).json({ error: 'Only an admin can do this.' })
   }
 
   // Security headers on every response.
@@ -170,13 +191,17 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
   app.post('/api/login', (req, res) => {
     if (!token) { res.json({ ok: true }); return }
     const given = typeof req.body?.token === 'string' ? req.body.token : ''
-    if (!given || !sameToken(given, token)) { res.status(401).json({ error: 'Invalid token.' }); return }
+    if (!roleFor(given)) { res.status(401).json({ error: 'Invalid token.' }); return }
     const secure = req.secure ? '; Secure' : ''
     res.setHeader('Set-Cookie', `duct_token=${encodeURIComponent(given)}; HttpOnly; SameSite=Strict; Path=/${secure}`)
     res.json({ ok: true })
   })
 
   app.use('/api/', auth)
+
+  app.get('/api/me', (_req, res) => {
+    res.json({ role: res.locals.role, auth: !!token })
+  })
 
   app.post('/api/index', (req, res) => {
     const url = req.body?.url
@@ -253,7 +278,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     res.json({ documents: duct.getDocuments() })
   })
 
-  app.delete('/api/documents', async (req, res) => {
+  app.delete('/api/documents', adminOnly, async (req, res) => {
     const path = req.query.path as string
     if (!path) { res.status(400).json({ error: 'Query parameter "path" is required' }); return }
     const doc = duct.getDocument(path)
@@ -312,7 +337,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     res.json({ sources: duct.listSources(), canAdd: watchRoots.length > 0 })
   })
 
-  app.delete('/api/sources', async (req, res) => {
+  app.delete('/api/sources', adminOnly, async (req, res) => {
     const path = req.query.path as string
     if (!path || !duct.listSources().some(s => s.path === path)) { res.status(404).json({ error: 'Not a watched folder' }); return }
     try {
@@ -329,7 +354,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     res.json(sanitized)
   })
 
-  app.put('/api/config', (req, res) => {
+  app.put('/api/config', adminOnly, (req, res) => {
     try {
       duct.configure(req.body)
       const cfg = duct.getConfig()
@@ -344,7 +369,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     res.json(duct.stats())
   })
 
-  app.delete('/api/clear', async (_req, res) => {
+  app.delete('/api/clear', adminOnly, async (_req, res) => {
     try {
       await duct.clear()
       res.json({ ok: true })
@@ -404,7 +429,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     }
   })
 
-  app.post('/api/watch', (req, res) => {
+  app.post('/api/watch', adminOnly, (req, res) => {
     const { directories } = req.body
     if (!directories || !Array.isArray(directories)) {
       res.status(400).json({ error: 'Directories array is required' })
@@ -435,7 +460,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     }
   })
 
-  app.post('/api/unwatch', (_req, res) => {
+  app.post('/api/unwatch', adminOnly, (_req, res) => {
     try {
       duct.unwatch()
       res.json({ ok: true })
@@ -606,6 +631,8 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
 
 .t-ui { font-family: var(--mono); font-size: 12px; color: var(--body); }
 
+body.member .admin-only { display: none !important; }
+
 /* RESULT ACTIONS */
 .r-actions { display: flex; gap: 8px; margin-top: 10px; }
 .r-actions .btn { padding: 3px 10px; font-size: 10px; }
@@ -671,7 +698,7 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
           <button class="btn btn-g" onclick="indexUrl()">Index URL</button>
         </div>
 
-        <div class="inline-form" style="margin-top:8px;">
+        <div class="inline-form admin-only" style="margin-top:8px;">
           <input type="text" id="watchInput" placeholder="/absolute/path/to/dir" />
           <button class="btn btn-g" id="watchBtn" onclick="watchDir()">Watch</button>
         </div>
@@ -693,7 +720,7 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
       <div class="cell">
         <div class="sec-label" id="settings">Search Settings</div>
         
-        <div class="field-group">
+        <div class="field-group admin-only">
           <label>Search Engine</label>
           <select id="cfgSearchMode" onchange="saveSearchConfig()">
             <option value="bm25">BM25 (Keyword)</option>
@@ -706,7 +733,7 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
         </div>
       </div>
 
-      <div class="cell">
+      <div class="cell admin-only">
         <div class="sec-label">Embed Provider</div>
 
         <div class="field-group">
@@ -733,7 +760,7 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
         </div>
       </div>
 
-      <div class="cell">
+      <div class="cell admin-only">
         <div class="sec-label">LLM Settings</div>
         
         <div class="field-group">
@@ -771,7 +798,7 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
             <span>Search Engine</span>
             <div style="display:flex;gap:8px;">
               <button class="btn btn-g" style="padding:2px 8px;font-size:9px;" onclick="exportResults()">EXPORT CSV</button>
-              <button class="btn btn-d" style="padding:2px 8px;font-size:9px;" onclick="clearAll()">CLEAR INDEX</button>
+              <button class="btn btn-d admin-only" style="padding:2px 8px;font-size:9px;" onclick="clearAll()">CLEAR INDEX</button>
             </div>
           </div>
           
@@ -1345,7 +1372,7 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
       }
       document.getElementById('watchList').innerHTML = (data.sources || []).map(src =>
         '<div class="doc-item"><span class="name" title="' + esc(src.path) + '">&#128065; ' + esc(src.path) + '</span>' +
-        '<button class="btn btn-d src-remove" style="padding:1px 7px;font-size:10px;" data-path="' + esc(src.path) + '" title="Stop watching and remove its documents">×</button></div>'
+        '<button class="btn btn-d src-remove admin-only" style="padding:1px 7px;font-size:10px;" data-path="' + esc(src.path) + '" title="Stop watching and remove its documents">×</button></div>'
       ).join('')
     } catch {}
   }
@@ -1390,6 +1417,14 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
   }
   applyMascotVisibility()
 
+  // Team members (non-admin tokens) don't see controls the server would refuse.
+  let role = 'admin'
+  async function loadRole() {
+    try { role = (await (await fetch('/api/me')).json()).role || 'admin' } catch {}
+    document.body.classList.toggle('member', role !== 'admin')
+  }
+
+  loadRole()
   showIdleMascot()
   refreshDocs()
   refreshSources()

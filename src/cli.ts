@@ -357,10 +357,18 @@ program
   .option('--host <host>', 'Interface to listen on. Anything other than localhost requires --auth-token', '127.0.0.1')
   .option('--watch-root <dir>', 'Allow the API to watch this directory and its subfolders (repeatable)', (v: string, prev: string[]) => [...prev, v], [] as string[])
   .option('--library <dir>', 'Folder where uploaded files are kept (default: ~/Duct Library)')
+  .option('--watch <dir>', 'Watch this folder from startup, e.g. a mounted shared drive (repeatable)', (v: string, prev: string[]) => [...prev, v], [] as string[])
+  .option('--rescan <minutes>', 'Also rescan watched folders on a timer, for network drives where file events are unreliable (0 = off)', (v) => parseFloat(v), 15)
+  .option('--member-token <token>', 'Token for team members: search, open and upload, but no settings or deletes (repeatable; env: DUCT_MEMBER_TOKENS, comma-separated)', (v: string, prev: string[]) => [...prev, v], [] as string[])
   .option('--allowed-host <name>', 'Extra hostname accepted in the Host header, e.g. duct.example.com (repeatable)', (v: string, prev: string[]) => [...prev, v], [] as string[])
   .action(async (options) => {
     try {
       const token = options.authToken || process.env['DUCT_AUTH_TOKEN']
+      const memberTokens = [...options.memberToken, ...(process.env['DUCT_MEMBER_TOKENS'] ?? '').split(',').map((t: string) => t.trim()).filter(Boolean)]
+      if (memberTokens.length > 0 && !token) {
+        console.error(`  ${chalk.red('✗')} ${chalk.red('Member tokens need an admin token too: set --auth-token or DUCT_AUTH_TOKEN.')}`)
+        process.exit(1)
+      }
       const loopback = ['127.0.0.1', 'localhost', '::1'].includes(options.host)
       if (!loopback && !token) {
         console.error(`  ${chalk.red('✗')} ${chalk.red(`Refusing to listen on ${options.host} without authentication.`)}`)
@@ -384,6 +392,7 @@ program
         : options.allowedHost.length > 0 ? ['localhost', '127.0.0.1', '::1', ...options.allowedHost] : '*' as const
       const server = createServer(duct, {
         authToken: token,
+        memberTokens,
         uploadLimitMb: options.uploadLimit,
         watchRoots: options.watchRoot,
         allowedHosts,
@@ -394,10 +403,20 @@ program
         console.log(`\n  ${chalk.green('✓')} ${chalk.bold('Duct server running at')} ${chalk.cyan(`http://${shownHost}:${options.port}`)}`)
         if (token) console.log(`    ${chalk.dim('Auth:')} token required`)
         if (options.watchRoot.length > 0) console.log(`    ${chalk.dim('Watch roots:')} ${options.watchRoot.join(', ')}`)
-        // Resume folders watched earlier (via `duct watch` or the API), catching up on changes made meanwhile.
-        duct.restoreSources().then(dirs => {
+        if (memberTokens.length > 0) console.log(`    ${chalk.dim('Members:')} ${memberTokens.length} token(s)`)
+        // Resume folders watched earlier (via `duct watch` or the API), add --watch folders, then keep them in sync.
+        ;(async () => {
+          await duct.restoreSources()
+          if (options.watch.length > 0) await duct.watch(options.watch)
+          const dirs = duct.listSources().map(s => s.path)
           if (dirs.length > 0) console.log(`    ${chalk.dim('Watching:')} ${dirs.join(', ')}`)
-        }).catch(err => console.error(`  ${chalk.red('✗')} Could not resume watched folders: ${(err as Error).message}`))
+          if (options.rescan > 0) {
+            const timer = setInterval(() => {
+              duct.rescanSources().catch(err => console.error(`  ${chalk.red('✗')} Rescan failed: ${(err as Error).message}`))
+            }, options.rescan * 60_000)
+            timer.unref()
+          }
+        })().catch(err => console.error(`  ${chalk.red('✗')} Could not resume watched folders: ${(err as Error).message}`))
         console.log(`    ${chalk.dim('Upload limit:')} ${options.uploadLimit} MB`)
         console.log(`    ${chalk.dim('Embedding:')} ${duct['embedder'] ? chalk.green('enabled') : chalk.dim('disabled (keyword search only)')}`)
         const llmName = duct['llmProvider'] ? duct['llmProvider']!.name : 'none'

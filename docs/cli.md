@@ -183,6 +183,10 @@ duct serve --search-mode hybrid --alpha 0.3 --llm ollama
 | `--host` | Interface to listen on (default: `127.0.0.1`). Any other value requires `--auth-token` |
 | `--watch-root` | Directory the API may watch, including subfolders. Repeatable. Without it, `POST /api/watch` is disabled |
 | `--allowed-host` | Extra hostname accepted in the `Host` header, e.g. `duct.example.com`. Repeatable |
+| `--library` | Folder where uploaded files are kept (default: `~/Duct Library`) |
+| `--watch` | Watch this folder from startup, e.g. a mounted shared drive. Repeatable |
+| `--rescan` | Minutes between full rescans of watched folders, for network drives where file events are unreliable (default: 15, `0` = off) |
+| `--member-token` | Token for team members (repeatable; env `DUCT_MEMBER_TOKENS`, comma-separated). Requires `--auth-token` |
 
 ### Security
 
@@ -193,6 +197,23 @@ duct serve --host 0.0.0.0 --auth-token "$(openssl rand -hex 24)" --watch-root /s
 ```
 
 Browsers are asked for the token once and then get an HttpOnly login cookie. When `serve` is running, URLs that resolve to private, loopback or link-local addresses are never fetched.
+
+### Team server
+
+Index a shared folder once and let colleagues search it from their browsers:
+
+```bash
+duct serve --host 0.0.0.0 \
+  --auth-token "$ADMIN_TOKEN" \
+  --member-token "$TEAM_TOKEN" \
+  --watch /mnt/shared/contracts \
+  --library /srv/duct-library
+```
+
+- **Admins** (`--auth-token`) can do everything.
+- **Members** (`--member-token`) can search, ask, open documents, upload to the library and run OCR. They can't change settings, delete documents, clear the index or change watched folders, and the UI hides those controls.
+- Everyone who can log in can search everything that's indexed. Duct doesn't apply the share's own file permissions, so only watch folders that the whole team may read.
+- Network drives often don't report file changes, so watched folders are also rescanned every `--rescan` minutes.
 
 ### Rate Limiting
 

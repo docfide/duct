@@ -144,7 +144,11 @@ file.txt ──┘        pdfjs-dist sliding  OpenAI    BM25     Ollama
 
 ```bash
 docker build -t duct .
-docker run -d -p 3456:3456 -e DUCT_AUTH_TOKEN="$(openssl rand -hex 24)" duct
+docker run -d -p 3456:3456 \
+  -e DUCT_AUTH_TOKEN="$(openssl rand -hex 24)" \
+  -e DUCT_MEMBER_TOKENS="$(openssl rand -hex 24)" \
+  -v /mnt/shared/docs:/docs:ro -v duct-data:/data \
+  duct serve --host 0.0.0.0 --watch /docs --persist /data/index --library /data/library
 ```
 
 See the [Dockerfile](Dockerfile) for build details. Deploy on Railway, Fly.io, or any VPS.

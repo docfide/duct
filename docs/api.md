@@ -2,6 +2,8 @@
 
 All endpoints are prefixed with `/api`. When auth is configured (`--auth-token` or `DUCT_AUTH_TOKEN`), include `Authorization: Bearer <token>` in all requests. Browsers can instead `POST /api/login` with `{"token": "..."}` to receive an HttpOnly cookie.
 
+With `--member-token`, members can't call admin endpoints (`PUT /api/config`, `DELETE /api/documents`, `DELETE /api/clear`, `POST /api/watch`, `POST /api/unwatch`, `DELETE /api/sources`); those return `403`. `GET /api/me` returns the caller's `role`.
+
 Requests must use a `Host` of `localhost`, `127.0.0.1` or `::1` unless the server was started with `--host`/`--allowed-host`. Cross-origin writes (a non-GET request whose `Origin` differs from `Host`) are rejected with `403`.
 
 Rate limit: 120 requests per minute.
