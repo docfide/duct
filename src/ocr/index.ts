@@ -59,7 +59,8 @@ export async function ocrImage(imagePath: string): Promise<string> {
   return (await recognize(await prepare(imagePath))).trim()
 }
 
-export async function ocrPdf(pdfPath: string): Promise<string | null> {
+/** OCRs each page of a PDF; returns the text per page, or null if rendering isn't available. */
+export async function ocrPdf(pdfPath: string): Promise<string[] | null> {
   let pdfjsLib: typeof import('pdfjs-dist/legacy/build/pdf.mjs')
   try {
     await ensureDOMMatrix()
@@ -74,14 +75,14 @@ export async function ocrPdf(pdfPath: string): Promise<string | null> {
   // pdf.js renders in Node through its own canvas factory (backed by @napi-rs/canvas).
   const factory = (pdf as unknown as { canvasFactory: PdfCanvasFactory }).canvasFactory
 
-  let fullText = ''
+  const pages: string[] = []
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i)
     const viewport = page.getViewport({ scale: 2 })
     const target = factory.create(Math.ceil(viewport.width), Math.ceil(viewport.height))
     try {
       await page.render({ canvasContext: target.context, canvas: target.canvas, viewport } as unknown as Parameters<typeof page.render>[0]).promise
-      fullText += (await recognize(await prepare(target.canvas.toBuffer('image/png')))) + '\n\n'
+      pages.push((await recognize(await prepare(target.canvas.toBuffer('image/png')))).trim())
     } finally {
       factory.destroy(target)
       page.cleanup()
@@ -89,7 +90,7 @@ export async function ocrPdf(pdfPath: string): Promise<string | null> {
   }
   await pdf.destroy()
 
-  return fullText.trim()
+  return pages
 }
 
 interface PdfCanvasFactory {

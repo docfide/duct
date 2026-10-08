@@ -79,6 +79,7 @@ async function extractPdf(path: string): Promise<ExtractedDocument> {
     path,
     format: 'pdf',
     content: textParts.join('\n\n'),
+    pages: textParts,
     metadata: { pages: pdf.numPages, size: buffer.length },
   }
 }
@@ -161,23 +162,34 @@ async function extractExcel(path: string): Promise<ExtractedDocument> {
   }
 }
 
+function decodeXml(s: string): string {
+  return s
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&')
+}
+
 async function extractPptx(path: string): Promise<ExtractedDocument> {
   const { default: JSZip } = await import('jszip')
   const buffer = readFileSync(path)
   const zip = await JSZip.loadAsync(buffer)
+  const slideNumber = (f: string) => Number(f.match(/slide(\d+)\.xml$/)![1])
   const slideFiles = Object.keys(zip.files)
     .filter(f => /^ppt\/slides\/slide\d+\.xml$/.test(f))
-    .sort()
-  const parts: string[] = []
+    .sort((a, b) => slideNumber(a) - slideNumber(b))
+  const slides: string[] = []
   for (const file of slideFiles) {
     const xml = await zip.files[file].async('text')
-    const text = xml.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim()
-    if (text) parts.push(text)
+    // Each <a:p> is a paragraph; text runs inside it are joined directly.
+    const text = decodeXml(xml.replace(/<\/a:p>/g, '\n').replace(/<[^>]*>/g, ''))
+      .split('\n').map(l => l.replace(/\s+/g, ' ').trim()).filter(Boolean).join('\n')
+    slides.push(text)
   }
   return {
     path,
     format: 'pptx',
-    content: parts.join('\n\n'),
+    content: slides.filter(Boolean).join('\n\n'),
+    pages: slides,
     metadata: { slides: slideFiles.length, size: buffer.length },
   }
 }
@@ -211,9 +223,10 @@ export async function extract(path: string, options?: { ocr?: boolean }): Promis
     // Under ~25 characters per page means the PDF is mostly scanned images.
     if (text.length < 25 * pages) {
       if (!options?.ocr) return { ...doc, metadata: { ...doc.metadata, needsOcr: true } }
-      const ocrText = await ocrPdf(path)
-      if (ocrText && ocrText.length > text.length) {
-        return { ...doc, content: ocrText, metadata: { ...doc.metadata, ocr: true } }
+      const ocrPages = await ocrPdf(path)
+      const ocrText = ocrPages?.join('\n\n') ?? ''
+      if (ocrPages && ocrText.length > text.length) {
+        return { ...doc, content: ocrText, pages: ocrPages, metadata: { ...doc.metadata, ocr: true } }
       }
     }
   }

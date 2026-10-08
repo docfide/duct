@@ -271,6 +271,58 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     }
   })
 
+  // Opens an indexed document: PDFs, images and plain text display in the browser, anything else downloads.
+  // Only files that are in the index can be read, never arbitrary paths.
+  // The optional :name only gives the browser's viewer a readable title; the path query decides the file.
+  app.get(['/api/file', '/api/file/:name'], (req, res) => {
+    const doc = typeof req.query.path === 'string' ? duct.getDocument(req.query.path) : undefined
+    if (!doc || doc.source === 'url' || isUrl(doc.path) || !existsSync(doc.path)) {
+      res.status(404).json({ error: 'Document not found' })
+      return
+    }
+    const ext = extname(doc.path).toLowerCase()
+    const name = encodeURIComponent(doc.displayName ?? doc.path.split(/[\\/]/).pop() ?? 'document')
+    const textTypes = new Set(['.txt', '.md', '.markdown', '.csv', '.log', '.json'])
+    const inlineTypes = new Set(['.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'])
+    if (textTypes.has(ext)) res.type('text/plain; charset=utf-8')
+    const inline = inlineTypes.has(ext) || textTypes.has(ext)
+    res.setHeader('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${name}`)
+    // The browser's PDF viewer needs plugin/object access; nothing else on this response may run.
+    res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; object-src 'self'; frame-ancestors 'none'")
+    res.sendFile(doc.path, { dotfiles: 'allow', headers: { 'Cache-Control': 'no-store' } })
+  })
+
+  // Runs OCR on one document now (OCR is otherwise off by default because it is slow).
+  app.post('/api/ocr', async (req, res) => {
+    const doc = typeof req.body?.path === 'string' ? duct.getDocument(req.body.path) : undefined
+    if (!doc || doc.source === 'url') { res.status(404).json({ error: 'Document not found' }); return }
+    try {
+      const result = await duct.index(doc.path, undefined, { ocr: true, force: true })
+      res.json({ ...result, document: duct.getDocument(doc.path) })
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message })
+    }
+  })
+
+  app.get('/api/activity', (_req, res) => {
+    res.json(duct.activity())
+  })
+
+  app.get('/api/sources', (_req, res) => {
+    res.json({ sources: duct.listSources(), canAdd: watchRoots.length > 0 })
+  })
+
+  app.delete('/api/sources', async (req, res) => {
+    const path = req.query.path as string
+    if (!path || !duct.listSources().some(s => s.path === path)) { res.status(404).json({ error: 'Not a watched folder' }); return }
+    try {
+      await duct.removeSource(path)
+      res.json({ ok: true })
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message })
+    }
+  })
+
   app.get('/api/config', (_req, res) => {
     const cfg = duct.getConfig()
     const sanitized = { ...cfg, openaiKey: '', geminiKey: '', cohereKey: '', voyageKey: '', mistralKey: '', jinaKey: '' }
@@ -375,7 +427,8 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
       }
     }
     try {
-      duct.watch(directories)
+      // Indexing the folder's existing files can take a while; progress is reported by /api/activity.
+      duct.watch(directories).catch(err => console.error(`  Watch failed: ${(err as Error).message}`))
       res.json({ ok: true, watching: directories })
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })
@@ -553,6 +606,11 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
 
 .t-ui { font-family: var(--mono); font-size: 12px; color: var(--body); }
 
+/* RESULT ACTIONS */
+.r-actions { display: flex; gap: 8px; margin-top: 10px; }
+.r-actions .btn { padding: 3px 10px; font-size: 10px; }
+.r-page { margin-left: 4px; }
+
 /* MASCOT */
 .mascot { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 24px 16px 32px; text-align: center; }
 .mascot canvas, .mascot img { width: 180px; height: 180px; }
@@ -593,6 +651,7 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
         <div class="cli-body">
           <div><span class="cl">✓</span> <span class="cd">indexed</span>  <span class="cc" id="docCount">0</span> <span class="cd">files,</span> <span class="cc" id="chunkCount">0</span> <span class="cd">chunks</span></div>
           <div><span class="cl">✓</span> <span class="cd">engine</span>   <span class="cl" id="engineMode">bm25</span></div>
+          <div id="activityLine" class="cd" style="display:none;"></div>
         </div>
       </div>
 
@@ -616,6 +675,7 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
           <input type="text" id="watchInput" placeholder="/absolute/path/to/dir" />
           <button class="btn btn-g" id="watchBtn" onclick="watchDir()">Watch</button>
         </div>
+        <div id="watchHint" style="display:none;margin-top:6px;font-family:var(--mono);font-size:10px;color:var(--muted);">Start the server with --watch-root &lt;dir&gt; to watch folders.</div>
         <div id="watchList" style="margin-top:8px;"></div>
       </div>
 
@@ -640,6 +700,9 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
             <option value="vector">Vector (Semantic)</option>
             <option value="hybrid">Hybrid (BM25 + Vector)</option>
           </select>
+        </div>
+        <div class="field-group">
+          <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;"><input type="checkbox" id="cfgMascot" onchange="setMascotEnabled(this.checked)" /> Show mascot</label>
         </div>
       </div>
 
@@ -933,11 +996,6 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
     } catch (err) { toast('Error: ' + err.message, true) }
   }
 
-  function addWatchedDir(dir) {
-    const list = document.getElementById('watchList')
-    list.innerHTML += '<div style="font-family:var(--mono);font-size:10px;color:var(--muted);padding:4px 0;">&#128065; ' + esc(dir) + '</div>'
-  }
-
   // Desktop app: folders are chosen with the native picker and watched by the main process.
   if (window.electronAPI && window.electronAPI.watchDirectory) {
     document.getElementById('watchInput').style.display = 'none'
@@ -948,7 +1006,7 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
     if (window.electronAPI && window.electronAPI.watchDirectory) {
       try {
         const dir = await window.electronAPI.watchDirectory()
-        if (dir) { toast('Now watching ' + dir); addWatchedDir(dir); showIdleMascot(); refreshDocs() }
+        if (dir) { toast('Now watching ' + dir); refreshSources(); showIdleMascot(); refreshDocs() }
       } catch (e) { toast('Error: ' + e.message, true) }
       return
     }
@@ -964,7 +1022,8 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
       if (data.ok) {
         toast('Now watching ' + dir)
         document.getElementById('watchInput').value = ''
-        addWatchedDir(dir)
+        refreshSources()
+        watchActivity()
       } else {
         toast('Error: ' + data.error, true)
       }
@@ -987,15 +1046,22 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
       }
       hideMascot()
       const div = document.getElementById('results')
+      lastResults = data.results
+      lastQuery = q
       div.innerHTML = data.results.map((r, i) => {
-        const heading = r.chunk.heading ? ' <span class="r-section">› ' + esc(r.chunk.heading) + '</span>' : ''
-        const ext = r.chunk.documentPath.split('.').pop()
-        const snippet = r.chunk.content.slice(0, 300)
-        const full = r.chunk.content
-        return '<div class="result" onclick="viewResult(this)">' +
-          '<div class="r-head"><span class="r-score">' + r.score.toFixed(2) + '</span><span class="r-file">' + esc(r.chunk.documentPath.split('/').pop() || r.chunk.documentPath) + '</span>' + heading + '<span class="badge b-mute r-ext">' + esc(ext) + '</span></div>' +
-          '<div class="r-snippet">' + highlight(esc(snippet), q) + (full.length > 300 ? '... <span style="color:var(--lime);font-size:11px;font-family:var(--mono)">[read more]</span>' : '') + '</div>' +
-          '<div class="r-full" style="display:none;">' + highlight(esc(full), q) + '</div>' +
+        const c = r.chunk
+        const isLink = /^https?:/i.test(c.documentPath)
+        const heading = c.heading ? ' <span class="r-section">› ' + esc(c.heading) + '</span>' : ''
+        const page = c.page ? '<span class="badge b-lime r-page">p. ' + c.page + '</span>' : ''
+        const ext = isLink ? 'url' : c.documentPath.split('.').pop()
+        const snippet = r.snippet ? markSnippet(r.snippet) : highlight(c.content.slice(0, 300), q) + (c.content.length > 300 ? '…' : '')
+        const reveal = !isLink && window.electronAPI && window.electronAPI.revealDocument
+        return '<div class="result" data-i="' + i + '">' +
+          '<div class="r-head"><span class="r-score">' + r.score.toFixed(2) + '</span><span class="r-file">' + esc(fileName(c.documentPath)) + '</span>' + page + heading + '<span class="badge b-mute r-ext">' + esc(ext) + '</span></div>' +
+          '<div class="r-snippet">' + snippet + '</div>' +
+          '<div class="r-actions"><button class="btn btn-g r-open" data-i="' + i + '">' + (isLink ? 'Open link' : c.page ? 'Open at p. ' + c.page : 'Open') + '</button>' +
+          (reveal ? '<button class="btn btn-g r-reveal" data-i="' + i + '">Show in folder</button>' : '') + '</div>' +
+          '<div class="r-full" style="display:none;">' + highlight(c.content, q) + '</div>' +
           '</div>'
       }).join('')
     } catch (err) {
@@ -1059,10 +1125,40 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
     }
   })
 
+  let lastResults = []
+  let lastQuery = ''
+
+  function fileName(p) { return p.split('/').pop().split(String.fromCharCode(92)).pop() || p }
+
+  // Snippets come from the server with matches wrapped in \u0002 … \u0003; escape first, then mark.
+  function markSnippet(s) { return esc(s).replace(/\u0002/g, '<mark>').replace(/\u0003/g, '</mark>') }
+
+  document.getElementById('results').addEventListener('click', e => {
+    const open = e.target.closest('.r-open')
+    const reveal = e.target.closest('.r-reveal')
+    if (open) { e.stopPropagation(); openResult(lastResults[Number(open.dataset.i)]); return }
+    if (reveal) { e.stopPropagation(); window.electronAPI.revealDocument(lastResults[Number(reveal.dataset.i)].chunk.documentPath); return }
+    const card = e.target.closest('.result')
+    if (card) viewResult(card)
+  })
+
+  async function openResult(r) {
+    if (!r) return
+    const path = r.chunk.documentPath
+    const page = r.chunk.page
+    if (/^https?:/i.test(path)) { window.open(path, '_blank', 'noopener'); return }
+    if (window.electronAPI && window.electronAPI.openDocument) {
+      if (!(await window.electronAPI.openDocument(path, page))) toast("Couldn't open " + fileName(path), true)
+      return
+    }
+    window.open('/api/file/' + encodeURIComponent(fileName(path)) + '?path=' + encodeURIComponent(path) + (page ? '#page=' + page : ''), '_blank', 'noopener')
+  }
+
   function viewResult(el) {
     document.querySelectorAll('.result').forEach(r => r.style.borderColor = 'var(--border)');
     el.style.borderColor = 'var(--lime)';
-    const file = el.querySelector('.r-file').textContent;
+    const r = lastResults[Number(el.dataset.i)];
+    const file = el.querySelector('.r-file').textContent + (r && r.chunk.page ? ' · p. ' + r.chunk.page : '');
     const ext = el.querySelector('.r-ext') ? el.querySelector('.r-ext').textContent : '';
     const content = el.querySelector('.r-full').innerHTML;
     document.getElementById('viewerEmpty').style.display = 'none';
@@ -1105,7 +1201,8 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
       items.innerHTML = docs.map(d => {
         const name = d.displayName || d.path.split('/').pop() || d.path
         const meta = d.status === 'failed' ? '<span class="badge b-err" title="' + esc(d.error || '') + '">failed</span>'
-          : d.status === 'no-text' ? '<span class="badge b-warn" title="No text found. It may be a scan that needs OCR.">no text</span>'
+          : d.status === 'no-text' ? (d.source === 'url' ? '<span class="badge b-warn">no text</span>'
+            : '<button class="btn btn-g doc-ocr" style="padding:1px 7px;font-size:9px;" data-path="' + esc(d.path) + '" title="No text found. It may be a scan.">Run OCR</button>')
           : d.chunkCount + ' ch'
         return '<div class="doc-item"><span class="name" title="' + esc(d.path) + '">' + esc(name) + '</span><span class="meta">' + meta + '</span></div>'
       }).join('')
@@ -1177,33 +1274,127 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
   }
 
   function toast(msg, isError) { const t = document.getElementById('toast'); t.textContent = msg; t.className = 'toast' + (isError ? ' error' : ''); t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 3000) }
-  function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML }
+  // Escapes text for HTML content and attribute values (filenames can contain quotes).
+  function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;') }
   function el(tag, cls, html) { const d = document.createElement(tag); d.className = cls; d.innerHTML = html; return d }
+  // Highlights query words in raw text and returns escaped HTML (matching before escaping keeps entities intact).
   function highlight(text, query) {
-    const words = query.toLowerCase().split(/\\s+/).filter(w => w.length > 2)
-    if (!words.length) return text
+    const words = query.toLowerCase().replace(/["']/g, ' ').split(/\\s+/).filter(w => w.length > 2)
+    if (!words.length) return esc(text)
     const lower = text.toLowerCase()
-    const highlighted = new Array(text.length).fill(false)
+    const marked = new Array(text.length).fill(false)
     for (const word of words) {
       let idx = 0
       while ((idx = lower.indexOf(word, idx)) !== -1) {
-        for (let i = idx; i < idx + word.length; i++) highlighted[i] = true
+        for (let i = idx; i < idx + word.length; i++) marked[i] = true
         idx++
       }
     }
-    let result = ''; let inTag = false
-    for (let i = 0; i < text.length; i++) {
-      if (highlighted[i] && !inTag) { result += '<mark>'; inTag = true }
-      if (!highlighted[i] && inTag) { result += '</mark>'; inTag = false }
-      result += text[i]
+    let out = ''
+    let start = 0
+    for (let i = 1; i <= text.length; i++) {
+      if (i === text.length || marked[i] !== marked[start]) {
+        const seg = esc(text.slice(start, i))
+        out += marked[start] ? '<mark>' + seg + '</mark>' : seg
+        start = i
+      }
     }
-    if (inTag) result += '</mark>'
-    return result
+    return out
   }
+
+  // ---------- indexing progress ----------
+  let activityTimer = null
+  let wasBusy = false
+  async function pollActivity() {
+    try {
+      const a = await (await fetch('/api/activity')).json()
+      const line = document.getElementById('activityLine')
+      if (a.indexing || a.embedding) {
+        line.style.display = 'block'
+        line.textContent = a.indexing
+          ? '⟳ indexing ' + a.done + '/' + a.total + (a.current ? ' · ' + a.current : '')
+          : '⟳ preparing semantic search…'
+        if (!indexing && document.getElementById('mascot').style.display !== 'none') {
+          showMascot('working', a.indexing ? 'Indexing ' + a.done + ' of ' + a.total + (a.current ? ': ' + a.current : '') : 'Preparing semantic search…')
+        }
+        wasBusy = true
+        activityTimer = setTimeout(pollActivity, 1000)
+        return
+      }
+      line.style.display = 'none'
+      if (wasBusy) {
+        wasBusy = false
+        refreshDocs()
+        if (!indexing && document.getElementById('mascot').style.display !== 'none') showIdleMascot()
+        else refreshStats()
+      }
+    } catch {}
+    activityTimer = null
+  }
+  function watchActivity() { if (!activityTimer) pollActivity() }
+  setInterval(watchActivity, 5000)
+
+  // ---------- watched folders ----------
+  async function refreshSources() {
+    try {
+      const data = await (await fetch('/api/sources')).json()
+      const desktop = window.electronAPI && window.electronAPI.watchDirectory
+      if (!desktop && !data.canAdd) {
+        document.getElementById('watchInput').parentElement.style.display = 'none'
+        document.getElementById('watchHint').style.display = 'block'
+      }
+      document.getElementById('watchList').innerHTML = (data.sources || []).map(src =>
+        '<div class="doc-item"><span class="name" title="' + esc(src.path) + '">&#128065; ' + esc(src.path) + '</span>' +
+        '<button class="btn btn-d src-remove" style="padding:1px 7px;font-size:10px;" data-path="' + esc(src.path) + '" title="Stop watching and remove its documents">×</button></div>'
+      ).join('')
+    } catch {}
+  }
+  document.getElementById('watchList').addEventListener('click', async e => {
+    const btn = e.target.closest('.src-remove')
+    if (!btn) return
+    const path = btn.dataset.path
+    if (!confirm('Stop watching ' + path + ' and remove its documents from the index? Files on disk are not touched.')) return
+    const res = await fetch('/api/sources?path=' + encodeURIComponent(path), { method: 'DELETE' })
+    if (res.ok) { toast('Stopped watching ' + path); refreshSources(); refreshDocs(); showIdleMascot() }
+    else toast('Could not remove ' + path, true)
+  })
+
+  // ---------- OCR on demand ----------
+  document.getElementById('docItems').addEventListener('click', async e => {
+    const btn = e.target.closest('.doc-ocr')
+    if (!btn) return
+    btn.disabled = true; btn.textContent = 'Reading…'
+    watchActivity()
+    try {
+      const res = await fetch('/api/ocr', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: btn.dataset.path }) })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status)
+      toast(data.chunks > 0 ? 'Text found and indexed' : 'OCR found no readable text', data.chunks === 0)
+    } catch (err) { toast('OCR failed: ' + err.message, true) }
+    refreshDocs(); refreshStats()
+  })
+
+  // ---------- mascot on/off (per viewer) ----------
+  function mascotEnabled() { try { return localStorage.getItem('duct.mascot') !== 'off' } catch { return true } }
+  function setMascotEnabled(on) {
+    try { localStorage.setItem('duct.mascot', on ? 'on' : 'off') } catch {}
+    applyMascotVisibility()
+  }
+  function applyMascotVisibility() {
+    const on = mascotEnabled()
+    document.getElementById('cfgMascot').checked = on
+    document.getElementById('mascotCanvas').style.visibility = on ? 'visible' : 'hidden'
+    document.getElementById('mascotCanvas').style.height = on ? '' : '0'
+    document.getElementById('mascotImg').style.height = on ? '' : '0'
+    document.getElementById('mascotImg').style.visibility = on ? 'visible' : 'hidden'
+  }
+  applyMascotVisibility()
 
   showIdleMascot()
   refreshDocs()
+  refreshSources()
   loadConfig()
+  watchActivity()
 </script>
 <script type="module">
   try {

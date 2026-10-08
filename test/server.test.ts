@@ -45,3 +45,19 @@ describe('server mascot assets', () => {
     expect(page).not.toMatch(/jsdelivr|unpkg/)
   })
 })
+
+describe('web UI page', () => {
+  it('has inline scripts that parse', async () => {
+    const vm = await import('node:vm')
+    const server = createServer(new Duct()).listen(0, '127.0.0.1')
+    await new Promise(resolve => server.once('listening', resolve))
+    const page = await (await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/`)).text()
+    server.close()
+    const scripts = [...page.matchAll(/<script( type="module")?>([\s\S]*?)<\/script>/g)]
+    expect(scripts.length).toBe(2)
+    for (const [, isModule, code] of scripts) {
+      // Module code may use top-level await; wrapping it in an async function checks the syntax the same way.
+      expect(() => new vm.Script(isModule ? `(async () => {\n${code}\n})` : code), isModule ? 'module script' : 'page script').not.toThrow()
+    }
+  })
+})

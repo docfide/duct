@@ -61,7 +61,7 @@ const duct = new Duct({
 
 ### `duct.index(paths, metadata?, options?)`
 
-Index files, directories, or URLs. Optionally attach metadata that propagates to every chunk of the document. Files whose timestamp and size, or bytes, haven't changed since they were last indexed are skipped. `options.source` and `options.displayName` are recorded on the document.
+Index files, directories, or URLs. Optionally attach metadata that propagates to every chunk of the document. Files whose timestamp and size, or bytes, haven't changed since they were last indexed are skipped. `options.source` and `options.displayName` are recorded on the document; `options.ocr: true` runs OCR for this call and `options.force: true` re-extracts unchanged files.
 
 ```typescript
 const result = await duct.index('./report.pdf')
@@ -97,8 +97,10 @@ const results = await duct.search('termination clause', 10)
 // Search scoped to metadata (exact match)
 const results = await duct.search('indemnification', 10, { tenant_id: 'acme' })
 const results = await duct.search('review', 10, { brand: 'apple', category: 'phone' })
-// [{ chunk: Chunk, score: number }, ...]
+// [{ chunk: Chunk, score: number, snippet?: string }, ...]
 ```
+
+`chunk.page` is the 1-based PDF page or PPTX slide the match is on. `snippet` is a short excerpt around the match with matched words wrapped in `\u0002` … `\u0003`; escape it, then replace the markers with your own highlighting. Queries support stemming (`terminate` finds `termination`), accent-insensitive matching and `"quoted phrases"`.
 
 | Param | Type | Description |
 |-------|------|-------------|
@@ -168,6 +170,18 @@ await duct.restoreSources()
 ### `duct.listSources()` / `duct.removeSource(path, { removeDocuments? })`
 
 List remembered folders, or stop watching one and forget it (its documents are removed from the index unless `removeDocuments: false`).
+
+---
+
+### `duct.activity()`
+
+What indexing is doing right now: `{ indexing, done, total, current, embedding }`. Useful for progress bars while a large folder is indexed.
+
+---
+
+### `duct.refreshStale()`
+
+Re-extracts documents imported from an older index format (for example, to add page numbers). `restoreSources()` calls it.
 
 ---
 

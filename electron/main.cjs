@@ -1,6 +1,7 @@
 const { app, BrowserWindow, Menu, Tray, dialog, nativeImage, shell, Notification, ipcMain } = require('electron')
 const path = require('path')
 const fs = require('fs')
+const { pathToFileURL } = require('url')
 
 let mainWindow = null
 let tray = null
@@ -87,6 +88,15 @@ function createWindow() {
     icon: path.join(__dirname, 'icon.png'),
     show: false,
     backgroundColor: '#0C0C0B',
+  })
+
+  // Links opened from the page (e.g. indexed web pages) go to the system browser, never a bare Electron window.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/i.test(url) && !url.startsWith(serverUrl)) shell.openExternal(url)
+    return { action: 'deny' }
+  })
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (!url.startsWith(serverUrl)) event.preventDefault()
   })
 
   mainWindow.loadURL(serverUrl)
@@ -267,6 +277,40 @@ ipcMain.handle('duct:watchDirectory', async () => {
   const dir = result.filePaths[0]
   await duct.watch([dir], refreshPage)
   return dir
+})
+
+// Only documents in the index can be opened or revealed; the page can't name arbitrary paths.
+function indexedFile(filePath) {
+  const doc = typeof filePath === 'string' ? duct.getDocument(filePath) : undefined
+  if (!doc || doc.source === 'url' || !fs.existsSync(doc.path)) return null
+  return doc
+}
+
+ipcMain.handle('duct:openDocument', async (_event, filePath, page) => {
+  const doc = indexedFile(filePath)
+  if (!doc) return false
+  if (path.extname(doc.path).toLowerCase() === '.pdf') {
+    // Chromium's built-in PDF viewer jumps to #page=N.
+    const viewer = new BrowserWindow({
+      width: 1000,
+      height: 1100,
+      title: doc.displayName || path.basename(doc.path),
+      backgroundColor: '#0C0C0B',
+      webPreferences: { plugins: true, contextIsolation: true, nodeIntegration: false, sandbox: true },
+    })
+    const pageNumber = Number.isInteger(page) && page > 0 ? page : 1
+    await viewer.loadURL(`${pathToFileURL(doc.path).href}#page=${pageNumber}`)
+    return true
+  }
+  const error = await shell.openPath(doc.path)
+  return error === ''
+})
+
+ipcMain.handle('duct:revealDocument', (_event, filePath) => {
+  const doc = indexedFile(filePath)
+  if (!doc) return false
+  shell.showItemInFolder(doc.path)
+  return true
 })
 
 ipcMain.handle('notification:show', (_event, title, body) => {

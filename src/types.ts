@@ -3,6 +3,8 @@ export interface ExtractedDocument {
   format: DocumentFormat
   content: string
   metadata: Record<string, unknown>
+  /** Text per page (PDF) or slide (PPTX), in order; `content` is these joined. */
+  pages?: string[]
 }
 
 export type DocumentFormat = 'pdf' | 'docx' | 'md' | 'html' | 'txt' | 'image' | 'url' | 'xlsx' | 'pptx'
@@ -30,6 +32,8 @@ export interface Chunk {
   content: string
   index: number
   heading?: string
+  /** 1-based page (PDF) or slide (PPTX) the chunk comes from. */
+  page?: number
   metadata: Record<string, unknown>
 }
 
@@ -46,11 +50,27 @@ export interface IndexOptions {
   source?: string
   /** Name shown to users; defaults to the file name. */
   displayName?: string
+  /** Run OCR for this call regardless of the `ocr` setting. */
+  ocr?: boolean
+  /** Re-extract even if the file looks unchanged. */
+  force?: boolean
+}
+
+export interface IndexActivity {
+  indexing: boolean
+  /** Files finished and queued across all running index() calls. */
+  done: number
+  total: number
+  /** Display name of the file being indexed. */
+  current: string
+  embedding: boolean
 }
 
 export interface SearchResult {
   chunk: Chunk
   score: number
+  /** Short excerpt around the match; matched words are wrapped in \u0002 … \u0003. */
+  snippet?: string
 }
 
 export interface DuctConfig {

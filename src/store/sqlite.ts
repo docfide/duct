@@ -5,7 +5,8 @@ import type { Chunk, DocumentFormat, DocumentInfo, SearchResult } from '../types
 
 const require = createRequire(import.meta.url)
 
-const SCHEMA_VERSION = '1'
+const SCHEMA_VERSION = '2'
+const SNIPPET_TOKENS = 32
 const VERSIONS_KEPT = 2
 
 function openDatabase(path: string): DatabaseSync {
@@ -64,6 +65,8 @@ interface ChunkRow {
   uid: string
   idx: number
   heading: string
+  page: number | null
+  snippet?: string
   content: string
   path: string
   format: string
@@ -109,6 +112,17 @@ function filterClause(filter: Record<string, unknown> | undefined): { sql: strin
   return { sql, params }
 }
 
+/** An excerpt around the first match, with every match wrapped in \u0002 … \u0003 (same markers as FTS5's snippet()). */
+export function substringSnippet(content: string, needles: string[], radius = 80): string {
+  const first = Math.min(...needles.map(n => content.indexOf(n)).filter(i => i >= 0))
+  if (!Number.isFinite(first)) return content.slice(0, radius * 2)
+  const start = Math.max(0, first - radius)
+  const end = Math.min(content.length, first + radius)
+  let excerpt = content.slice(start, end)
+  for (const n of needles) excerpt = excerpt.split(n).join(`\u0002${n}\u0003`)
+  return (start > 0 ? '…' : '') + excerpt + (end < content.length ? '…' : '')
+}
+
 function likePattern(s: string): string {
   return '%' + s.replace(/[\\%_]/g, c => '\\' + c) + '%'
 }
@@ -150,6 +164,7 @@ export class SqliteStore {
         document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
         idx INTEGER NOT NULL,
         heading TEXT NOT NULL DEFAULT '',
+        page INTEGER,
         content TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS chunks_document ON chunks(document_id);
@@ -180,7 +195,12 @@ export class SqliteStore {
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS sources (path TEXT PRIMARY KEY, kind TEXT NOT NULL, added_at INTEGER NOT NULL);
     `)
-    this.db.prepare('INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)').run('schema_version', SCHEMA_VERSION)
+    // v1 -> v2: chunks gained a page number. Re-extract PDFs and slide decks so their chunks get one.
+    const columns = this.db.prepare('PRAGMA table_info(chunks)').all() as unknown as { name: string }[]
+    if (!columns.some(c => c.name === 'page')) {
+      this.db.exec("ALTER TABLE chunks ADD COLUMN page INTEGER; UPDATE documents SET mtime_ms = NULL, content_hash = '' WHERE format IN ('pdf', 'pptx');")
+    }
+    this.db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run('schema_version', SCHEMA_VERSION)
   }
 
   close(): void {
@@ -233,6 +253,11 @@ export class SqliteStore {
     return row ? this.toDocument(row) : undefined
   }
 
+  /** Documents that need re-extracting: migrated from an older index format and not failed. */
+  staleDocuments(): StoredDocument[] {
+    return (this.db.prepare("SELECT * FROM documents WHERE (content_hash IS NULL OR content_hash = '') AND status != 'failed'").all() as unknown as DocumentRow[]).map(r => this.toDocument(r))
+  }
+
   listDocuments(): StoredDocument[] {
     return (this.db.prepare('SELECT * FROM documents ORDER BY indexed_at DESC').all() as unknown as DocumentRow[]).map(r => this.toDocument(r))
   }
@@ -259,8 +284,8 @@ export class SqliteStore {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(doc.path, doc.displayName, doc.source, doc.format, doc.size, doc.mtimeMs, doc.contentHash, chunks.length, Date.now(),
         doc.status, doc.error ?? null, JSON.stringify(doc.metadata), JSON.stringify(doc.chunkMetadata))
-      const insert = this.db.prepare('INSERT INTO chunks (uid, document_id, idx, heading, content) VALUES (?, ?, ?, ?, ?)')
-      return chunks.map(c => Number(insert.run(c.id, lastInsertRowid, c.index, c.heading ?? '', c.content).lastInsertRowid))
+      const insert = this.db.prepare('INSERT INTO chunks (uid, document_id, idx, heading, page, content) VALUES (?, ?, ?, ?, ?, ?)')
+      return chunks.map(c => Number(insert.run(c.id, lastInsertRowid, c.index, c.heading ?? '', c.page ?? null, c.content).lastInsertRowid))
     })
     this.changed()
     return ids
@@ -310,6 +335,7 @@ export class SqliteStore {
       content: row.content,
       index: row.idx,
       heading: row.heading || undefined,
+      ...(row.page != null ? { page: row.page } : {}),
       metadata: JSON.parse(row.chunk_metadata),
     }
   }
@@ -322,7 +348,8 @@ export class SqliteStore {
     const fts = toFtsQuery(query)
     if (fts) {
       const rows = this.db.prepare(`
-        SELECT c.uid, c.idx, c.heading, c.content, d.path, d.format, d.chunk_metadata, -bm25(chunks_fts, 1.0, 2.0) AS score
+        SELECT c.uid, c.idx, c.heading, c.page, c.content, d.path, d.format, d.chunk_metadata, -bm25(chunks_fts, 1.0, 2.0) AS score,
+          snippet(chunks_fts, 0, char(2), char(3), '…', ${SNIPPET_TOKENS}) AS snippet
         FROM chunks_fts
         JOIN chunks c ON c.id = chunks_fts.rowid
         JOIN documents d ON d.id = c.document_id
@@ -330,14 +357,14 @@ export class SqliteStore {
         ORDER BY bm25(chunks_fts, 1.0, 2.0)
         LIMIT ?
       `).all(fts, ...where.params, limit) as unknown as ChunkRow[]
-      for (const r of rows) merged.set(r.uid, { chunk: this.toChunk(r), score: r.score ?? 0 })
+      for (const r of rows) merged.set(r.uid, { chunk: this.toChunk(r), score: r.score ?? 0, snippet: r.snippet })
     }
 
     // CJK text has no spaces between words, so match it as substrings instead of tokens.
     const segments = cjkSegments(query)
     if (segments.length > 0) {
       const rows = this.db.prepare(`
-        SELECT c.uid, c.idx, c.heading, c.content, d.path, d.format, d.chunk_metadata
+        SELECT c.uid, c.idx, c.heading, c.page, c.content, d.path, d.format, d.chunk_metadata
         FROM chunks c JOIN documents d ON d.id = c.document_id
         WHERE ${segments.map(() => "c.content LIKE ? ESCAPE '\\'").join(' AND ')}${where.sql}
         LIMIT ?
@@ -347,7 +374,7 @@ export class SqliteStore {
         const score = hits / Math.sqrt(Math.max(1, r.content.length / 500))
         const existing = merged.get(r.uid)
         if (existing) existing.score += score
-        else merged.set(r.uid, { chunk: this.toChunk(r), score })
+        else merged.set(r.uid, { chunk: this.toChunk(r), score, snippet: substringSnippet(r.content, segments) })
       }
     }
 
@@ -383,7 +410,7 @@ export class SqliteStore {
     const cached = this.vectorCache.get(model)
     if (cached) return cached
     const rows = this.db.prepare(`
-      SELECT c.uid, c.idx, c.heading, c.content, d.path, d.format, d.chunk_metadata, v.embedding
+      SELECT c.uid, c.idx, c.heading, c.page, c.content, d.path, d.format, d.chunk_metadata, v.embedding
       FROM vectors v JOIN chunks c ON c.id = v.chunk_id JOIN documents d ON d.id = c.document_id
       WHERE v.model = ?
     `).all(model) as unknown as (ChunkRow & { embedding: Uint8Array })[]

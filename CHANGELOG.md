@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Browsers log in to a token-protected server once (`POST /api/login`, HttpOnly cookie).
 
 ### Added
+- Page numbers: PDF and PPTX chunks record their page or slide. Results show "p. 47", with **Open at p. 47** (browser viewer or the desktop PDF window) and **Show in folder** in the desktop app.
+- Highlighted snippets around each match.
+- Live indexing progress (`duct.activity()`, `GET /api/activity`) in the dashboard and mascot.
+- **Run OCR** button for files with no text (`POST /api/ocr`), and a watched-folders list with remove buttons (`GET`/`DELETE /api/sources`).
+- A per-viewer switch to hide the mascot.
 - SQLite index (`duct.db`): loads instantly, saves incrementally, and skips unchanged files (timestamp, size, content hash). Older JSON indexes are migrated automatically.
 - Remembered watched folders: `restoreSources()`, `listSources()`, `removeSource()`. Changes made while Duct was closed are caught up on, and deleted or moved files leave the index.
 - The Library: uploads and "Add Files" are kept in `~/Duct Library` under their real names; identical files are reported as duplicates. Use `addToLibrary` from `@docfide/duct/library` and `--library <dir>`.
@@ -32,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Requires Node.js 22.13 or later.
 
 ### Fixed
+- Slides in `.pptx` files were ordered as text (slide 10 before slide 2), and words split across text runs were merged.
+- The server stayed unresponsive while indexing many small files.
+- Filenames containing quotes could break out of HTML attributes in the web UI.
 - The desktop app no longer deletes its index on quit, and only one copy can run at a time.
 - The web UI documents list, search and LLM settings saving, the separate API key field, uploads of more than 120 files, the "Export CSV" label, and the version shown.
 - Selecting "None" as LLM provider disables it. `HybridSearcher` uses the embedder it is given instead of OpenAI/Gemini from the environment.

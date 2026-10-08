@@ -15,7 +15,7 @@ import { createLLMProvider, OpenAILLM, GeminiLLM } from './qa/provider.js'
 import { createEmbedder } from './embed/factory.js'
 import type { EmbedProvider } from './embed/factory.js'
 import type {
-  DuctConfig, Chunk, EmbeddingProvider, IndexResult, IndexOptions, SearchResult,
+  DuctConfig, Chunk, EmbeddingProvider, IndexResult, IndexOptions, IndexActivity, SearchResult,
   DocumentInfo, DocumentFormat, RuntimeConfig, Reranker, LLMProvider,
   QAResult, SchemaField, ExtractionResult, DocDiff, ExtractedDocument,
 } from './types.js'
@@ -75,6 +75,7 @@ export class Duct {
   private pendingChanges = new Map<string, NodeJS.Timeout>()
   private locks = new Map<string, Promise<void>>()
   private embedding: Promise<void> | null = null
+  private progress = { active: 0, done: 0, total: 0, current: '' }
   private embedProvider: string = ''
   private embedModel: string = ''
   private embedBaseUrl: string = ''
@@ -261,24 +262,40 @@ export class Duct {
     let totalChunks = 0
     let failed = 0
 
-    for (const filePath of resolved) {
-      const outcome = await this.withLock(filePath, () => this.indexOne(filePath, metadata, options))
-      if (outcome.status === 'indexed' || outcome.status === 'no-text') {
-        totalDocs++
-        totalChunks += outcome.chunks
-      } else if (outcome.status === 'failed') {
-        failed++
+    this.progress.active++
+    this.progress.total += resolved.length
+    try {
+      for (const filePath of resolved) {
+        this.progress.current = isUrl(filePath) ? filePath : basename(filePath)
+        const outcome = await this.withLock(filePath, () => this.indexOne(filePath, metadata, options))
+        this.progress.done++
+        // Let the server answer other requests (searches, progress polls) between files.
+        await new Promise(resolve => setImmediate(resolve))
+        if (outcome.status === 'indexed' || outcome.status === 'no-text') {
+          totalDocs++
+          totalChunks += outcome.chunks
+        } else if (outcome.status === 'failed') {
+          failed++
+        }
       }
+    } finally {
+      if (--this.progress.active === 0) this.progress = { active: 0, done: 0, total: 0, current: '' }
     }
 
     if (this.embedder && totalChunks > 0) await this.embedPending()
     return { documents: totalDocs, chunks: totalChunks, time: Date.now() - start, ...(failed > 0 ? { failed } : {}) }
   }
 
+  /** What indexing is doing right now, for progress displays. */
+  activity(): IndexActivity {
+    const { active, done, total, current } = this.progress
+    return { indexing: active > 0, done, total, current, embedding: this.embedding !== null }
+  }
+
   private async indexOne(path: string, metadata: Record<string, unknown> | undefined, options: IndexOptions | undefined): Promise<IndexOutcome> {
     const url = isUrl(path)
     const existing = this.store.getDocument(path)
-    const usable = existing && existing.status !== 'failed'
+    const usable = existing && existing.status !== 'failed' && !options?.force
     const metaChanged = metadata !== undefined && JSON.stringify(metadata) !== JSON.stringify(existing?.metadata ?? {})
     const docMeta = metadata ?? existing?.metadata ?? {}
     let mtimeMs: number | null = null
@@ -298,15 +315,14 @@ export class Duct {
         }
       }
 
-      const doc = await this.extractPath(path)
+      const doc = await this.extractPath(path, options?.ocr)
       if (url) {
         hash = hashBytes(doc.content)
         size = doc.content.length
         if (usable && !metaChanged && existing.contentHash === hash) return { status: 'skipped', chunks: 0 }
       }
 
-      // Tables are already part of the text; indexing a second Markdown copy would double-count their words.
-      const chunks = chunk(doc.content, path, doc.format, this.chunkStrategy, this.chunkSize, this.chunkOverlap)
+      const chunks = this.chunkDocument(doc, path)
       const chunkMetadata = { ...docMeta, ...doc.metadata }
       for (const c of chunks) c.metadata = chunkMetadata
       const status = chunks.length > 0 ? 'indexed' : 'no-text'
@@ -348,6 +364,21 @@ export class Duct {
     }
   }
 
+  /**
+   * Splits a document into chunks. Paged documents (PDF, PPTX) are chunked page by page so every chunk
+   * stays on one page and records it. Tables are already part of the text and aren't indexed twice.
+   */
+  private chunkDocument(doc: ExtractedDocument, path: string): Chunk[] {
+    if (!doc.pages) return chunk(doc.content, path, doc.format, this.chunkStrategy, this.chunkSize, this.chunkOverlap)
+    const all: Chunk[] = []
+    doc.pages.forEach((text, i) => {
+      for (const c of chunk(text, path, doc.format, this.chunkStrategy, this.chunkSize, this.chunkOverlap)) {
+        all.push({ ...c, page: i + 1, index: all.length })
+      }
+    })
+    return all
+  }
+
   /** Embeds every chunk that has no vector for the current model. Safe to call repeatedly. */
   async embedPending(): Promise<void> {
     if (!this.embedder) return
@@ -372,11 +403,11 @@ export class Duct {
     return this.embedding
   }
 
-  private async extractPath(filePath: string): Promise<ExtractedDocument> {
+  private async extractPath(filePath: string, ocr?: boolean): Promise<ExtractedDocument> {
     if (isUrl(filePath)) {
       return await extractUrl(filePath, { blockPrivate: this.blockPrivateUrls })
     }
-    return await extract(filePath, { ocr: this.ocr })
+    return await extract(filePath, { ocr: ocr ?? this.ocr })
   }
 
   private findDocument(path: string) {
@@ -609,7 +640,18 @@ Return ONLY a JSON array of strings, like: ["sub-question 1", "sub-question 2"]`
       await this.reconcile(source.path)
       restored.push(source.path)
     }
+    await this.refreshStale()
     return restored
+  }
+
+  /** Re-extracts documents imported from an older index format (e.g. to add page numbers). */
+  async refreshStale(): Promise<number> {
+    let refreshed = 0
+    for (const doc of this.store.staleDocuments()) {
+      if (doc.source === 'url' || !existsSync(doc.path)) continue
+      refreshed += (await this.index(doc.path)).documents
+    }
+    return refreshed
   }
 
   listSources(): { path: string; kind: string }[] {

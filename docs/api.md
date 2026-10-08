@@ -45,6 +45,9 @@ Metadata is propagated to every chunk of the indexed document and can be used as
 
 ## `GET /api/search`
 
+Each result has `chunk.page` (PDF page or PPTX slide, when known) and `snippet`, an excerpt with matches wrapped in `\u0002` … `\u0003`.
+
+
 Search indexed documents.
 
 ```
@@ -170,6 +173,37 @@ DELETE /api/documents?path=/tmp/.duct-uploads/1234.pdf
 ```
 
 Use `storePath` from `GET /api/documents` as the path value.
+
+---
+
+## `GET /api/file/:name?path=…`
+
+Opens an indexed document. PDFs, images and plain-text files are served inline, so `…#page=12` opens a PDF at that page in the browser's viewer; other types download. `:name` is optional and only sets the viewer's title. Paths that aren't in the index return `404`.
+
+---
+
+## `POST /api/ocr`
+
+Runs OCR on one indexed document now, for files indexed with status `no-text` (scans and images).
+
+```json
+POST /api/ocr
+{ "path": "/Users/me/Duct Library/receipt.png" }
+```
+
+Returns the index result plus the updated `document`.
+
+---
+
+## `GET /api/activity`
+
+Indexing progress: `{ "indexing": true, "done": 12, "total": 480, "current": "report.pdf", "embedding": false }`.
+
+---
+
+## `GET /api/sources` / `DELETE /api/sources?path=…`
+
+Lists watched folders (`{ sources: [{ path, kind }], canAdd }`) or stops watching one and removes its documents from the index. Files on disk are not touched.
 
 ---
 
