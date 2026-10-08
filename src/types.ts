@@ -28,6 +28,10 @@ export interface DocumentInfo {
   /** 'no-text' means extraction found no text (often a scan that needs OCR). */
   status?: 'indexed' | 'no-text' | 'failed'
   error?: string
+  /** The file's modification time (ms), when it came from a file. */
+  modifiedAt?: number
+  /** Labels people added, e.g. "client: Acme" or "won". */
+  tags?: string[]
 }
 
 export interface Chunk {
@@ -87,6 +91,11 @@ export interface SearchScope {
   under?: string
   /** Also match file names (default true). */
   fileNames?: boolean
+  /** Only documents carrying every one of these tags. */
+  tags?: string[]
+  /** Only documents last modified at or after / before these times (ms since epoch). */
+  modifiedAfter?: number
+  modifiedBefore?: number
 }
 
 export interface SearchResult {

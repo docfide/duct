@@ -102,17 +102,44 @@ interface VectorEntry { chunk: Chunk; vector: Float32Array; norm: number; meta: 
 
 const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+/gu
 
-/** Turns a user query into an FTS5 expression: "quoted phrases" stay phrases, other words are OR'ed. */
+/**
+ * Turns a user query into an FTS5 expression: "quoted phrases" stay phrases, other words are OR'ed, and
+ * numbers match however they were written (see numberVariants).
+ */
 export function toFtsQuery(input: string): string | null {
   const parts: string[] = []
   const words = (s: string) => (s.normalize('NFKC').replace(CJK, ' ').match(/[\p{L}\p{N}]+/gu) || [])
-  for (const m of input.matchAll(/"([^"]+)"|(\S+)/g)) {
+  // "1 200" typed with a space is one amount, not the words 1 and 200: join the groups first.
+  const joined = input.replace(/(^|\s)(\d{1,3}(?: \d{3})+(?:[.,]\d{1,2})?)(?=\s|$)/g, (_, pre: string, num: string) => pre + num.replace(/ /g, '_'))
+  for (const m of joined.matchAll(/"([^"]+)"|(\S+)/g)) {
+    const numbers = m[2] !== undefined ? numberVariants(m[2]) : null
+    if (numbers) { parts.push(`(${numbers.map(v => `"${v}"`).join(' OR ')})`); continue }
     const tokens = words(m[1] ?? m[2])
     if (tokens.length === 0) continue
     if (m[1] !== undefined && tokens.length > 1) parts.push(`"${tokens.join(' ')}"`)
     else for (const t of tokens) parts.push(`"${t}"`)
   }
   return parts.length > 0 ? parts.join(' OR ') : null
+}
+
+/**
+ * The ways an amount can appear in a document, as FTS phrases. The tokenizer splits "1,200.00" into
+ * 1 / 200 / 00, so "1200", "1,200", "1.200", "1 200" and "1,200.00" are all made to find each other.
+ * Returns null for anything that isn't a number of 4+ digits or one with separators.
+ */
+export function numberVariants(raw: string): string[] | null {
+  const token = raw.replace(/^[^\d]+|[^\d]+$/g, '') // currency signs, trailing punctuation
+  const m = /^(\d{1,3}(?:[,.\u00a0\u202f'_ ]\d{3})+|\d{4,})(?:[.,](\d{1,2}))?$/.exec(token)
+  if (!m) return null
+  const whole = m[1].replace(/\D/g, '')
+  const cents = m[2]
+  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ' ')
+  const out = new Set<string>()
+  for (const w of [whole, grouped]) {
+    if (cents) out.add(`${w} ${cents}`)
+    if (!cents || /^0+$/.test(cents)) out.add(w)
+  }
+  return [...out]
 }
 
 function cjkSegments(input: string): string[] {
@@ -130,6 +157,19 @@ function filterClause(filter: Record<string, unknown> | undefined, scope?: Searc
     const prefix = scope.under.endsWith(sep) ? scope.under : scope.under + sep
     sql += " AND (d.path = ? OR d.path LIKE ? ESCAPE '\\')"
     params.push(scope.under, likePattern(prefix).slice(1))
+  }
+  for (const tag of scope?.tags ?? []) {
+    sql += ' AND d.path IN (SELECT path FROM tags WHERE tag = ?)'
+    params.push(tag)
+  }
+  // A document's date is its file's modification time, or when it was indexed for web pages and API text.
+  if (scope?.modifiedAfter !== undefined) {
+    sql += ' AND coalesce(d.mtime_ms, d.indexed_at) >= ?'
+    params.push(scope.modifiedAfter)
+  }
+  if (scope?.modifiedBefore !== undefined) {
+    sql += ' AND coalesce(d.mtime_ms, d.indexed_at) < ?'
+    params.push(scope.modifiedBefore)
   }
   if (!filter) return { sql, params }
   for (const [key, value] of Object.entries(filter)) {
@@ -227,6 +267,8 @@ export class SqliteStore {
       CREATE INDEX IF NOT EXISTS versions_path ON versions(path, version);
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS sources (path TEXT PRIMARY KEY, kind TEXT NOT NULL, added_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS tags (path TEXT NOT NULL, tag TEXT NOT NULL, PRIMARY KEY (path, tag));
+      CREATE INDEX IF NOT EXISTS tags_tag ON tags(tag);
       CREATE TABLE IF NOT EXISTS api_keys (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -342,13 +384,14 @@ export class SqliteStore {
   removeDocument(path: string): boolean {
     const { changes } = this.db.prepare('DELETE FROM documents WHERE path = ?').run(path)
     this.db.prepare('DELETE FROM versions WHERE path = ?').run(path)
+    this.db.prepare('DELETE FROM tags WHERE path = ?').run(path)
     this.changed()
     return Number(changes) > 0
   }
 
   clear(): void {
     this.transaction(() => {
-      this.db.exec('DELETE FROM documents; DELETE FROM versions;')
+      this.db.exec('DELETE FROM documents; DELETE FROM versions; DELETE FROM tags;')
     })
     this.changed()
   }
@@ -405,6 +448,35 @@ export class SqliteStore {
       out[field] = Object.fromEntries(rows.map(r => [String(r.v), r.n]))
     }
     return out
+  }
+
+  // ---------- tags ----------
+
+  /** Replaces a document's tags. Tags are kept by path, so they survive re-indexing. */
+  setTags(path: string, tags: string[]): void {
+    this.transaction(() => {
+      this.db.prepare('DELETE FROM tags WHERE path = ?').run(path)
+      const insert = this.db.prepare('INSERT OR IGNORE INTO tags (path, tag) VALUES (?, ?)')
+      for (const t of tags) insert.run(path, t)
+    })
+  }
+
+  tagsFor(path: string): string[] {
+    return (this.db.prepare('SELECT tag FROM tags WHERE path = ? ORDER BY tag').all(path) as { tag: string }[]).map(r => r.tag)
+  }
+
+  /** Every tag on an indexed document, with how many documents carry it. */
+  allTags(): { tag: string; count: number }[] {
+    return this.db.prepare('SELECT t.tag, count(*) AS count FROM tags t JOIN documents d ON d.path = t.path GROUP BY t.tag ORDER BY t.tag').all() as { tag: string; count: number }[]
+  }
+
+  /** Tags of every document, for lists. */
+  tagMap(): Map<string, string[]> {
+    const map = new Map<string, string[]>()
+    for (const r of this.db.prepare('SELECT path, tag FROM tags ORDER BY tag').all() as { path: string; tag: string }[]) {
+      map.set(r.path, [...(map.get(r.path) ?? []), r.tag])
+    }
+    return map
   }
 
   // ---------- API keys ----------

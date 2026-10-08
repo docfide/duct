@@ -62,6 +62,12 @@ GET /api/search?q=indemnification&filter={"tenant_id":"acme"}
 | `q` | string | Search query (required) |
 | `topK` | number | Number of results (default: 10) |
 | `filter` | string | URL-encoded JSON object — only return chunks whose metadata matches all key/value pairs exactly |
+| `formats` | string | Comma-separated formats, e.g. `pdf,docx` |
+| `under` | string | Only documents in this folder |
+| `tag` | string | Only documents with this tag; repeat for several (all must match) |
+| `after`, `before` | number | Only documents modified at or after / before this time (ms since 1970) |
+
+Numbers match however they were written: `1200`, `1,200`, `1 200` and `1,200.00` find each other.
 
 **Example with filter:**
 ```
@@ -317,17 +323,31 @@ DELETE /api/clear
 
 ## `GET /api/export`
 
-Export search results in JSON or CSV format.
+Exports search results with their sources: document, page or slide, section, passage, path and tags.
 
 ```
-GET /api/export?q=termination&format=csv
-GET /api/export?q=indemnification&format=json
+GET /api/export?q=termination&format=docx
+GET /api/export?q=invoice+4471&format=csv&tag=fy2025
 ```
 
 | Param | Description |
 |-------|-------------|
 | `q` | Search query (required) |
-| `format` | `json` (default) or `csv` |
+| `format` | `csv` (default; UTF-8 for Excel, and cells that look like formulas are made safe), `docx` (Word), `md` or `json` |
+| `topK` | Up to 500 results (default 100) |
+| others | The same scope parameters as `/api/search` |
+
+## `POST /api/export`
+
+Exports passages picked by hand (the app's **Collect**), in the order given. Only documents in the index can be named.
+
+```json
+{ "format": "docx", "title": "Termination clauses", "items": [{ "path": "/docs/msa.pdf", "page": 4, "text": "Either party may…" }] }
+```
+
+## `GET /api/tags` / `PUT /api/documents/tags`
+
+`GET` lists every tag with its document count. `PUT { "path", "tags": [...] }` replaces a document's tags (members may tag). Tags are kept when a document is re-indexed. Documents in `/api/documents` carry `tags` and `modifiedAt`.
 
 ---
 

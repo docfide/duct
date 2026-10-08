@@ -104,6 +104,7 @@ Files are limited by `--upload-limit` (50 MB by default). A file that can't be r
 | `filter` | | Exact matches on metadata, all of which must match: `{ "client": "acme", "year": 2026 }`. In a GET, a JSON string |
 | `facets` | | Metadata fields to count values of among matching documents (top 20 each, at most 10 fields) |
 | `formats` | | Only these formats, e.g. `["pdf", "docx"]` |
+| `sort` | | `field:asc` or `field:desc` to order matches by a metadata field instead of relevance; documents without the field come last |
 | `group` | `document` | `document`: one hit per document, its best passage. `passage`: every matching passage |
 
 Each hit has `id`, `title`, `score`, `format`, `page` and `page_label` (`p. 4`, `slide 2`, `sheet 1`) where the format has pages, `heading` for email attachments and archive entries, `snippet` (plain text), `highlight` (HTML-escaped, matches in `<mark>`), and `metadata`.

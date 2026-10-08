@@ -74,6 +74,18 @@ function pageText(items: PdfTextItem[]): string {
 
 /** Text of every page of a PDF held in memory. */
 export async function readPdf(buffer: Buffer): Promise<string[]> {
+  return (await readPdfDocument(buffer)).pages
+}
+
+/** Bibliographic details a document declares about itself, for citations and filters. */
+export interface DocumentDetails {
+  title?: string
+  author?: string
+  year?: number
+}
+
+/** Page texts plus the PDF's own title, author and year (from its Info dictionary). */
+export async function readPdfDocument(buffer: Buffer): Promise<{ pages: string[]; details: DocumentDetails }> {
   await ensureDOMMatrix()
   const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs')
   // pdf.js takes ownership of the bytes it is given, so pass a copy.
@@ -86,8 +98,25 @@ export async function readPdf(buffer: Buffer): Promise<string[]> {
       pages.push(pageText((await page.getTextContent()).items as PdfTextItem[]))
       page.cleanup()
     }
-    return pages
+    let details: DocumentDetails = {}
+    try {
+      const info = ((await pdf.getMetadata()).info ?? {}) as Record<string, unknown>
+      const date = typeof info['CreationDate'] === 'string' ? /^D:(\d{4})/.exec(info['CreationDate']) : null
+      details = cleanDetails({ title: info['Title'], author: info['Author'], year: date ? Number(date[1]) : undefined })
+    } catch {}
+    return { pages, details }
   } finally {
     await pdf.destroy()
   }
+}
+
+/** Drops placeholder values that tools write by default ("Microsoft Word - draft.docx", "Untitled", "user"). */
+export function cleanDetails(raw: { title?: unknown; author?: unknown; year?: unknown }): DocumentDetails {
+  const text = (v: unknown) => typeof v === 'string' ? v.replace(/\s+/g, ' ').trim() : ''
+  const title = text(raw.title)
+  const author = text(raw.author)
+  const year = typeof raw.year === 'number' && raw.year >= 1900 && raw.year <= new Date().getFullYear() + 1 ? raw.year : undefined
+  const junkTitle = !title || title.length > 300 || /^(untitled|document\d*|microsoft (word|powerpoint|excel) - .*|.*\.(docx?|pdf|pptx?|xlsx?|tmp))$/i.test(title)
+  const junkAuthor = !author || author.length > 200 || /^(user|admin|administrator|owner|unknown|author|microsoft office user)$/i.test(author)
+  return { ...(junkTitle ? {} : { title }), ...(junkAuthor ? {} : { author }), ...(year ? { year } : {}) }
 }

@@ -110,7 +110,8 @@ class DuctClient:
     # ---------- search ----------
 
     def search(self, collection: str, q: str, limit: int = 10, offset: int = 0, filter: Optional[Dict[str, Any]] = None,
-               facets: Optional[List[str]] = None, formats: Optional[List[str]] = None, group: str = "document") -> Dict[str, Any]:
+               facets: Optional[List[str]] = None, formats: Optional[List[str]] = None, group: str = "document",
+               sort: Optional[str] = None) -> Dict[str, Any]:
         body = {"q": q, "limit": limit, "offset": offset, "group": group}
         if filter:
             body["filter"] = filter
@@ -118,4 +119,6 @@ class DuctClient:
             body["facets"] = facets
         if formats:
             body["formats"] = formats
+        if sort:
+            body["sort"] = sort
         return self._request("POST", self._c(collection) + "/search", body)

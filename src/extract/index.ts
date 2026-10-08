@@ -5,7 +5,7 @@ import { formatForPath } from '../formats.js'
 import { ocrPdf } from '../ocr/index.js'
 import { extractImage } from './image.js'
 import { extractUrl } from './web.js'
-import { UnsupportedFileError, decodeText, decodeXml, isZip, readPdf, type ExtractOptions } from './common.js'
+import { UnsupportedFileError, cleanDetails, decodeText, decodeXml, isZip, readPdfDocument, type ExtractOptions } from './common.js'
 import { extractDoc, extractOdp, extractOdt, extractRtf, isOle } from './office.js'
 import { extractEpub, extractIwork, extractZip } from './packages.js'
 import { extractEml, extractMsg } from './email.js'
@@ -20,8 +20,22 @@ export function detectFormat(path: string): DocumentFormat {
 
 async function extractPdf(path: string): Promise<ExtractedDocument> {
   const buffer = readFileSync(path)
-  const pages = await readPdf(buffer)
-  return { path, format: 'pdf', content: pages.join('\n\n'), pages, metadata: { pages: pages.length, size: buffer.length } }
+  const { pages, details } = await readPdfDocument(buffer)
+  return { path, format: 'pdf', content: pages.join('\n\n'), pages, metadata: { pages: pages.length, size: buffer.length, ...details } }
+}
+
+/** Title, author and year from an Office file's docProps/core.xml. */
+async function officeDetails(buffer: Buffer) {
+  try {
+    const JSZip = (await import('jszip')).default
+    const xml = await (await JSZip.loadAsync(buffer)).file('docProps/core.xml')?.async('string')
+    if (!xml) return {}
+    const tag = (name: string) => { const m = new RegExp(`<${name}[^>]*>([^<]*)</${name}>`).exec(xml); return m ? decodeXml(m[1]) : undefined }
+    const created = tag('dcterms:created')
+    return cleanDetails({ title: tag('dc:title'), author: tag('dc:creator'), year: created ? Number(created.slice(0, 4)) : undefined })
+  } catch {
+    return {}
+  }
 }
 
 async function extractDocx(path: string): Promise<ExtractedDocument> {
@@ -31,7 +45,7 @@ async function extractDocx(path: string): Promise<ExtractedDocument> {
   if (!isZip(buffer)) throw new UnsupportedFileError('Not a Word document')
   const mammoth = await import('mammoth')
   const result = await mammoth.extractRawText({ buffer })
-  return { path, format: 'docx', content: result.value, metadata: { size: buffer.length, warnings: result.messages } }
+  return { path, format: 'docx', content: result.value, metadata: { size: buffer.length, warnings: result.messages, ...(await officeDetails(buffer)) } }
 }
 
 async function extractMarkdown(path: string): Promise<ExtractedDocument> {

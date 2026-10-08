@@ -8,13 +8,15 @@ import { createRequire } from 'node:module'
 import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Duct } from './index.js'
-import type { DocumentFormat } from './types.js'
+import type { DocumentFormat, SearchResult, SearchScope } from './types.js'
 import { isUrl } from './extract/web.js'
 import { addToLibrary, defaultLibraryDir } from './library.js'
 import { VERSION } from './version.js'
 import { viewerHtml } from './viewer.js'
-import { ACCEPT_ATTRIBUTE, FORMATS, SUPPORTED_SUMMARY, isSupportedFile } from './formats.js'
+import { ACCEPT_ATTRIBUTE, FORMATS, SUPPORTED_SUMMARY, isSupportedFile, pageLabel } from './formats.js'
 import { islandHtml } from './island.js'
+import { EXPORT_TYPES, exportFileName, isExportFormat, renderExport } from './export.js'
+import type { ExportItem } from './export.js'
 import { createApiRouter } from './api/v1.js'
 import { Collections } from './api/collections.js'
 import { FEATURE_LABELS, FEATURE_NAMES, FORMAT_KINDS, FeatureDisabledError } from './features.js'
@@ -87,6 +89,21 @@ function sendError(res: express.Response, err: unknown, status = 500): void {
     return
   }
   res.status(status).json({ error: (err as Error).message })
+}
+
+/** Search scope from query parameters: ?formats=pdf,docx &under=/folder &tag=a&tag=b &after=<ms> &before=<ms>. */
+function scopeFrom(query: express.Request['query']): SearchScope | undefined {
+  const scope: SearchScope = {}
+  if (typeof query.formats === 'string' && query.formats) scope.formats = query.formats.split(',') as DocumentFormat[]
+  if (typeof query.under === 'string' && query.under) scope.under = query.under
+  const tags = ([] as unknown[]).concat(query.tag ?? []).filter((t): t is string => typeof t === 'string' && t.length > 0)
+  if (tags.length) scope.tags = tags.slice(0, 10)
+  const time = (v: unknown) => typeof v === 'string' && /^\d{1,15}$/.test(v) ? Number(v) : undefined
+  const after = time(query.after)
+  const before = time(query.before)
+  if (after !== undefined) scope.modifiedAfter = after
+  if (before !== undefined) scope.modifiedBefore = before
+  return Object.keys(scope).length ? scope : undefined
 }
 
 function hostnameOf(hostHeader: string | undefined): string {
@@ -326,11 +343,8 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     if (!q) { res.status(400).json({ error: 'Query parameter "q" is required' }); return }
     const topK = Math.min(100, parseInt(req.query.topK as string) || 10)
     const filter = parseMetadata(req.query.filter as string)
-    // Optional scope: ?formats=pdf,docx and/or ?under=/path/to/folder
-    const formats = typeof req.query.formats === 'string' && req.query.formats ? req.query.formats.split(',') as DocumentFormat[] : undefined
-    const under = typeof req.query.under === 'string' && req.query.under ? req.query.under : undefined
     try {
-      const results = await duct.search(q, topK, filter, formats || under ? { formats, under } : undefined)
+      const results = await duct.search(q, topK, filter, scopeFrom(req.query))
       res.json({ results })
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })
@@ -464,27 +478,78 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     }
   })
 
+  // ---------- tags ----------
+
+  app.get('/api/tags', (_req, res) => {
+    res.json({ tags: duct.listTags() })
+  })
+
+  // Members may tag too: tags organise shared work (by tender, client, matter or outcome).
+  app.put('/api/documents/tags', (req, res) => {
+    const { path, tags } = req.body ?? {}
+    if (typeof path !== 'string' || !Array.isArray(tags) || !tags.every(t => typeof t === 'string')) {
+      res.status(400).json({ error: 'Send { "path": "…", "tags": ["…"] }' })
+      return
+    }
+    try {
+      res.json({ path, tags: duct.setTags(path, tags) })
+    } catch (err) {
+      sendError(res, err, 404)
+    }
+  })
+
+  // ---------- export ----------
+
+  const nameOf = (path: string) => duct.getDocument(path)?.displayName ?? path.split(/[\\/]/).pop() ?? path
+  const exportItem = (r: SearchResult): ExportItem => ({
+    name: nameOf(r.chunk.documentPath),
+    path: r.chunk.documentPath,
+    ...(r.chunk.page ? { location: `${pageLabel(r.chunk.documentFormat)} ${r.chunk.page}` } : {}),
+    ...(r.chunk.heading ? { heading: r.chunk.heading } : {}),
+    text: r.chunk.content.slice(0, 4000),
+    score: r.score,
+    tags: duct.getDocument(r.chunk.documentPath)?.tags ?? [],
+  })
+  const sendExport = async (res: express.Response, items: ExportItem[], format: string, title: string) => {
+    if (!isExportFormat(format)) { res.status(400).json({ error: 'format must be csv, md, json or docx' }); return }
+    const body = await renderExport(items, format, title)
+    res.setHeader('Content-Type', EXPORT_TYPES[format].mime)
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(exportFileName(title, format))}`)
+    res.send(body)
+  }
+
+  // Every result for a search (same scope parameters as /api/search), with sources.
   app.get('/api/export', needs('export'), async (req, res) => {
     const q = req.query.q as string
-    const format = req.query.format as string || 'json'
     if (!q) { res.status(400).json({ error: 'Query parameter "q" is required' }); return }
     try {
-      const results = await duct.search(q, 100)
-      const mapped = results.map(r => ({
-        score: r.score,
-        document: r.chunk.documentPath,
-        heading: r.chunk.heading || null,
-        content: r.chunk.content.slice(0, 2000),
-      }))
-      if (format === 'csv') {
-        const header = 'score,document,heading,content\n'
-        const rows = mapped.map(r =>
-          `"${r.score}","${(r.document || '').replace(/"/g, '""')}","${(r.heading || '').replace(/"/g, '""')}","${r.content.replace(/"/g, '""').replace(/\n/g, '\\n')}"`
-        ).join('\n')
-        res.type('text/csv').send(header + rows)
-      } else {
-        res.json({ results: mapped })
-      }
+      const topK = Math.min(500, parseInt(req.query.topK as string) || 100)
+      const results = await duct.search(q, topK, parseMetadata(req.query.filter as string), scopeFrom(req.query))
+      await sendExport(res, results.map(exportItem), (req.query.format as string) || 'csv', `Search: ${q}`)
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message })
+    }
+  })
+
+  // Passages picked by hand ("Collect"), in the order given. Only indexed documents can be named.
+  app.post('/api/export', needs('export'), async (req, res) => {
+    const { items, format, title } = req.body ?? {}
+    if (!Array.isArray(items) || items.length === 0 || items.length > 500) { res.status(400).json({ error: 'Send 1 to 500 items' }); return }
+    const out: ExportItem[] = []
+    for (const it of items) {
+      const doc = typeof it?.path === 'string' ? duct.getDocument(it.path) : undefined
+      if (!doc || typeof it.text !== 'string') { res.status(400).json({ error: 'Each item needs the path of an indexed document and its text' }); return }
+      out.push({
+        name: doc.displayName ?? nameOf(doc.path),
+        path: doc.path,
+        ...(Number.isInteger(it.page) && it.page > 0 ? { location: `${pageLabel(doc.format)} ${it.page}` } : {}),
+        ...(typeof it.heading === 'string' && it.heading ? { heading: it.heading.slice(0, 300) } : {}),
+        text: it.text.slice(0, 20000),
+        tags: doc.tags ?? [],
+      })
+    }
+    try {
+      await sendExport(res, out, typeof format === 'string' ? format : 'docx', typeof title === 'string' && title.trim() ? title.trim().slice(0, 200) : 'Collected passages')
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })
     }

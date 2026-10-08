@@ -266,3 +266,27 @@ dialog::backdrop { background: rgba(0,0,0,.55); }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
+
+/* ---------- tags, collect and export ---------- */
+.results-tools { display: flex; gap: 6px; align-items: center; margin-left: auto; }
+.results-tools .count { font-family: var(--mono); font-size: 11px; color: var(--lime); margin-left: 4px; }
+.menu-sm { width: 250px; }
+.tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.tag { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; line-height: 1.6; padding: 0 7px; border-radius: 99px; background: var(--s3); color: var(--body); border: 1px solid var(--border2); white-space: nowrap; }
+.tag button { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 0; font-size: 11px; }
+.tag button:hover { color: var(--text); }
+.tag-editor { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0 0 16px; }
+.tag-editor input { background: var(--bg); color: var(--text); border: 1px solid var(--border2); border-radius: 99px; padding: 2px 10px; font: inherit; font-size: 12px; width: 150px; outline: none; }
+.tag-editor input:focus { border-color: var(--lime); }
+.doc-row .name-cell { min-width: 0; }
+.doc-row .name-cell .tags { margin-top: 2px; }
+.cite-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 12px 0 0; }
+.collect-dialog { width: min(720px, calc(100vw - 32px)); max-height: min(80vh, 760px); }
+.collect-body { padding: 0 22px 20px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; max-height: calc(min(80vh, 760px) - 64px); }
+.collect-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.collect-list li { border: 1px solid var(--border); border-radius: var(--rl); padding: 10px 12px; background: var(--bg); display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; }
+.collect-list .text { grid-column: 1; font-size: 13px; color: var(--body); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 7.5em; overflow: hidden; }
+.collect-list .src { grid-column: 1; font-size: 12px; color: var(--subtle); }
+.collect-list .remove { grid-column: 2; grid-row: 1 / span 2; align-self: start; }
+.dialog-actions .spacer { flex: 1; }
+.collect-body .dialog-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }

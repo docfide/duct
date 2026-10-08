@@ -23,6 +23,19 @@ const state = {
   source: null,       // { label, under }
   docFilter: 'all',
   wasBusy: false,
+  tags: [],           // tag filters (all must match)
+  allTags: [],        // [{ tag, count }]
+  date: null,         // DATE_RANGES id
+  collected: loadCollected(),
+}
+
+// ---------- collected passages (kept on this device) ----------
+
+function loadCollected() {
+  try { const v = JSON.parse(localStorage.getItem('duct.collected') || '[]'); return Array.isArray(v) ? v : [] } catch { return [] }
+}
+function saveCollected() {
+  try { localStorage.setItem('duct.collected', JSON.stringify(state.collected)) } catch {}
 }
 
 // ---------- server access (asks for the access token on a protected server) ----------
@@ -184,7 +197,8 @@ function applyFeatures() {
   const modeAsk = $('.mode[data-mode="ask"]')
   modeAsk.hidden = !feature('ask')
   if (!feature('ask') && state.mode === 'ask') setMode('search')
-  $$('[data-action="export"]').forEach(el => { el.hidden = !feature('export') })
+  $$('[data-action="export"], [data-action="toggle-export"]').forEach(el => { el.hidden = !feature('export') })
+  renderCollectedButton()
   $$('[data-action="add-url"]').forEach(el => { el.hidden = !feature('webPages') })
   $$('[data-action="add-files"]').forEach(el => { el.hidden = !feature('uploads') })
   $('#welcome .hint').hidden = !feature('uploads')
@@ -200,6 +214,115 @@ function renderFeatureList(prefs) {
   if (prefs) html += '<h3>This computer</h3>' + DESKTOP_PREFS.map(([name, label, help]) => check('data-pref="' + name + '"', prefs[name] !== false, label, help, false)).join('')
   $('#featureList').innerHTML = html
   $('#featuresHint').textContent = admin ? 'Turn off anything you don’t use. Switched-off features disappear from Duct and its API.' : 'Only an admin can change these.'
+}
+
+const DAY = 86400000
+const DATE_RANGES = [
+  { id: 'week', label: 'Past week', after: () => Date.now() - 7 * DAY },
+  { id: 'month', label: 'Past month', after: () => Date.now() - 31 * DAY },
+  { id: 'year', label: 'Past year', after: () => Date.now() - 366 * DAY },
+  { id: 'older', label: 'Older than a year', before: () => Date.now() - 366 * DAY },
+]
+const docDate = d => d.modifiedAt || d.indexedAt
+
+/** Adds the sidebar's tag and date filters to search or export parameters. */
+function addScopeParams(params) {
+  if (state.group) params.set('formats', groupFormats(state.group).join(','))
+  if (state.source) params.set('under', state.source.under)
+  for (const t of state.tags) params.append('tag', t)
+  const range = DATE_RANGES.find(r => r.id === state.date)
+  if (range && range.after) params.set('after', String(Math.round(range.after())))
+  if (range && range.before) params.set('before', String(Math.round(range.before())))
+  return params
+}
+
+/** "Contract.pdf, p. 12 › Termination" */
+function sourceLine(c) {
+  const doc = state.docs.find(d => d.path === c.documentPath)
+  return (doc && doc.displayName ? doc.displayName : fileName(c.documentPath)) + (c.page ? ', ' + pageRef(c) : '') + (c.heading ? ' › ' + c.heading : '')
+}
+
+/** A reference for a result, from the document's own title, author and year where it has them. */
+function citation(c, style) {
+  const m = c.metadata || {}
+  const doc = state.docs.find(d => d.path === c.documentPath)
+  const title = m.title || (doc && doc.displayName ? doc.displayName : fileName(c.documentPath)).replace(/\.[^.]+$/, '')
+  const author = m.author || ''
+  const year = m.year || ''
+  const page = c.page ? pageRef(c) : ''
+  if (style === 'bibtex') {
+    const key = ((author.split(/[ ,]+/).filter(Boolean).pop() || title.split(/\s+/)[0] || 'doc') + (year || '')).toLowerCase().replace(/[^a-z0-9]/g, '')
+    const field = (k, v) => v ? '  ' + k + ' = {' + String(v).replace(/[{}]/g, '') + '},\n' : ''
+    return '@misc{' + key + ',\n' + field('title', title) + field('author', author) + field('year', year) + field('note', page) + '}'
+  }
+  return (author ? author + ' ' : '') + '(' + (year || 'n.d.') + '). ' + title + '.' + (page ? ' ' + page + '.' : '')
+}
+
+async function copyText(text, done) {
+  try { await navigator.clipboard.writeText(text); toast(done) } catch { toast("Couldn't copy", true) }
+}
+
+function collect(r) {
+  const c = r.chunk
+  if (state.collected.some(x => x.path === c.documentPath && x.text === c.content)) { toast('Already collected'); return }
+  state.collected.push({ path: c.documentPath, page: c.page || null, heading: c.heading || null, text: c.content, source: sourceLine(c) })
+  saveCollected()
+  renderCollectedButton()
+  toast('Collected (' + state.collected.length + ')')
+}
+
+function renderCollectedButton() {
+  const btn = $('#collectedBtn')
+  btn.hidden = !state.collected.length || !feature('export')
+  $$('[data-bind="collectedCount"]').forEach(el => { el.textContent = String(state.collected.length) })
+}
+
+function renderCollected() {
+  $('#collectList').innerHTML = state.collected.map((x, i) =>
+    '<li><div class="text">' + esc(x.text) + '</div><div class="src">' + esc(x.source) + '</div>' +
+    '<button class="icon-btn remove" data-remove-collected="' + i + '" aria-label="Remove">✕</button></li>').join('') || '<li class="hint">Nothing collected yet. Use “Collect” on a search result.</li>'
+}
+
+async function downloadExport(res, fallbackName) {
+  if (!res.ok) { const data = await res.json().catch(() => ({})); throw new Error(data.error || 'HTTP ' + res.status) }
+  const blob = await res.blob()
+  const disposition = res.headers.get('content-disposition') || ''
+  const m = /filename\*=UTF-8''([^;]+)/.exec(disposition)
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = m ? decodeURIComponent(m[1]) : fallbackName
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000)
+}
+
+async function exportCollected(format) {
+  if (!state.collected.length) return
+  const title = $('#collectName').value.trim() || 'Collected passages'
+  try {
+    const res = await api('/api/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ format, title, items: state.collected }) })
+    await downloadExport(res, 'duct-collected.' + format)
+  } catch (err) { toast('Export failed: ' + err.message, true) }
+}
+
+function renderTagEditor(path) {
+  const doc = state.docs.find(d => d.path === path)
+  const tags = (doc && doc.tags) || []
+  return '<div class="tag-editor" data-tag-path="' + esc(path) + '">' +
+    tags.map(t => '<span class="tag">' + esc(t) + '<button data-remove-tag="' + esc(t) + '" aria-label="Remove tag ' + esc(t) + '">✕</button></span>').join('') +
+    '<input type="text" data-add-tag placeholder="+ Add tag" aria-label="Add a tag" maxlength="60"></div>'
+}
+
+async function saveTags(path, tags) {
+  try {
+    const data = await send('PUT', '/api/documents/tags', { path, tags })
+    const doc = state.docs.find(d => d.path === path)
+    if (doc) doc.tags = data.tags
+    state.allTags = (await json('/api/tags')).tags || []
+    renderSidebar()
+    return data.tags
+  } catch (err) { toast('Tags not saved: ' + err.message, true); return null }
 }
 
 function pageRef(chunk) {
@@ -267,12 +390,15 @@ async function renderMascots() {
 // ---------- data ----------
 
 async function loadData() {
-  const [docs, sources, activity] = await Promise.all([
+  const [docs, sources, activity, tags] = await Promise.all([
     json('/api/documents'),
     json('/api/sources'),
     json('/api/activity'),
+    json('/api/tags').catch(() => ({ tags: [] })),
   ])
   state.docs = docs.documents || []
+  state.allTags = tags.tags || []
+  state.tags = state.tags.filter(t => state.allTags.some(x => x.tag === t))
   state.sources = sources.sources || []
   state.canWatch = !!sources.canAdd || !!(desktop && desktop.watchDirectory)
   state.activity = activity
@@ -287,6 +413,10 @@ function inScope(doc) {
     const under = state.source.under
     if (doc.path !== under && !doc.path.startsWith(under.endsWith('/') ? under : under + '/') && !doc.path.startsWith(under + String.fromCharCode(92))) return false
   }
+  if (state.tags.length && !state.tags.every(t => (doc.tags || []).includes(t))) return false
+  const range = DATE_RANGES.find(r => r.id === state.date)
+  if (range && range.after && docDate(doc) < range.after()) return false
+  if (range && range.before && docDate(doc) >= range.before()) return false
   return true
 }
 
@@ -317,6 +447,12 @@ function renderSidebar() {
     (s.watched && isAdmin() ? '<button class="remove" data-remove-source="' + esc(s.under) + '" aria-label="Stop watching ' + esc(s.label) + '" title="Stop watching">✕</button>' : '') + '</div>').join('')
     || '<p class="hint side-empty">No sources yet</p>'
 
+  $('#dateList').innerHTML = DATE_RANGES.map(r =>
+    '<button class="side-item' + (state.date === r.id ? ' active' : '') + '" data-date="' + r.id + '"><span class="name">' + esc(r.label) + '</span></button>').join('')
+  $('#tagSection').hidden = state.allTags.length === 0
+  $('#tagList').innerHTML = state.allTags.map(t =>
+    '<button class="side-item' + (state.tags.includes(t.tag) ? ' active' : '') + '" data-tag="' + esc(t.tag) + '"><span class="name"># ' + esc(t.tag) + '</span><span class="count">' + fmt(t.count) + '</span></button>').join('')
+
   for (const el of $$('[data-requires="watch"]')) el.hidden = !state.canWatch || !isAdmin() || !feature('watchedFolders')
   $$('.side-item[data-view]').forEach(el => el.classList.toggle('active', el.dataset.view === (state.view === 'documents' ? (state.docFilter === 'attention' ? 'attention' : 'documents') : state.view === 'home' || state.view === 'results' ? 'search' : '')))
 }
@@ -326,6 +462,17 @@ $('#sidebar').addEventListener('click', async e => {
   const source = e.target.closest('[data-under]')
   const remove = e.target.closest('[data-remove-source]')
   const view = e.target.closest('[data-view]')
+  const tag = e.target.closest('[data-tag]')
+  const date = e.target.closest('[data-date]')
+  if (tag) state.tags = state.tags.includes(tag.dataset.tag) ? state.tags.filter(t => t !== tag.dataset.tag) : [...state.tags, tag.dataset.tag]
+  if (date) state.date = state.date === date.dataset.date ? null : date.dataset.date
+  if (tag || date) {
+    renderSidebar()
+    if (state.view === 'documents') renderDocuments()
+    else if (state.query) runSearch()
+    else renderScopeChips()
+    return
+  }
   if (remove) {
     const path = remove.dataset.removeSource
     if (!confirm('Stop watching ' + path + '?\n\nIts documents leave the index. The files themselves are not touched.')) return
@@ -387,15 +534,20 @@ function renderScopeChips(target = '#scopeChips') {
   const chips = []
   if (state.group) chips.push(['group', GROUPS.find(g => g.id === state.group).label])
   if (state.source) chips.push(['source', state.source.label])
-  box.innerHTML = chips.map(([kind, label]) => '<span class="chip">' + esc(label) + '<button data-clear-scope="' + kind + '" aria-label="Remove filter ' + esc(label) + '">✕</button></span>').join('')
+  if (state.date) chips.push(['date', DATE_RANGES.find(r => r.id === state.date).label])
+  for (const t of state.tags) chips.push(['tag:' + t, '# ' + t])
+  box.innerHTML = chips.map(([kind, label]) => '<span class="chip">' + esc(label) + '<button data-clear-scope="' + esc(kind) + '" aria-label="Remove filter ' + esc(label) + '">✕</button></span>').join('')
 }
 
 for (const box of ['#scopeChips', '#docScopeChips']) {
   $(box).addEventListener('click', e => {
     const btn = e.target.closest('[data-clear-scope]')
     if (!btn) return
-    if (btn.dataset.clearScope === 'group') state.group = null
-    else state.source = null
+    const kind = btn.dataset.clearScope
+    if (kind === 'group') state.group = null
+    else if (kind === 'source') state.source = null
+    else if (kind === 'date') state.date = null
+    else if (kind.startsWith('tag:')) state.tags = state.tags.filter(t => t !== kind.slice(4))
     renderSidebar()
     if (state.view === 'documents') renderDocuments()
     else runSearch()
@@ -408,9 +560,7 @@ async function runSearch() {
   if (!q) { setView('home'); return }
   if (state.view !== 'results') setView('results')
   renderScopeChips()
-  const params = new URLSearchParams({ q, topK: '40' })
-  if (state.group) params.set('formats', groupFormats(state.group).join(','))
-  if (state.source) params.set('under', state.source.under)
+  const params = addScopeParams(new URLSearchParams({ q, topK: '40' }))
   const seq = ++searchSeq
   let data
   try { data = await json('/api/search?' + params) } catch (err) { if (seq === searchSeq) toast('Search failed: ' + err.message, true); return }
@@ -445,6 +595,8 @@ function renderResults() {
       '<div class="folder">' + esc(folder) + '</div>' +
       '<div class="snippet">' + (r.snippet ? markSnippet(r.snippet) : highlight(c.content.slice(0, 260), terms(r))) + '</div>' +
       '<div class="result-actions"><button class="btn btn-sm btn-primary" data-act="open">' + (link ? 'Open link' : c.page ? 'Open at ' + esc(pageRef(c)) : 'Open') + '</button>' +
+      '<button class="btn btn-sm" data-act="copy-passage" title="Copy the passage with its source">Copy</button>' +
+      (feature('export') ? '<button class="btn btn-sm" data-act="collect" title="Collect this passage to export later">Collect</button>' : '') +
       (desktop && desktop.revealDocument && !link ? '<button class="btn btn-sm" data-act="reveal">Show in folder</button>' : '') + '</div></div></li>'
   }).join('')
   const empty = $('#resultsEmpty')
@@ -472,6 +624,8 @@ $('#results').addEventListener('click', e => {
   const act = e.target.closest('[data-act]')
   if (act && act.dataset.act === 'open') return openResult(r)
   if (act && act.dataset.act === 'reveal') return desktop.revealDocument(r.chunk.documentPath)
+  if (act && act.dataset.act === 'copy-passage') return copyText('“' + r.chunk.content.trim() + '”\n— ' + sourceLine(r.chunk), 'Passage copied with its source')
+  if (act && act.dataset.act === 'collect') return collect(r)
   select(Number(item.dataset.i), false)
   if (window.innerWidth <= 1180) renderPreview(r)
 })
@@ -489,11 +643,15 @@ function renderPreview(r) {
   const label = state.info.formats.find(f => f.format === c.documentFormat)?.label || c.documentFormat
   $('#previewBody').innerHTML =
     '<h2>' + esc(fileName(c.documentPath)) + '</h2>' +
-    '<div class="meta">' + esc(label) + (c.page ? ' · ' + esc(pageRef(c)) : '') + (c.heading ? ' · ' + esc(c.heading) : '') + '<br>' + esc(link ? c.documentPath : folderOf(c.documentPath)) + '</div>' +
+    '<div class="meta">' + esc(label) + (c.page ? ' · ' + esc(pageRef(c)) : '') + (c.heading ? ' · ' + esc(c.heading) : '') + '<br>' + esc(link ? c.documentPath : folderOf(c.documentPath)) +
+    (c.metadata && (c.metadata.author || c.metadata.year) ? '<br>' + esc([c.metadata.author, c.metadata.year].filter(Boolean).join(', ')) : '') + '</div>' +
+    renderTagEditor(c.documentPath) +
     '<div class="actions"><button class="btn btn-primary" data-act="open">' + (link ? 'Open link' : c.page ? 'Open at ' + esc(pageRef(c)) : 'Open') + '</button>' +
     (desktop && desktop.revealDocument && !link ? '<button class="btn" data-act="reveal">Show in folder</button>' : '') +
-    '<button class="btn" data-act="copy">Copy path</button></div>' +
-    '<p class="passage-label">Matching passage</p><div class="passage">' + highlight(c.content, terms(r)) + '</div>'
+    '<button class="btn" data-act="copy-passage">Copy passage</button>' +
+    (feature('export') ? '<button class="btn" data-act="collect">Collect</button>' : '') + '</div>' +
+    '<p class="passage-label">Matching passage</p><div class="passage">' + highlight(c.content, terms(r)) + '</div>' +
+    '<div class="cite-row"><button class="btn btn-sm" data-act="cite-apa">Copy citation</button><button class="btn btn-sm" data-act="cite-bibtex">BibTeX</button><button class="btn btn-sm" data-act="copy">Copy path</button></div>'
   $('#preview').hidden = false
   $('.layout').classList.remove('no-preview')
   $('#preview').dataset.i = String(state.results.indexOf(r))
@@ -511,8 +669,37 @@ $('#preview').addEventListener('click', async e => {
   if (!r) return
   if (act.dataset.act === 'open') openResult(r)
   if (act.dataset.act === 'reveal') desktop.revealDocument(r.chunk.documentPath)
-  if (act.dataset.act === 'copy') {
-    try { await navigator.clipboard.writeText(r.chunk.documentPath); toast('Path copied') } catch { toast("Couldn't copy the path", true) }
+  if (act.dataset.act === 'copy') copyText(r.chunk.documentPath, 'Path copied')
+  if (act.dataset.act === 'copy-passage') copyText('“' + r.chunk.content.trim() + '”\n— ' + sourceLine(r.chunk), 'Passage copied with its source')
+  if (act.dataset.act === 'collect') collect(r)
+  if (act.dataset.act === 'cite-apa') copyText(citation(r.chunk, 'apa'), 'Citation copied')
+  if (act.dataset.act === 'cite-bibtex') copyText(citation(r.chunk, 'bibtex'), 'BibTeX copied')
+})
+
+// Tag editing (preview pane and anywhere else a .tag-editor is shown).
+document.addEventListener('click', async e => {
+  const remove = e.target.closest('[data-remove-tag]')
+  const editor = remove && remove.closest('[data-tag-path]')
+  if (!editor) return
+  const path = editor.dataset.tagPath
+  const doc = state.docs.find(d => d.path === path)
+  const tags = await saveTags(path, ((doc && doc.tags) || []).filter(t => t !== remove.dataset.removeTag))
+  if (tags) editor.outerHTML = renderTagEditor(path)
+})
+document.addEventListener('keydown', async e => {
+  const input = e.target.closest && e.target.closest('[data-add-tag]')
+  if (!input || (e.key !== 'Enter' && e.key !== ',')) return
+  e.preventDefault()
+  const value = input.value.replace(/,/g, ' ').trim()
+  if (!value) return
+  const editor = input.closest('[data-tag-path]')
+  const path = editor.dataset.tagPath
+  const doc = state.docs.find(d => d.path === path)
+  const tags = await saveTags(path, [...((doc && doc.tags) || []), value])
+  if (tags) {
+    editor.outerHTML = renderTagEditor(path)
+    const again = $('[data-tag-path="' + CSS.escape(path) + '"] [data-add-tag]')
+    if (again) again.focus()
   }
 })
 
@@ -640,7 +827,8 @@ function renderDocuments() {
       if (desktop && desktop.revealDocument && !link) actions.push('<button class="btn btn-sm" data-doc-act="reveal">Show</button>')
       if (isAdmin()) actions.push('<button class="btn btn-sm btn-danger" data-doc-act="remove" title="Remove from Duct">✕</button>')
       return '<div class="doc-row" role="row" data-path="' + esc(d.path) + '">' + badge(d.format) +
-        '<span class="name" title="' + esc(d.path) + '">' + esc(d.displayName || fileName(d.path)) + '</span>' +
+        '<span class="name-cell"><span class="name" title="' + esc(d.path) + '">' + esc(d.displayName || fileName(d.path)) + '</span>' +
+        ((d.tags || []).length ? '<span class="tags">' + d.tags.map(t => '<span class="tag">' + esc(t) + '</span>').join('') + '</span>' : '') + '</span>' +
         '<span class="folder">' + esc(link ? d.path : d.source === 'library' ? 'Duct Library' : folderOf(d.path)) + '</span>' +
         statusOf(d) + '<span class="row-actions">' + actions.join('') + '</span>' +
         (d.status === 'failed' && d.error ? '<span class="err">' + esc(d.error) + '</span>' : '') + '</div>'
@@ -960,7 +1148,16 @@ const ACTIONS = {
   'show-attention': () => { state.docFilter = 'attention'; setView('documents') },
   'close-preview': () => closePreview(),
   'toggle-sidebar': () => $('#sidebar').classList.toggle('open'),
-  'export': () => exportResults(),
+  'export': () => exportResults('csv'),
+  'toggle-export': () => { const menu = $('#exportMenu'); menu.hidden = !menu.hidden; $('[data-action="toggle-export"]').setAttribute('aria-expanded', String(!menu.hidden)) },
+  'show-collected': () => { renderCollected(); $('#collectDialog').showModal() },
+  'clear-collected': () => {
+    if (!confirm('Clear all collected passages?')) return
+    state.collected = []
+    saveCollected()
+    renderCollected()
+    renderCollectedButton()
+  },
   'clear-index': async () => {
     if (!confirm('Clear the whole index?\n\nDocuments can be indexed again later. Files on disk are not touched, and watched folders stay watched.')) return
     try { await json('/api/clear', { method: 'DELETE' }); toast('Index cleared') } catch (err) { toast(err.message, true) }
@@ -977,13 +1174,26 @@ function closeAddMenu() { $('#addMenu').hidden = true; $('[data-action="toggle-a
 document.addEventListener('click', e => {
   const el = e.target.closest('[data-action]')
   if (el && ACTIONS[el.dataset.action]) { e.preventDefault(); ACTIONS[el.dataset.action](el); return }
-  if (!e.target.closest('.menu-wrap')) closeAddMenu()
+  if (!e.target.closest('.menu-wrap')) { closeAddMenu(); $('#exportMenu').hidden = true }
+  const fmtBtn = e.target.closest('[data-export]')
+  if (fmtBtn) { $('#exportMenu').hidden = true; exportResults(fmtBtn.dataset.export) }
+  const collectBtn = e.target.closest('[data-collect-export]')
+  if (collectBtn) exportCollected(collectBtn.dataset.collectExport)
+  const removeCollected = e.target.closest('[data-remove-collected]')
+  if (removeCollected) {
+    state.collected.splice(Number(removeCollected.dataset.removeCollected), 1)
+    saveCollected()
+    renderCollected()
+    renderCollectedButton()
+  }
 })
 
-function exportResults() {
+async function exportResults(format = 'csv') {
   if (!feature('export')) return
   if (!state.query) { toast('Search for something first', true); return }
-  window.location.href = '/api/export?format=csv&q=' + encodeURIComponent(state.query)
+  try {
+    await downloadExport(await api('/api/export?' + addScopeParams(new URLSearchParams({ q: state.query, format, topK: '200' }))), 'duct-export.' + format)
+  } catch (err) { toast('Export failed: ' + err.message, true) }
 }
 
 // ---------- start ----------

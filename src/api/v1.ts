@@ -336,6 +336,9 @@ export function createApiRouter(duct: Duct, collections: Collections, opts: ApiO
     const known = new Set<string>([...FORMATS.map(f => f.format), 'url'])
     if (formats.some(f => !known.has(f))) throw new ApiError(400, 'invalid_formats', `Unknown format in "formats". Known: ${[...known].join(', ')}`)
     const group = p.group === 'passage' ? 'passage' : 'document'
+    // sort=<metadata field>:asc|desc orders the matches by that field instead of relevance (missing values last).
+    const sortMatch = typeof p.sort === 'string' && p.sort ? /^([^:"\\]{1,100}):(asc|desc)$/.exec(p.sort) : null
+    if (typeof p.sort === 'string' && p.sort && !sortMatch) throw new ApiError(400, 'invalid_sort', 'sort must look like "year:desc"')
     const scope = formats.length ? { formats: formats as DocumentFormat[] } : undefined
     const started = Date.now()
 
@@ -349,6 +352,16 @@ export function createApiRouter(duct: Duct, collections: Collections, opts: ApiO
       for (const r of results) {
         if (group === 'document') { if (seen.has(r.chunk.documentPath)) continue; seen.add(r.chunk.documentPath) }
         picked.push(r)
+      }
+      if (sortMatch) {
+        const [, field, dir] = sortMatch
+        const sign = dir === 'asc' ? 1 : -1
+        const val = (r: SearchResult) => r.chunk.metadata?.[field] as string | number | boolean | null | undefined
+        picked.sort((a, b) => {
+          const x = val(a), y = val(b)
+          if (x == null || y == null) return x == null && y == null ? 0 : x == null ? 1 : -1
+          return (typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y), undefined, { numeric: true })) * sign
+        })
       }
       hasMore = picked.length > offset + limit
       hits = picked.slice(offset, offset + limit).map(r => {

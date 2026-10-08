@@ -40,6 +40,8 @@ export interface SearchRequest {
   facets?: string[]
   formats?: string[]
   group?: 'document' | 'passage'
+  /** "field:asc" or "field:desc" to order by a metadata field instead of relevance. */
+  sort?: string
 }
 
 export interface Hit {

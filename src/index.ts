@@ -11,7 +11,7 @@ import { chunk } from './chunk/index.js'
 import { extractUrl, isUrl } from './extract/web.js'
 import { extractTablesFromContent } from './extract/table.js'
 import { SqliteStore } from './store/sqlite.js'
-import type { StoredApiKey } from './store/sqlite.js'
+import type { StoredApiKey, StoredDocument } from './store/sqlite.js'
 import { terminateOcr } from './ocr/index.js'
 import { HybridSearcher, reciprocalRankFusion } from './search/hybrid.js'
 import { SimpleReranker, NoopReranker } from './search/reranker.js'
@@ -272,7 +272,7 @@ export class Duct {
   /** One page of documents, newest first. */
   pageDocuments(limit: number, offset: number): { documents: DocumentInfo[]; total: number } {
     const page = this.store.pageDocuments(limit, offset)
-    return { documents: page.documents.map(({ id: _id, mtimeMs: _m, contentHash: _h, ...info }) => info), total: page.total }
+    return { documents: page.documents.map(d => toInfo(d, this.store.tagsFor(d.path))), total: page.total }
   }
 
   /** Counts of metadata values among documents matching the keyword query (all documents for an empty query). */
@@ -1011,9 +1011,21 @@ Return ONLY a JSON array of strings, like: ["sub-question 1", "sub-question 2"]`
 
   getDocument(path: string): DocumentInfo | undefined {
     const doc = this.findDocument(path)
-    if (!doc) return undefined
-    const { id: _id, mtimeMs: _m, contentHash: _h, ...info } = doc
-    return info
+    return doc ? toInfo(doc, this.store.tagsFor(doc.path)) : undefined
+  }
+
+  /** Replaces a document's tags (trimmed, de-duplicated, at most 20 of up to 60 characters). Returns them. */
+  setTags(path: string, tags: string[]): string[] {
+    const doc = this.findDocument(path)
+    if (!doc) throw new Error('Document not found')
+    const clean = [...new Set(tags.map(t => String(t).normalize('NFC').replace(/\s+/g, ' ').trim()).filter(t => t.length > 0 && t.length <= 60))].slice(0, 20)
+    this.store.setTags(doc.path, clean)
+    return clean
+  }
+
+  /** Every tag in use, with how many documents carry it. */
+  listTags(): { tag: string; count: number }[] {
+    return this.store.allTags()
   }
 
   /** The indexed document with exactly these bytes (sha256 hex), if any. */
@@ -1025,7 +1037,8 @@ Return ONLY a JSON array of strings, like: ["sub-question 1", "sub-question 2"]`
   }
 
   getDocuments(): DocumentInfo[] {
-    return this.store.listDocuments().map(({ id: _id, mtimeMs: _m, contentHash: _h, ...info }) => info)
+    const tags = this.store.tagMap()
+    return this.store.listDocuments().map(d => toInfo(d, tags.get(d.path) ?? []))
   }
 
   getConfig(): RuntimeConfig {
@@ -1123,6 +1136,11 @@ Return ONLY a JSON array of strings, like: ["sub-question 1", "sub-question 2"]`
     this.store.close()
     terminateOcr().catch(() => {})
   }
+}
+
+function toInfo(doc: StoredDocument, tags: string[]): DocumentInfo {
+  const { id: _id, mtimeMs, contentHash: _h, ...info } = doc
+  return { ...info, ...(mtimeMs != null ? { modifiedAt: Math.round(mtimeMs) } : {}), ...(tags.length ? { tags } : {}) }
 }
 
 function chunkArray<T>(arr: T[], size: number): T[][] {

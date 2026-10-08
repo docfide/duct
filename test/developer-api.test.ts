@@ -107,6 +107,14 @@ describe('developer API', () => {
     expect(page2.hits[0].id).not.toBe(page1.hits[0].id)
   })
 
+  it('sorts matches by a metadata field', async () => {
+    const asc = await ok(await call('/collections/contracts/search', searchKey, { body: { q: 'days', sort: 'year:asc' } }))
+    expect(asc.hits.map((h: { metadata: { year: number } }) => h.metadata.year)).toEqual([2025, 2026])
+    const desc = await ok(await call('/collections/contracts/search?q=days&sort=year:desc', searchKey))
+    expect(desc.hits.map((h: { metadata: { year: number } }) => h.metadata.year)).toEqual([2026, 2025])
+    expect((await call('/collections/contracts/search?q=days&sort=year', searchKey)).status).toBe(400)
+  })
+
   it('reads uploaded files with the same extractors as the app', async () => {
     const form = new FormData()
     form.append('file', new Blob([makeTextPdf([[[12, 700, 'Cover page']], [[12, 700, 'The indemnity clause survives termination.']]])]), 'msa.pdf')

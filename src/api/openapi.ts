@@ -19,6 +19,7 @@ export function openApiSpec() {
     facets: { type: 'array', items: { type: 'string' }, maxItems: 10, description: 'Metadata fields to count values of among matching documents.' },
     formats: { type: 'array', items: { type: 'string', enum: formats } },
     group: { type: 'string', enum: ['document', 'passage'], default: 'document', description: 'One hit per document (its best passage), or every matching passage.' },
+    sort: { type: 'string', pattern: '^[^:]+:(asc|desc)$', examples: ['year:desc'], description: 'Order matches by a metadata field instead of relevance; documents without it come last.' },
   }
   return {
     openapi: '3.1.0',

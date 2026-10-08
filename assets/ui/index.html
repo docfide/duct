@@ -84,6 +84,14 @@
           <div id="kindList"></div>
         </div>
         <div class="side-section">
+          <h2>Modified</h2>
+          <div id="dateList"></div>
+        </div>
+        <div class="side-section" id="tagSection" hidden>
+          <h2>Tags</h2>
+          <div id="tagList"></div>
+        </div>
+        <div class="side-section">
           <h2>Sources</h2>
           <div id="sourceList"></div>
           <button class="side-add" data-action="watch-folder" data-requires="watch">+ Watch a folder</button>
@@ -105,7 +113,17 @@
           <div class="results-head">
             <h2 id="resultsTitle"></h2>
             <div class="scope-chips" id="scopeChips"></div>
-            <button class="link" data-action="export">Export CSV</button>
+            <div class="results-tools">
+              <button class="btn btn-sm" data-action="show-collected" id="collectedBtn" hidden>Collected <span class="count" data-bind="collectedCount">0</span></button>
+              <div class="menu-wrap">
+                <button class="btn btn-sm" data-action="toggle-export" aria-haspopup="menu" aria-expanded="false">Export</button>
+                <div class="menu menu-sm" id="exportMenu" role="menu" hidden>
+                  <button role="menuitem" data-export="docx"><strong>Word document</strong><span>Each passage with its source</span></button>
+                  <button role="menuitem" data-export="csv"><strong>Spreadsheet (CSV)</strong><span>An evidence list: file, page, passage</span></button>
+                  <button role="menuitem" data-export="md"><strong>Markdown</strong><span>Quotes with sources, to paste anywhere</span></button>
+                </div>
+              </div>
+            </div>
           </div>
           <ol class="results" id="results"></ol>
           <div class="empty" id="resultsEmpty" hidden>
@@ -237,6 +255,25 @@
         <button class="btn btn-primary" value="ok">Add page</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="collectDialog" class="collect-dialog" aria-labelledby="collectTitle">
+    <form method="dialog" class="settings-head">
+      <h2 id="collectTitle">Collected passages</h2>
+      <button class="icon-btn" aria-label="Close">✕</button>
+    </form>
+    <div class="collect-body">
+      <p class="hint">Passages you collect from search results, kept on this device until you clear them. Export them with their sources, for a bid, a brief or an audit file.</p>
+      <label class="field"><span>Title</span><input type="text" id="collectName" placeholder="Collected passages" maxlength="200"></label>
+      <ol class="collect-list" id="collectList"></ol>
+      <div class="dialog-actions">
+        <button class="btn btn-ghost" data-action="clear-collected">Clear all</button>
+        <span class="spacer"></span>
+        <button class="btn" data-collect-export="md">Markdown</button>
+        <button class="btn" data-collect-export="csv">CSV</button>
+        <button class="btn btn-primary" data-collect-export="docx">Word document</button>
+      </div>
+    </div>
   </dialog>
 
   <input type="file" id="fileInput" multiple hidden>
