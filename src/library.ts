@@ -1,7 +1,7 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, renameSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, extname, join } from 'node:path'
-import { hashBytes, type Duct } from './index.js'
+import { fingerprint, type Duct } from './index.js'
 import type { IndexResult } from './types.js'
 
 /** The default folder where uploaded and added files are kept: ~/Duct Library. */
@@ -47,17 +47,18 @@ export async function addToLibrary(
   options: { originalName?: string; metadata?: Record<string, unknown>; move?: boolean } = {},
 ): Promise<LibraryResult> {
   const originalName = options.originalName ?? basename(sourcePath)
-  const hash = hashBytes(readFileSync(sourcePath))
+  const hash = fingerprint(sourcePath).hash()
   const existing = duct.findDocumentByHash(hash)
   if (existing) {
-    if (options.move) unlinkSync(sourcePath)
+    if (options.move) rmSync(sourcePath, { recursive: true, force: true })
     return { file: originalName, documents: 0, chunks: 0, time: 0, duplicateOf: existing.displayName ?? existing.path }
   }
 
   mkdirSync(libraryDir, { recursive: true })
   const target = uniquePath(libraryDir, safeFileName(originalName))
+  // cpSync also copies documents saved as folders (older iWork packages).
   if (options.move) renameSync(sourcePath, target)
-  else copyFileSync(sourcePath, target)
+  else cpSync(sourcePath, target, { recursive: true })
 
   const result = await duct.index(target, options.metadata, { source: 'library', displayName: originalName })
   return { file: originalName, path: target, ...result }

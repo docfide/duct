@@ -1,10 +1,14 @@
-import { existsSync, readFileSync } from 'node:fs'
-import { extname } from 'node:path'
+import { execFile } from 'node:child_process'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { extname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { promisify } from 'node:util'
+import { IMAGE_EXTENSIONS } from '../formats.js'
 import type Tesseract from 'tesseract.js'
 import { ensureDOMMatrix } from '../dommatrix.js'
 
-export const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.tiff', '.tif', '.bmp', '.gif', '.webp'])
+export const IMAGE_EXTS = IMAGE_EXTENSIONS
 
 const IDLE_MS = 60_000
 
@@ -55,8 +59,41 @@ async function prepare(input: string | Buffer): Promise<Buffer> {
   return sharp(input).grayscale().normalize().median(1).toBuffer()
 }
 
+/**
+ * iPhone photos (HEIC) use a codec sharp's bundled libvips can't decode. macOS converts them with its
+ * built-in `sips`; elsewhere the optional heic-decode package (libheif, LGPL) is used if installed.
+ */
+async function decodeImage(imagePath: string): Promise<string | Buffer> {
+  const ext = extname(imagePath).toLowerCase()
+  if (ext !== '.heic' && ext !== '.heif') return imagePath
+  if (process.platform === 'darwin') {
+    const dir = mkdtempSync(join(tmpdir(), 'duct-heic-'))
+    try {
+      const out = join(dir, 'image.png')
+      await promisify(execFile)('sips', ['-s', 'format', 'png', imagePath, '--out', out])
+      return readFileSync(out)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+  let decode: (input: { buffer: Uint8Array }) => Promise<{ width: number; height: number; data: Uint8ClampedArray }>
+  try {
+    decode = (await import('heic-decode')).default
+  } catch {
+    throw new Error('Reading HEIC images needs the optional heic-decode package on this system')
+  }
+  const { width, height, data } = await decode({ buffer: readFileSync(imagePath) })
+  const sharp = (await import('sharp')).default
+  return sharp(Buffer.from(data), { raw: { width, height, channels: 4 } }).png().toBuffer()
+}
+
 export async function ocrImage(imagePath: string): Promise<string> {
-  return (await recognize(await prepare(imagePath))).trim()
+  return (await recognize(await prepare(await decodeImage(imagePath)))).trim()
+}
+
+/** OCR for an image already in memory (e.g. an iWork document's preview). */
+export async function ocrBuffer(image: Buffer): Promise<string> {
+  return (await recognize(await prepare(image))).trim()
 }
 
 /** OCRs each page of a PDF; returns the text per page, or null if rendering isn't available. */

@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, watch } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, watch } from 'node:fs'
 import type { FSWatcher } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import { basename, extname, join, resolve } from 'node:path'
-import { detectFormat, extract } from './extract/index.js'
+import { detectFormat, extract, UnsupportedFileError } from './extract/index.js'
+import { PACKAGE_EXTENSIONS, SUPPORTED_EXTENSIONS, isIgnoredDirectory, isSupportedFile } from './formats.js'
 import { chunk } from './chunk/index.js'
 import { extractUrl, isUrl } from './extract/web.js'
 import { extractTablesFromContent } from './extract/table.js'
@@ -20,7 +21,8 @@ import type {
   QAResult, SchemaField, ExtractionResult, DocDiff, ExtractedDocument,
 } from './types.js'
 
-export const VALID_EXTS = new Set(['.pdf', '.docx', '.md', '.markdown', '.html', '.htm', '.txt', '.csv', '.json', '.log', '.xml', '.xlsx', '.pptx', '.png', '.jpg', '.jpeg', '.tiff', '.tif', '.bmp', '.gif', '.webp'])
+/** Supported file extensions (see src/formats.ts). */
+export const VALID_EXTS = SUPPORTED_EXTENSIONS
 
 const WATCH_DEBOUNCE_MS = 300
 const EMBED_BATCH = 20
@@ -38,21 +40,79 @@ export function hashBytes(data: Buffer | string): string {
   return createHash('sha256').update(data).digest('hex')
 }
 
+/**
+ * Timestamp, size and content hash of a file, or of a document saved as a folder (older iWork packages):
+ * for folders, the newest timestamp, the total size and a hash over every file's name and bytes.
+ */
+export function fingerprint(path: string): { mtimeMs: number; size: number; hash: () => string } {
+  const st = statSync(path)
+  if (!st.isDirectory()) return { mtimeMs: st.mtimeMs, size: st.size, hash: () => hashBytes(readFileSync(path)) }
+  const files = (readdirSync(path, { recursive: true, withFileTypes: true }) as import('node:fs').Dirent[])
+    .filter(e => e.isFile())
+    .map(e => join(e.parentPath, e.name))
+    .sort()
+  let mtimeMs = st.mtimeMs
+  let size = 0
+  for (const f of files) {
+    const s = statSync(f)
+    mtimeMs = Math.max(mtimeMs, s.mtimeMs)
+    size += s.size
+  }
+  return {
+    mtimeMs,
+    size,
+    hash: () => {
+      const h = createHash('sha256')
+      for (const f of files) h.update(f.slice(path.length)).update('\0').update(readFileSync(f))
+      return h.digest('hex')
+    },
+  }
+}
+
 async function findFiles(input: string): Promise<string[]> {
   if (isUrl(input)) return [input]
   const st = statSync(input)
-  if (st.isFile()) {
-    // Files without a supported extension (including extensionless ones like id_rsa) are never indexed.
-    if (!VALID_EXTS.has(extname(input).toLowerCase())) return []
-    return [resolve(input)]
-  }
-  if (st.isDirectory()) {
-    const entries = await readdir(input, { recursive: true, withFileTypes: true })
-    return entries
-      .filter(e => e.isFile() && VALID_EXTS.has(extname(e.name).toLowerCase()))
-      .map(e => resolve(e.parentPath, e.name))
-  }
+  // Older iWork documents are folders ("packages"); they are one document.
+  if (st.isDirectory() && PACKAGE_EXTENSIONS.has(extname(input).toLowerCase())) return [resolve(input)]
+  // Files without a supported extension (including extensionless ones like id_rsa) are never indexed.
+  if (st.isFile()) return isSupportedFile(input) ? [resolve(input)] : []
+  if (st.isDirectory()) return walk(resolve(input))
   return []
+}
+
+/**
+ * Supported files under a folder. Skips dependency, version-control and cache folders, hidden folders and
+ * symlinks (so loops can't happen), and treats iWork package folders as single documents.
+ */
+async function walk(root: string): Promise<string[]> {
+  const found: string[] = []
+  const pending = [root]
+  while (pending.length) {
+    const dir = pending.pop()!
+    let entries
+    try { entries = await readdir(dir, { withFileTypes: true }) } catch { continue }
+    for (const entry of entries) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (PACKAGE_EXTENSIONS.has(extname(entry.name).toLowerCase())) found.push(full)
+        else if (!isIgnoredDirectory(entry.name)) pending.push(full)
+      } else if (entry.isFile() && isSupportedFile(entry.name)) {
+        found.push(full)
+      }
+    }
+  }
+  return found.sort()
+}
+
+/** The iWork package a path is inside, if any (changes inside a package re-index the package). */
+function packageOf(path: string): string | undefined {
+  const match = path.match(/^(.*?\.(?:pages|numbers|key))[\\/]/i)
+  return match?.[1]
+}
+
+/** Whether a path inside a watched folder sits in a folder that walk() skips. */
+function inIgnoredFolder(path: string, root: string): boolean {
+  return path.slice(root.length).split(/[\\/]/).slice(0, -1).some(part => part && isIgnoredDirectory(part))
 }
 
 type IndexOutcome = { status: 'indexed' | 'no-text' | 'skipped' | 'failed'; chunks: number; error?: string }
@@ -323,12 +383,12 @@ export class Duct {
     let hash = ''
     try {
       if (!url) {
-        const st = statSync(path)
-        mtimeMs = st.mtimeMs
-        size = st.size
+        const print = fingerprint(path)
+        mtimeMs = print.mtimeMs
+        size = print.size
         // Unchanged since last time: same timestamp and size, or the same bytes.
         if (usable && !metaChanged && existing.mtimeMs === mtimeMs && existing.size === size) return { status: 'skipped', chunks: 0 }
-        hash = hashBytes(readFileSync(path))
+        hash = print.hash()
         if (usable && !metaChanged && existing.contentHash === hash) {
           this.store.touchDocument(path, mtimeMs, size)
           return { status: 'skipped', chunks: 0 }
@@ -362,6 +422,8 @@ export class Duct {
       this.store.addVersion(path, hash, doc.content)
       return { status, chunks: chunks.length }
     } catch (err) {
+      // Not really this kind of file (e.g. a TLS key named "server.key"): skip it without reporting a failure.
+      if (err instanceof UnsupportedFileError) return { status: 'skipped', chunks: 0 }
       const message = (err as Error).message
       safeWarn(`  Error indexing "${path}": ${message}`)
       // Keep a previously good copy searchable; only record the failure for documents not indexed yet.
@@ -389,6 +451,16 @@ export class Duct {
    * stays on one page and records it. Tables are already part of the text and aren't indexed twice.
    */
   private chunkDocument(doc: ExtractedDocument, path: string): Chunk[] {
+    // Emails and archives: each part (body, attachment, file in the ZIP) is chunked under its own heading.
+    if (doc.sections) {
+      const all: Chunk[] = []
+      for (const section of doc.sections) {
+        for (const c of chunk(section.text, path, doc.format, this.chunkStrategy, this.chunkSize, this.chunkOverlap)) {
+          all.push({ ...c, heading: section.title, index: all.length })
+        }
+      }
+      return all
+    }
     if (!doc.pages) return chunk(doc.content, path, doc.format, this.chunkStrategy, this.chunkSize, this.chunkOverlap)
     const all: Chunk[] = []
     doc.pages.forEach((text, i) => {
@@ -715,6 +787,7 @@ Return ONLY a JSON array of strings, like: ["sub-question 1", "sub-question 2"]`
     const watcher = watch(dir, { recursive: true }, (_event, filename) => {
       if (!filename) return
       const fullPath = join(dir, filename.toString())
+      if (inIgnoredFolder(fullPath, dir)) return
       // Editors and copies fire several events per save; handle each path once it settles.
       clearTimeout(this.pendingChanges.get(fullPath))
       this.pendingChanges.set(fullPath, setTimeout(() => {
@@ -728,9 +801,11 @@ Return ONLY a JSON array of strings, like: ["sub-question 1", "sub-question 2"]`
 
   private async handleChange(fullPath: string): Promise<boolean> {
     try {
+      const pkg = packageOf(fullPath)
+      if (pkg && existsSync(pkg)) return (await this.index(pkg, undefined, { source: 'watch' })).documents > 0
       if (existsSync(fullPath)) {
         const isDir = statSync(fullPath).isDirectory()
-        if (!isDir && !VALID_EXTS.has(extname(fullPath).toLowerCase())) return false
+        if (!isDir && !isSupportedFile(fullPath)) return false
         const result = await this.index(fullPath, undefined, { source: 'watch' })
         return result.documents > 0
       }

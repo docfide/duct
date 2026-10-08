@@ -9,6 +9,7 @@ let duct = null
 let server = null
 let serverUrl = ''
 let library = null
+let formats = null   // src/formats.ts: the supported file types
 let island = null
 
 const SEARCH_SHORTCUT = 'CommandOrControl+Shift+Space'
@@ -52,6 +53,8 @@ function startIsland() {
       mainWindow?.focus()
       if (view === 'failed') mainWindow?.webContents.executeJavaScript('typeof showFailedDocuments === "function" && showFailedDocuments()').catch(() => {})
     },
+    isSupportedFile: p => formats.isSupportedFile(p),
+    isPackage: p => formats.PACKAGE_EXTENSIONS.has(path.extname(p).toLowerCase()),
     onWatchFolders: async folders => {
       await duct.watch(folders, refreshPage)
       refreshPage()
@@ -103,6 +106,7 @@ function libraryDir() {
 async function createDuct() {
   const { Duct } = await import('../dist/index.js')
   library = await import('../dist/library.js')
+  formats = await import('../dist/formats.js')
   duct = new Duct({
     persistPath: path.join(app.getPath('userData'), 'data'),
     search: { rerank: true },
@@ -219,10 +223,7 @@ function createAppMenu() {
           click: async () => {
             const result = await dialog.showOpenDialog(mainWindow, {
               properties: ['openFile', 'multiSelections'],
-              filters: [
-                { name: 'Documents', extensions: ['pdf', 'docx', 'md', 'txt', 'html', 'csv', 'json', 'log', 'xml', 'xlsx', 'pptx'] },
-                { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'tiff', 'tif', 'bmp', 'gif', 'webp'] },
-              ],
+              filters: formats.dialogFilters(),
             })
             if (result.canceled || result.filePaths.length === 0) return
             try {
@@ -377,9 +378,7 @@ ipcMain.handle('dialog:openDirectory', async () => {
 ipcMain.handle('dialog:openFiles', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openFile', 'multiSelections'],
-    filters: [
-      { name: 'All Supported', extensions: ['pdf', 'docx', 'md', 'txt', 'html', 'csv', 'json', 'log', 'xml', 'xlsx', 'pptx', 'png', 'jpg', 'jpeg', 'tiff', 'tif', 'bmp', 'gif', 'webp'] },
-    ],
+    filters: formats.dialogFilters(),
   })
   return result.canceled ? null : result.filePaths
 })

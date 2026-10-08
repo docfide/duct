@@ -79,20 +79,25 @@
     ]
   },
   "dependencies": {
+    "@kenjiuno/msgreader": "^1.28.0",
     "@lottiefiles/dotlottie-web": "^0.81.0",
     "canvas": "^3.2.3",
     "chalk": "^5.6.2",
     "cheerio": "^1.0.0",
     "commander": "^12.0.0",
     "express": "^4.18.0",
+    "jszip": "^3.10.1",
     "mammoth": "^1.6.0",
     "marked": "^12.0.0",
     "multer": "^1.4.5-lts.1",
     "openai": "^4.0.0",
     "ora": "^9.4.0",
     "pdfjs-dist": "^5.7.284",
+    "postal-mime": "^4.0.5",
     "sharp": "^0.34.5",
-    "tesseract.js": "^7.0.0"
+    "tesseract.js": "^7.0.0",
+    "word-extractor": "^1.0.4",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@mistralai/mistralai": "^2.2.5",
@@ -112,9 +117,8 @@
     "@google/generative-ai": "^0.21.0",
     "@mistralai/mistralai": "^2.0.0",
     "cohere-ai": "^8.0.0",
-    "jszip": "^3.10.1",
-    "voyageai": "^0.3.0",
-    "xlsx": "^0.18.5"
+    "heic-decode": "^2.1.0",
+    "voyageai": "^0.3.0"
   },
   "repository": {
     "type": "git",

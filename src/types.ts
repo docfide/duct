@@ -3,11 +3,16 @@ export interface ExtractedDocument {
   format: DocumentFormat
   content: string
   metadata: Record<string, unknown>
-  /** Text per page (PDF) or slide (PPTX), in order; `content` is these joined. */
+  /** Text per page (PDF), slide (PPTX), sheet or chapter, in order; `content` is these joined. */
   pages?: string[]
+  /** Named parts without page numbers, e.g. an email's attachments or the files inside a ZIP. Chunks get the title as heading. */
+  sections?: { title: string; text: string }[]
 }
 
-export type DocumentFormat = 'pdf' | 'docx' | 'md' | 'html' | 'txt' | 'image' | 'url' | 'xlsx' | 'pptx'
+export type DocumentFormat =
+  | 'pdf' | 'docx' | 'doc' | 'odt' | 'rtf' | 'pages' | 'md' | 'html' | 'epub'
+  | 'xlsx' | 'ods' | 'numbers' | 'pptx' | 'odp' | 'key'
+  | 'eml' | 'msg' | 'txt' | 'code' | 'svg' | 'image' | 'zip' | 'url'
 
 export interface DocumentInfo {
   path: string

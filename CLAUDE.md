@@ -73,7 +73,7 @@ docs/             User docs: cli, api, library, search, qa
 
 ## Adding things
 
-- **New file format:** add the extension to `VALID_EXTS` in **both** `src/index.ts` and `src/server.ts` (they are duplicated; electron/main.cjs file filters too), map it in `detectFormat` (`src/extract/index.ts`), add an extractor to the `extractors` record, and extend `DocumentFormat` in `types.ts` if it needs a new format. Image extensions live in `IMAGE_EXTS` (`src/ocr/index.ts`).
+- **New file format:** add it to `FORMATS` in `src/formats.ts` (extensions, label, kind, optional `pageLabel`), extend `DocumentFormat` in `types.ts`, and add a `case` to `extract()` in `src/extract/index.ts`. Everything else (indexer, upload filter, web UI, desktop dialogs, island) reads the registry. Extractors return `pages` (with page numbers) or `sections` (named parts such as attachments). Throw `UnsupportedFileError` when a file isn't really that format, so it's skipped rather than reported as failed. Put real-format fixtures in `test/formats.test.ts`, generated through `test/helpers.ts` where possible. Update `docs/formats.md`.
 - **New embedding provider:** add `src/embed/<name>.ts` implementing `EmbeddingProvider` (`embed()` + `dimensions`), wire it into `createEmbedder`/`guessProvider` in `factory.ts`, and add it to the `EmbedProvider` union and the `DuctConfig.embed.provider` union in `types.ts`. If it needs a key, add it to `RuntimeConfig`, `getConfig()`, and `configure()`.
 - **New LLM provider:** implement `LLMProvider` in `qa/provider.ts` and add a branch in `createLLMProvider`.
 - **New CLI command / API route:** `cli.ts` (commander) / `server.ts`. Update `docs/cli.md` / `docs/api.md` to match.

@@ -99,6 +99,7 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
   const WING = 84       // live wings on each side of the notch or pill
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
+  const PAGE_LABELS = __PAGE_LABELS__
   const POSES = {
     head: 'View - Three-Quarter', welcome: 'Pose - Welcome', working: 'Pose - Working', done: 'Pose - Done',
     nothingFound: 'Pose - Nothing Found', needsHand: 'Pose - Needs a Hand', resting: 'Pose - Resting',
@@ -351,7 +352,7 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
       sub.textContent = notice.sub
     } else if (state === 'drop') {
       title.textContent = 'Drop to add to your Library'
-      sub.textContent = 'Files are copied to ~/Duct Library and indexed. Drop a folder to watch it.'
+      sub.textContent = 'Copied to ~/Duct Library and indexed. Drop a folder to watch it.'
     } else if (liveKind === 'needsHand' && failures) {
       title.textContent = "I couldn't read " + failures.count + ' file' + (failures.count === 1 ? '' : 's')
       sub.textContent = failures.names.slice(0, 2).join(', ') + (failures.count > 2 ? ' and ' + (failures.count - 2) + ' more' : '') + '. Click to see them.'
@@ -484,7 +485,7 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
     if (!list.length) { box.innerHTML = '<div class="empty">No matches. Try fewer or different words.</div>'; return }
     box.innerHTML = list.map((r, i) =>
       '<div class="r' + (i === 0 ? ' sel' : '') + '" data-i="' + i + '">' +
-        '<div class="r-name">' + esc(fileName(r.chunk.documentPath)) + (r.chunk.page ? '<span class="r-page">p. ' + r.chunk.page + '</span>' : '') + '</div>' +
+        '<div class="r-name">' + esc(fileName(r.chunk.documentPath)) + (r.chunk.page ? '<span class="r-page">' + esc((PAGE_LABELS[r.chunk.documentFormat] || 'p.') + ' ' + r.chunk.page) + '</span>' : '') + '</div>' +
         '<div class="r-snip">' + (r.snippet ? markSnippet(r.snippet) : esc(r.chunk.content.slice(0, 160))) + '</div>' +
       '</div>').join('')
   }
@@ -542,7 +543,7 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
       sound('oops')
       const exts = [...new Set(unsupported.map(n => (n.match(/\.[^.]+$/) || ['these'])[0].toLowerCase()))]
       showNotice(unsupported.length
-        ? { pose: 'needsHand', title: "I can't read " + exts.slice(0, 3).join(', ') + ' files', sub: 'I read PDF, Word, Excel, PowerPoint, Markdown, HTML, text and images.' + (r.added ? ' Added ' + r.added + ' other file' + (r.added === 1 ? '' : 's') + '.' : '') }
+        ? { pose: 'needsHand', title: "I can't read " + exts.slice(0, 3).join(', ') + ' files', sub: 'I read __SUPPORTED__.' + (r.added ? ' Added ' + r.added + ' other file' + (r.added === 1 ? '' : 's') + '.' : '') }
         : { pose: 'needsHand', title: "I couldn't read " + r.failed + ' file' + (r.failed === 1 ? '' : 's'), sub: 'They are in your Library but have no text I can use.' })
     } else if ((r.watched || []).length) {
       sound('gulp')

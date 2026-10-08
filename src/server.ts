@@ -12,6 +12,7 @@ import { isUrl } from './extract/web.js'
 import { addToLibrary, defaultLibraryDir } from './library.js'
 import { VERSION } from './version.js'
 import { viewerHtml } from './viewer.js'
+import { ACCEPT_ATTRIBUTE, FORMATS, SUPPORTED_SUMMARY, isSupportedFile } from './formats.js'
 import { islandHtml } from './island.js'
 
 // Mascot art ships with the package; the dotLottie player and its wasm are served
@@ -20,8 +21,6 @@ const mascotDir = fileURLToPath(new URL('../assets/mascot', import.meta.url))
 const lottiePlayerDir = dirname(createRequire(import.meta.url).resolve('@lottiefiles/dotlottie-web'))
 // pdf.js (legacy build, for wider browser support) powers the /viewer page; served locally like the mascot.
 const pdfjsDir = dirname(createRequire(import.meta.url).resolve('pdfjs-dist/package.json'))
-
-const VALID_EXTS = new Set(['.pdf', '.docx', '.md', '.markdown', '.html', '.htm', '.txt', '.csv', '.json', '.log', '.xml', '.xlsx', '.pptx', '.png', '.jpg', '.jpeg', '.tiff', '.tif', '.bmp', '.gif', '.webp'])
 
 function parseMetadata(raw: unknown): Record<string, unknown> | undefined {
   if (!raw) return undefined
@@ -95,6 +94,17 @@ function realOrResolved(p: string): string {
   try { return realpathSync(p) } catch { return resolve(p) }
 }
 
+/** What a chunk's page number means per format ("slide", "sheet", "ch."), for the pages' labels. */
+const PAGE_LABELS = JSON.stringify(Object.fromEntries(FORMATS.map(f => [f.format, f.pageLabel ?? 'p.'])))
+
+function fillPage(page: string): string {
+  return page
+    .replace('__DUCT_VERSION__', VERSION)
+    .replace('__ACCEPT__', ACCEPT_ATTRIBUTE)
+    .replace('__SUPPORTED__', SUPPORTED_SUMMARY)
+    .replace('__PAGE_LABELS__', PAGE_LABELS)
+}
+
 export function createServer(duct: Duct, opts?: ServerOptions) {
   const app = express()
   const token = opts?.authToken
@@ -122,8 +132,8 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     limits: { fileSize: maxMb * 1024 * 1024 },
     fileFilter: (_req, file, cb) => {
       const ext = extname(file.originalname).toLowerCase()
-      if (VALID_EXTS.has(ext)) return cb(null, true)
-      cb(new Error(`Unsupported file type: ${ext}. Allowed: ${[...VALID_EXTS].join(', ')}`))
+      if (isSupportedFile(file.originalname)) return cb(null, true)
+      cb(new Error(`Unsupported file type: ${ext || file.originalname}. Duct reads ${SUPPORTED_SUMMARY}.`))
     },
   })
 
@@ -483,14 +493,14 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
   })
   // The desktop app's notch companion (see electron/island.cjs).
   app.get('/island', (_req, res) => {
-    res.type('html').send(islandHtml)
+    res.type('html').send(fillPage(islandHtml))
   })
 
   app.get('/vendor/dotlottie/index.js', (_req, res) => res.sendFile(join(lottiePlayerDir, 'index.js')))
   app.get('/vendor/dotlottie/dotlottie-player.wasm', (_req, res) => res.sendFile(join(lottiePlayerDir, 'dotlottie-player.wasm')))
 
   app.get('*', (_req, res) => {
-    res.type('html').send(html.replace('__DUCT_VERSION__', VERSION))
+    res.type('html').send(fillPage(html))
   })
 
   return app
@@ -704,9 +714,9 @@ body.member .admin-only { display: none !important; }
         <div class="drop-zone" id="dropZone">
           <div style="font-size:20px;margin-bottom:8px">📄</div>
           <div class="t-ui">Drop files here</div>
-          <div style="font-size:10px;color:var(--muted);margin-top:4px;font-family:var(--mono);">pdf, docx, xlsx, pptx, md, csv, json, txt, images</div>
+          <div style="font-size:10px;color:var(--muted);margin-top:4px;font-family:var(--mono);">__SUPPORTED__</div>
         </div>
-        <input type="file" id="fileInput" multiple accept=".pdf,.docx,.md,.markdown,.html,.htm,.txt,.csv,.json,.log,.xml,.xlsx,.pptx,.png,.jpg,.jpeg,.tiff,.tif,.bmp,.gif,.webp" style="display:none;" />
+        <input type="file" id="fileInput" multiple accept="__ACCEPT__" style="display:none;" />
         <div id="uploadProgress" style="margin-top:8px;"></div>
 
         <div class="inline-form" style="margin-top:8px;">
@@ -1107,14 +1117,14 @@ body.member .admin-only { display: none !important; }
         const c = r.chunk
         const isLink = /^https?:/i.test(c.documentPath)
         const heading = c.heading ? ' <span class="r-section">› ' + esc(c.heading) + '</span>' : ''
-        const page = c.page ? '<span class="badge b-lime r-page">p. ' + c.page + '</span>' : ''
+        const page = c.page ? '<span class="badge b-lime r-page">' + esc(pageRef(c)) + '</span>' : ''
         const ext = isLink ? 'url' : c.documentPath.split('.').pop()
         const snippet = r.snippet ? markSnippet(r.snippet) : highlight(c.content.slice(0, 300), q) + (c.content.length > 300 ? '…' : '')
         const reveal = !isLink && window.electronAPI && window.electronAPI.revealDocument
         return '<div class="result" data-i="' + i + '">' +
           '<div class="r-head"><span class="r-score">' + r.score.toFixed(2) + '</span><span class="r-file">' + esc(fileName(c.documentPath)) + '</span>' + page + heading + '<span class="badge b-mute r-ext">' + esc(ext) + '</span></div>' +
           '<div class="r-snippet">' + snippet + '</div>' +
-          '<div class="r-actions"><button class="btn btn-g r-open" data-i="' + i + '">' + (isLink ? 'Open link' : c.page ? 'Open at p. ' + c.page : 'Open') + '</button>' +
+          '<div class="r-actions"><button class="btn btn-g r-open" data-i="' + i + '">' + (isLink ? 'Open link' : c.page ? 'Open at ' + pageRef(c) : 'Open') + '</button>' +
           (reveal ? '<button class="btn btn-g r-reveal" data-i="' + i + '">Show in folder</button>' : '') + '</div>' +
           '<div class="r-full" style="display:none;">' + highlight(c.content, q) + '</div>' +
           '</div>'
@@ -1183,6 +1193,10 @@ body.member .admin-only { display: none !important; }
   let lastResults = []
   let lastQuery = ''
 
+  // "p. 4", "slide 4", "sheet 2" or "ch. 3", depending on the document's format (from src/formats.ts).
+  const PAGE_LABELS = __PAGE_LABELS__
+  function pageRef(chunk) { return (PAGE_LABELS[chunk.documentFormat] || 'p.') + ' ' + chunk.page }
+
   function fileName(p) { return p.split('/').pop().split(String.fromCharCode(92)).pop() || p }
 
   // Snippets come from the server with matches wrapped in \u0002 … \u0003; escape first, then mark.
@@ -1229,7 +1243,7 @@ body.member .admin-only { display: none !important; }
     document.querySelectorAll('.result').forEach(r => r.style.borderColor = 'var(--border)');
     el.style.borderColor = 'var(--lime)';
     const r = lastResults[Number(el.dataset.i)];
-    const file = el.querySelector('.r-file').textContent + (r && r.chunk.page ? ' · p. ' + r.chunk.page : '');
+    const file = el.querySelector('.r-file').textContent + (r && r.chunk.page ? ' · ' + pageRef(r.chunk) : '');
     const ext = el.querySelector('.r-ext') ? el.querySelector('.r-ext').textContent : '';
     const content = el.querySelector('.r-full').innerHTML;
     document.getElementById('viewerEmpty').style.display = 'none';

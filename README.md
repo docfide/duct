@@ -3,7 +3,7 @@
 ![Duct: Document Intelligence Pipeline](assets/social-preview.png)
 **Extract, chunk, embed, search, and ask — document intelligence in one command.**
 
-Duct is an open-source document intelligence pipeline. Point it at a PDF, DOCX, Markdown, image, HTML, or text file (or a whole directory), and it extracts the text, splits it into searchable chunks, and lets you query them instantly — with or without AI embeddings.
+Duct is an open-source document intelligence pipeline. Point it at almost any document (PDF, Word, Excel, PowerPoint, OpenDocument, Apple Pages/Numbers/Keynote, RTF, EPUB, email, Markdown, HTML, text, code, images or a ZIP of them), or a whole directory), and it extracts the text, splits it into searchable chunks, and lets you query them instantly — with or without AI embeddings.
 
 ```bash
 npx @docfide/duct index ./contracts/
@@ -45,7 +45,7 @@ No API keys required. No configuration files. Works offline.
 | **URL Indexing** | Index web pages by URL |
 | **Table Extraction** | Detects pipe and whitespace-separated tables |
 | **OCR** | Tesseract.js + sharp for scanned PDFs and images |
-| **All Formats** | PDF, DOCX, Markdown, HTML, plain text, images |
+| **Formats** | PDF; Word (.docx, .doc); Excel (.xlsx, .xls, .xlsb); PowerPoint; OpenDocument (.odt, .ods, .odp); Apple Pages, Numbers and Keynote; RTF; EPUB; email (.eml, Outlook .msg) with attachments; Markdown; HTML; text, CSV, JSON, YAML, subtitles; source code; SVG; images incl. iPhone HEIC (OCR); ZIP archives. See [docs/formats.md](docs/formats.md) |
 
 ## Documentation
 

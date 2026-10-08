@@ -42,9 +42,10 @@ describe('detectFormat', () => {
     expect(detectFormat('photo.webp')).toBe('image')
   })
 
-  it('falls back to txt for unknown extensions', () => {
+  it('maps text-like files and falls back to txt for unknown extensions', () => {
     expect(detectFormat('data.csv')).toBe('txt')
-    expect(detectFormat('script.js')).toBe('txt')
+    expect(detectFormat('script.js')).toBe('code')
+    expect(detectFormat('notes.xyz')).toBe('txt')
   })
 })
 

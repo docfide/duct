@@ -9,7 +9,6 @@ const WIDTH = 560
 const HEIGHT = 460
 const POLL_MS = 50
 const NOTCH_WIDTH = 200
-const DOCUMENT_EXTS = new Set(['.pdf', '.docx', '.md', '.markdown', '.html', '.htm', '.txt', '.csv', '.json', '.log', '.xml', '.xlsx', '.pptx', '.png', '.jpg', '.jpeg', '.tiff', '.tif', '.bmp', '.gif', '.webp'])
 
 /**
  * macOS doesn't tell Electron where the notch is. Notched MacBooks have a taller menu bar on the built-in
@@ -22,7 +21,7 @@ function screenMetrics(display) {
   return { bar: isMac ? menuBar : 0, notch: hasNotch ? NOTCH_WIDTH : 0 }
 }
 
-function createIsland({ serverUrl, onShowMain, onAddFiles, onWatchFolders, sound = true, hello = false }) {
+function createIsland({ serverUrl, onShowMain, onAddFiles, onWatchFolders, isSupportedFile, isPackage, sound = true, hello = false }) {
   let win = null
   let shape = null
   let inside = false
@@ -129,8 +128,9 @@ function createIsland({ serverUrl, onShowMain, onAddFiles, onWatchFolders, sound
     if (!fromIsland(event) || !Array.isArray(paths)) return null
     // Folders are watched, supported files go to the Library, and anything else is reported back by name.
     const existing = paths.filter(p => typeof p === 'string' && fs.existsSync(p))
-    const folders = existing.filter(p => fs.statSync(p).isDirectory())
-    const files = existing.filter(p => fs.statSync(p).isFile() && DOCUMENT_EXTS.has(path.extname(p).toLowerCase()))
+    // iWork documents saved as folders are documents, not folders to watch.
+    const folders = existing.filter(p => fs.statSync(p).isDirectory() && !isPackage(p))
+    const files = existing.filter(p => (fs.statSync(p).isFile() || isPackage(p)) && isSupportedFile(p))
     const unsupported = existing.filter(p => !folders.includes(p) && !files.includes(p)).map(p => path.basename(p))
     const result = files.length ? await onAddFiles(files) : { added: 0, duplicates: 0, failed: 0 }
     if (folders.length) await onWatchFolders(folders)

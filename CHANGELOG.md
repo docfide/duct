@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Browsers log in to a token-protected server once (`POST /api/login`, HttpOnly cookie).
 
 ### Added
+- Many more formats (see docs/formats.md): legacy Word (.doc), OpenDocument (.odt, .ods, .odp), Apple Pages/Numbers/Keynote (including package folders), RTF, EPUB, email (.eml, Outlook .msg, with attachments), old Excel (.xls, .xlsb), ZIP archives, subtitles, YAML/TOML and other text formats, source code, SVG text, and iPhone HEIC photos (OCR). PowerPoint speaker notes are indexed with their slide.
+- Results name the location by format: "slide 4", "sheet 2", "ch. 3" or "p. 12".
+- Folder scans skip `node_modules`, `.git`, caches, the Trash, hidden folders, Office lock files and `.env` files.
+- Text files in UTF-16 or Windows-1252 are decoded correctly instead of showing garbled characters.
 - Duct's own PDF viewer (`/viewer`, built on pdf.js): opens at the result's page and highlights the matched words, including stemmed forms ("terminate" highlights "termination"), with previous/next match, page and zoom controls.
 - The island: on macOS the mascot lives in the notch, or in a small pill in the menu bar on Macs without one. It shows indexing progress, greets you on launch, peeks out on hover and opens a quick search on click or with ⌘⇧Space (Ctrl+Shift+Space elsewhere). Drop files on it to add them to the Library. Toggle it from View or the tray menu.
 - The island's mascot looks at you: on hover and in quick search, a live SVG head follows the cursor with its eyes, tilts toward it and blinks.
