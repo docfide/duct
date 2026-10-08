@@ -298,3 +298,11 @@ dialog::backdrop { background: rgba(0,0,0,.55); }
 .account-card { border: 1px solid var(--border); border-radius: var(--rl); padding: 16px; background: var(--bg); display: flex; flex-direction: column; gap: 10px; }
 .account-card .plan { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--lime); }
 .account-card ul { margin: 0; padding-left: 18px; color: var(--body); font-size: 13px; }
+
+/* about: feedback and links */
+.about-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 16px 0 10px; }
+.panel .links { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; }
+.panel .links a { color: var(--lime); }
+#feedbackDialog textarea { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border2); border-radius: var(--r); padding: 8px 10px; font: inherit; font-size: 13px; resize: vertical; }
+#feedbackDialog textarea:focus { border-color: var(--lime); outline: none; }
+.telemetry-details pre { max-height: 220px; }

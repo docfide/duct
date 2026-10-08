@@ -11,6 +11,7 @@ import type { DuctConfig } from './types.js'
 import { createServer } from './server.js'
 import { FileAccountStorage, TensflareAccount } from './account.js'
 import { Telemetry } from './telemetry.js'
+import { installCrashHandlers } from './diagnostics.js'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { VERSION } from './version.js'
@@ -570,7 +571,10 @@ program
         ? ['localhost', '127.0.0.1', '::1', ...options.allowedHost]
         : options.allowedHost.length > 0 ? ['localhost', '127.0.0.1', '::1', ...options.allowedHost] : '*' as const
       const account = accountFor(dataDir(options.persist))
-      const telemetry = new Telemetry({ dir: dataDir(options.persist), channel: existsSync('/.dockerenv') ? 'docker' : 'server', duct, plan: () => account.status().plan })
+      const channel = existsSync('/.dockerenv') ? 'docker' : 'server'
+      const crashDir = join(dataDir(options.persist), 'crashes')
+      installCrashHandlers(crashDir, channel)
+      const telemetry = new Telemetry({ dir: dataDir(options.persist), channel, duct, plan: () => account.status().plan })
       telemetry.start()
       account.refresh().catch(() => {})
       const server = createServer(duct, {
@@ -582,6 +586,8 @@ program
         libraryDir: options.library,
         account,
         telemetry,
+        crashDir,
+        channel,
       })
       server.listen(options.port, options.host, () => {
         const shownHost = loopback ? 'localhost' : options.host

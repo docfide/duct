@@ -20,6 +20,7 @@ import type { ExportItem } from './export.js'
 import { createApiRouter } from './api/v1.js'
 import type { TensflareAccount } from './account.js'
 import type { Telemetry } from './telemetry.js'
+import { clearCrashes, collectDiagnostics, listCrashes, sendFeedback, validateFeedback } from './diagnostics.js'
 import { Collections } from './api/collections.js'
 import { FEATURE_LABELS, FEATURE_NAMES, FORMAT_KINDS, FeatureDisabledError } from './features.js'
 import type { FeatureName } from './features.js'
@@ -86,6 +87,12 @@ export interface ServerOptions {
   account?: TensflareAccount
   /** Anonymous usage counts (src/telemetry.ts). Without it the server counts and sends nothing. */
   telemetry?: Telemetry
+  /** Where crash records are kept (see src/diagnostics.ts). */
+  crashDir?: string
+  /** How Duct is running, for diagnostics: desktop, server, docker or cli. */
+  channel?: string
+  /** Overrides where feedback is sent (tests, staging). */
+  feedbackUrl?: string
 }
 
 /** 403 for a switched-off feature, otherwise `status` with the error's message. */
@@ -328,6 +335,39 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     if (typeof req.body?.enabled !== 'boolean') { res.status(400).json({ error: 'Send { "enabled": true | false }' }); return }
     telemetry.setEnabled(req.body.enabled)
     res.json({ available: true, ...telemetry.status() })
+  })
+
+  // ---------- diagnostics, crash records and feedback (never document content) ----------
+
+  const channel = opts?.channel ?? 'server'
+  const crashDir = opts?.crashDir
+
+  app.get('/api/diagnostics', (_req, res) => {
+    res.json(collectDiagnostics(duct, channel, crashDir))
+  })
+
+  app.get('/api/crashes', adminOnly, (_req, res) => {
+    res.json({ crashes: crashDir ? listCrashes(crashDir) : [] })
+  })
+
+  app.delete('/api/crashes', adminOnly, (_req, res) => {
+    if (crashDir) clearCrashes(crashDir)
+    res.json({ ok: true })
+  })
+
+  // The page shows what will be sent before this is called; diagnostics and crash records are added here,
+  // from the same functions, only when the person ticked them.
+  app.post('/api/feedback', async (req, res) => {
+    let input
+    try { input = validateFeedback(req.body) } catch (err) { res.status(400).json({ error: (err as Error).message }); return }
+    if (req.body?.includeDiagnostics === true) input.diagnostics = collectDiagnostics(duct, channel, crashDir)
+    if (req.body?.includeCrashes === true && crashDir) input.crashes = listCrashes(crashDir).slice(0, 10)
+    try {
+      await sendFeedback(input, { url: opts?.feedbackUrl })
+      res.json({ ok: true })
+    } catch (err) {
+      res.status(502).json({ error: (err as Error).message })
+    }
   })
 
   app.get('/api/features', (_req, res) => {

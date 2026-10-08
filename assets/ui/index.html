@@ -249,6 +249,19 @@
           <p><strong>Duct</strong> <span data-bind="version"></span></p>
           <p class="hint">Reads <span data-bind="supported"></span>.</p>
           <p class="hint">Your documents are indexed on this computer. Search runs locally; AI features only send passages to the provider you choose.</p>
+          <div class="about-actions">
+            <button class="btn btn-primary" data-action="open-feedback">Send feedback</button>
+            <button class="btn" data-action="copy-diagnostics">Copy diagnostics</button>
+          </div>
+          <p class="hint" id="crashSummary" hidden></p>
+          <h3>Legal</h3>
+          <p class="links">
+            <a href="https://duct.tensflare.com/legal/privacy/" target="_blank" rel="noopener">Privacy policy</a>
+            <a href="https://duct.tensflare.com/legal/terms/" target="_blank" rel="noopener">Terms of service</a>
+            <a href="https://duct.tensflare.com/privacy/usage-counts/" target="_blank" rel="noopener">What Duct sends</a>
+            <a href="https://duct.tensflare.com/legal/refunds/" target="_blank" rel="noopener">Refunds</a>
+          </p>
+          <p class="hint">Duct is open source under the Apache 2.0 licence. © Tensflare Ltd.</p>
         </section>
       </div>
     </div>
@@ -280,6 +293,27 @@
         <button class="btn" data-collect-export="md">Markdown</button>
         <button class="btn" data-collect-export="csv">CSV</button>
         <button class="btn btn-primary" data-collect-export="docx">Word document</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="feedbackDialog" class="collect-dialog" aria-labelledby="feedbackTitle">
+    <form method="dialog" class="settings-head">
+      <h2 id="feedbackTitle">Send feedback</h2>
+      <button class="icon-btn" aria-label="Close">✕</button>
+    </form>
+    <div class="collect-body">
+      <p class="hint">Tell us what worked, what didn’t, or what you expected. It goes to the Duct team at Tensflare.</p>
+      <label class="field"><span>Your message</span><textarea id="feedbackMessage" rows="6" maxlength="5000" placeholder="What happened? What did you expect?"></textarea></label>
+      <label class="field"><span>Email <small>optional, if you’d like a reply</small></span><input type="email" id="feedbackEmail" maxlength="254"></label>
+      <label class="check"><input type="checkbox" id="feedbackDiag" checked> <span><strong>Include diagnostics</strong><small>Version, operating system, settings and error codes. Never your documents, file names, paths or searches.</small></span></label>
+      <details class="telemetry-details"><summary>See exactly what’s included</summary><pre id="feedbackDiagPreview"></pre></details>
+      <label class="check" id="feedbackCrashRow" hidden><input type="checkbox" id="feedbackCrashes"> <span><strong>Include crash reports (<span id="feedbackCrashCount">0</span>)</strong><small>The type of error and the place in Duct’s code where it happened. No messages, documents or paths.</small></span></label>
+      <details class="telemetry-details" id="feedbackCrashDetails" hidden><summary>See the crash reports</summary><pre id="feedbackCrashPreview"></pre></details>
+      <div class="dialog-actions">
+        <a class="btn btn-ghost" id="feedbackEmailLink" href="mailto:duct@tensflare.com">Email instead</a>
+        <span class="spacer"></span>
+        <button class="btn btn-primary" data-action="send-feedback">Send</button>
       </div>
     </div>
   </dialog>

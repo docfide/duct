@@ -1033,6 +1033,69 @@ async function openSettings(tab = 'general') {
   if (!dialog.open) dialog.showModal()
 }
 
+// ---------- feedback, diagnostics and crash reports ----------
+
+async function copyDiagnostics() {
+  try {
+    const d = await json('/api/diagnostics')
+    await navigator.clipboard.writeText('Duct diagnostics\n' + JSON.stringify(d, null, 2))
+    toast('Diagnostics copied: no documents, file names or searches')
+  } catch (err) { toast('Couldn’t copy diagnostics: ' + err.message, true) }
+}
+
+async function openFeedback() {
+  if ($('#settings').open) $('#settings').close()
+  const [diag, crashes, account] = await Promise.all([
+    json('/api/diagnostics').catch(() => null),
+    isAdmin() ? json('/api/crashes').catch(() => ({ crashes: [] })) : Promise.resolve({ crashes: [] }),
+    json('/api/account').catch(() => ({})),
+  ])
+  $('#feedbackDiagPreview').textContent = diag ? JSON.stringify(diag, null, 2) : 'Diagnostics are unavailable.'
+  const list = crashes.crashes || []
+  $('#feedbackCrashRow').hidden = $('#feedbackCrashDetails').hidden = list.length === 0
+  $('#feedbackCrashCount').textContent = String(list.length)
+  $('#feedbackCrashes').checked = list.length > 0
+  $('#feedbackCrashPreview').textContent = JSON.stringify(list.slice(0, 10), null, 2)
+  if (account.email && !$('#feedbackEmail').value) $('#feedbackEmail').value = account.email
+  updateFeedbackMailto()
+  $('#feedbackDialog').showModal()
+  $('#feedbackMessage').focus()
+}
+
+function updateFeedbackMailto() {
+  const body = $('#feedbackMessage').value + ($('#feedbackDiag').checked ? '\n\n---\n' + $('#feedbackDiagPreview').textContent : '')
+  $('#feedbackEmailLink').href = 'mailto:duct@tensflare.com?subject=' + encodeURIComponent('Duct feedback') + '&body=' + encodeURIComponent(body.slice(0, 1800))
+}
+$('#feedbackMessage').addEventListener('input', updateFeedbackMailto)
+$('#feedbackDiag').addEventListener('change', updateFeedbackMailto)
+
+async function sendFeedbackNow() {
+  const message = $('#feedbackMessage').value.trim()
+  if (!message) { toast('Write a message first', true); $('#feedbackMessage').focus(); return }
+  const btn = $('[data-action="send-feedback"]')
+  btn.disabled = true
+  btn.textContent = 'Sending…'
+  try {
+    await send('POST', '/api/feedback', { message, email: $('#feedbackEmail').value.trim() || undefined, includeDiagnostics: $('#feedbackDiag').checked, includeCrashes: $('#feedbackCrashes').checked })
+    $('#feedbackMessage').value = ''
+    $('#feedbackDialog').close()
+    toast('Thanks! Your feedback was sent.')
+  } catch (err) {
+    toast(err.message + ' You can use “Email instead”.', true)
+  } finally {
+    btn.disabled = false
+    btn.textContent = 'Send'
+  }
+}
+
+async function renderCrashSummary() {
+  if (!isAdmin()) return
+  const list = (await json('/api/crashes').catch(() => ({ crashes: [] }))).crashes || []
+  const el = $('#crashSummary')
+  el.hidden = list.length === 0
+  el.innerHTML = list.length ? esc(plural(list.length, 'crash report')) + ' saved on this device. They’re only sent if you include them with feedback. <button class="link" data-action="clear-crashes">Delete them</button>' : ''
+}
+
 // ---------- account (Sign in with Tensflare) and usage counts ----------
 
 const ENTITLEMENT_LABELS = { 'ai.hosted': 'Search by meaning and AI answers without your own API key', 'sync.devices': 'Sync settings and sources across devices', 'team.workspace': 'Shared team search', 'team.connectors': 'Connectors (Drive, SharePoint, S3…)', 'team.sso': 'Google and Microsoft sign-in for your team', 'enterprise.byoc': 'Deployment in your own cloud', 'enterprise.offline_licence': 'Offline licence', 'enterprise.scim': 'User provisioning' }
@@ -1080,6 +1143,7 @@ async function renderTelemetry() {
 
 function showTab(tab) {
   if (tab === 'account') renderAccount()
+  if (tab === 'about') renderCrashSummary()
   $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab))
   $$('.panel').forEach(p => { p.hidden = p.dataset.panel !== tab })
 }
@@ -1202,6 +1266,13 @@ const ACTIONS = {
   'toggle-sidebar': () => $('#sidebar').classList.toggle('open'),
   'export': () => exportResults('csv'),
   'toggle-export': () => { const menu = $('#exportMenu'); menu.hidden = !menu.hidden; $('[data-action="toggle-export"]').setAttribute('aria-expanded', String(!menu.hidden)) },
+  'open-feedback': () => openFeedback(),
+  'copy-diagnostics': () => copyDiagnostics(),
+  'send-feedback': () => sendFeedbackNow(),
+  'clear-crashes': async () => {
+    try { await json('/api/crashes', { method: 'DELETE' }); toast('Crash reports deleted') } catch (err) { toast(err.message, true) }
+    renderCrashSummary()
+  },
   'account-signin': async () => {
     try { await send('POST', '/api/account/signin', {}); renderAccount() } catch (err) { toast(err.message, true) }
   },
@@ -1288,6 +1359,8 @@ window.duct = {
   focusSearch: () => { showApp(); setMode('search'); focusSearch() },
   openSettings: () => openSettings(),
   exportResults,
+  openFeedback: () => { showApp(); openFeedback() },
+  copyDiagnostics: () => copyDiagnostics(),
 }
 
 start()

@@ -174,6 +174,17 @@ function accountStorage() {
   }
 }
 
+// Crash records (src/diagnostics.ts): error type and Duct's own stack frames only, kept on this device until
+// the person chooses to send them with feedback.
+function crashDir() { return path.join(app.getPath('userData'), 'crashes') }
+let diagnostics = null
+async function installCrashRecording() {
+  diagnostics = await import('../dist/diagnostics.js')
+  diagnostics.installCrashHandlers(crashDir(), 'main')
+  app.on('render-process-gone', (_e, _wc, details) => diagnostics.recordCrash(crashDir(), 'page', details.reason))
+  app.on('child-process-gone', (_e, details) => { if (details.reason !== 'clean-exit') diagnostics.recordCrash(crashDir(), details.type, details.reason) })
+}
+
 async function startServer() {
   const { createServer } = await import('../dist/server.js')
   const { TensflareAccount } = await import('../dist/account.js')
@@ -187,7 +198,7 @@ async function startServer() {
     prefs: () => ({ island: islandEnabled(), sounds: soundsEnabled() }),
   })
   telemetry.start()
-  const expressApp = createServer(duct, { uploadLimitMb: 100, libraryDir: libraryDir(), onSecrets: saveSecrets, account, telemetry })
+  const expressApp = createServer(duct, { uploadLimitMb: 100, libraryDir: libraryDir(), onSecrets: saveSecrets, account, telemetry, crashDir: crashDir(), channel: 'desktop' })
   return new Promise((resolve) => {
     server = expressApp.listen(0, '127.0.0.1', () => {
       serverUrl = `http://127.0.0.1:${server.address().port}`
@@ -198,7 +209,7 @@ async function startServer() {
 
 /** Calls one of the page's window.duct functions (assets/ui/app.js). */
 function callPage(name) {
-  if (!['refresh', 'showFailed', 'focusSearch', 'openSettings', 'exportResults'].includes(name)) return
+  if (!['refresh', 'showFailed', 'focusSearch', 'openSettings', 'exportResults', 'openFeedback', 'copyDiagnostics'].includes(name)) return
   mainWindow?.webContents.executeJavaScript(`window.duct && window.duct.${name}()`).catch(() => {})
 }
 
@@ -373,14 +384,13 @@ function createAppMenu() {
     {
       label: 'Help',
       submenu: [
-        {
-          label: 'Documentation',
-          click: () => shell.openExternal('https://github.com/docfide/duct'),
-        },
-        {
-          label: 'Report Issue',
-          click: () => shell.openExternal('https://github.com/docfide/duct/issues'),
-        },
+        { label: 'Send Feedback…', click: () => { mainWindow?.show(); callPage('openFeedback') } },
+        { label: 'Copy Diagnostics', click: () => callPage('copyDiagnostics') },
+        { type: 'separator' },
+        { label: 'Documentation', click: () => shell.openExternal('https://github.com/docfide/duct/tree/main/docs') },
+        { label: 'What Duct Sends', click: () => shell.openExternal('https://duct.tensflare.com/privacy/usage-counts/') },
+        { label: 'Privacy Policy', click: () => shell.openExternal('https://duct.tensflare.com/legal/privacy/') },
+        { label: 'Terms of Service', click: () => shell.openExternal('https://duct.tensflare.com/legal/terms/') },
       ],
     },
   ]
@@ -522,6 +532,7 @@ ipcMain.handle('prefs:set', (_event, name, on) => {
 
 app.whenReady().then(async () => {
   if (!gotLock) return
+  await installCrashRecording()
   await createDuct()
   const url = await startServer()
   console.log(`  Server started at ${url}`)
