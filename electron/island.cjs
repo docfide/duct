@@ -22,12 +22,13 @@ function screenMetrics(display) {
   return { bar: isMac ? menuBar : 0, notch: hasNotch ? NOTCH_WIDTH : 0 }
 }
 
-function createIsland({ serverUrl, onShowMain, onAddFiles, sound = true, hello = false }) {
+function createIsland({ serverUrl, onShowMain, onAddFiles, onWatchFolders, sound = true, hello = false }) {
   let win = null
   let shape = null
   let inside = false
   let timer = null
   let metrics = null
+  let lastCursor = ''
 
   function frameFor(display) {
     return { x: Math.round(display.bounds.x + display.bounds.width / 2 - WIDTH / 2), y: display.bounds.y, width: WIDTH, height: HEIGHT }
@@ -88,6 +89,12 @@ function createIsland({ serverUrl, onShowMain, onAddFiles, sound = true, hello =
     if (!win || win.isDestroyed() || !shape) return
     const point = screen.getCursorScreenPoint()
     const bounds = win.getBounds()
+    // The mascot's eyes follow the cursor, so the page gets its position relative to the window.
+    const cursor = `${point.x - bounds.x},${point.y - bounds.y}`
+    if (cursor !== lastCursor) {
+      lastCursor = cursor
+      win.webContents.send('island:cursor', { x: point.x - bounds.x, y: point.y - bounds.y })
+    }
     const now = point.x >= bounds.x + shape.x && point.x <= bounds.x + shape.x + shape.w &&
       point.y >= bounds.y + shape.y && point.y <= bounds.y + shape.y + shape.h
     if (now === inside) return
@@ -115,13 +122,19 @@ function createIsland({ serverUrl, onShowMain, onAddFiles, sound = true, hello =
     },
     'island:focus': event => { if (fromIsland(event)) win.focus() },
     'island:blur': event => { if (fromIsland(event)) win.blur() },
-    'island:show-main': event => { if (fromIsland(event)) onShowMain() },
+    'island:show-main': (event, view) => { if (fromIsland(event)) onShowMain(view === 'failed' ? 'failed' : null) },
   }
   for (const [channel, handler] of Object.entries(handlers)) ipcMain.on(channel, handler)
   ipcMain.handle('island:add-files', async (event, paths) => {
     if (!fromIsland(event) || !Array.isArray(paths)) return null
-    const files = paths.filter(p => typeof p === 'string' && DOCUMENT_EXTS.has(path.extname(p).toLowerCase()) && fs.existsSync(p) && fs.statSync(p).isFile())
-    return files.length ? onAddFiles(files) : { added: 0, duplicates: 0 }
+    // Folders are watched, supported files go to the Library, and anything else is reported back by name.
+    const existing = paths.filter(p => typeof p === 'string' && fs.existsSync(p))
+    const folders = existing.filter(p => fs.statSync(p).isDirectory())
+    const files = existing.filter(p => fs.statSync(p).isFile() && DOCUMENT_EXTS.has(path.extname(p).toLowerCase()))
+    const unsupported = existing.filter(p => !folders.includes(p) && !files.includes(p)).map(p => path.basename(p))
+    const result = files.length ? await onAddFiles(files) : { added: 0, duplicates: 0, failed: 0 }
+    if (folders.length) await onWatchFolders(folders)
+    return { ...result, unsupported, watched: folders }
   })
   screen.on('display-metrics-changed', onDisplaysChanged)
   screen.on('display-added', onDisplaysChanged)

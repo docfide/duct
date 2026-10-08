@@ -47,7 +47,15 @@ function startIsland() {
     serverUrl,
     sound: soundsEnabled(),
     hello: !prefs.greeted,
-    onShowMain: () => { mainWindow?.show(); mainWindow?.focus() },
+    onShowMain: view => {
+      mainWindow?.show()
+      mainWindow?.focus()
+      if (view === 'failed') mainWindow?.webContents.executeJavaScript('typeof showFailedDocuments === "function" && showFailedDocuments()').catch(() => {})
+    },
+    onWatchFolders: async folders => {
+      await duct.watch(folders, refreshPage)
+      refreshPage()
+    },
     onAddFiles: async files => {
       const result = await addFilesToLibrary(files)
       notify(`Added ${result.added} file(s) to your Duct Library` + (result.duplicates ? `, skipped ${result.duplicates} already indexed` : ''))
@@ -126,13 +134,15 @@ function notify(body) {
 async function addFilesToLibrary(filePaths) {
   let added = 0
   let duplicates = 0
+  let failed = 0
   for (const file of filePaths) {
     const r = await library.addToLibrary(duct, libraryDir(), file)
     if (r.duplicateOf) duplicates++
     else added += r.documents
+    failed += r.failed ?? 0
   }
   refreshPage()
-  return { added, duplicates }
+  return { added, duplicates, failed }
 }
 
 function createWindow() {

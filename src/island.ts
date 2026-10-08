@@ -35,6 +35,11 @@ html, body { margin: 0; height: 100%; background: transparent; overflow: hidden;
 #pill .live-text { font-family: var(--mono); font-size: 11px; color: var(--lime); white-space: nowrap; }
 #pill .live-text.done { color: var(--text); }
 #pill.compact { justify-content: center; }
+#pill .live-text.warn { color: #E8A020; }
+.live-head { display: none; flex-shrink: 0; overflow: visible; cursor: pointer; }
+#pill .live-head { width: 22px; height: 22px; }
+#peek .live-head { width: 76px; height: 76px; }
+.search-row .live-head { width: 44px; height: 44px; }
 
 /* peek and drop */
 #peek { display: flex; align-items: center; gap: 12px; padding: 0 18px; }
@@ -99,6 +104,62 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
     nothingFound: 'Pose - Nothing Found', needsHand: 'Pose - Needs a Hand', resting: 'Pose - Resting',
   }
 
+  // ---------- the live head ----------
+  // The three-quarter head drawn as SVG so it can react: pupils follow the cursor, the head tilts toward
+  // it, and it blinks now and then. Animated poses (working, resting, …) still come from the Lottie file.
+  const SLOTS = { mini: 'miniCanvas', big: 'bigCanvas', search: 'searchCanvas' }
+  const HEAD_SVG = '<svg class="live-head" viewBox="100 130 340 300" aria-hidden="true"><g class="lh-tilt">' +
+    '<ellipse cx="376" cy="192" rx="30" ry="32" fill="#e9d8b4"/><ellipse cx="160" cy="188" rx="40" ry="40" fill="#e9d8b4"/>' +
+    '<ellipse cx="268" cy="275" rx="150" ry="130" fill="#e9d8b4"/><ellipse cx="288" cy="258" rx="110" ry="48" fill="#b08a5c"/>' +
+    '<ellipse cx="318" cy="338" rx="62" ry="44" fill="#f0efe8"/><ellipse cx="330" cy="318" rx="15" ry="11" fill="#0c0c0b"/>' +
+    '<g class="lh-eyes"><ellipse cx="238" cy="258" rx="21" ry="24" fill="#0c0c0b"/><ellipse cx="330" cy="258" rx="17" ry="23" fill="#0c0c0b"/>' +
+    '<ellipse cx="244" cy="248" rx="7" ry="7" fill="#f0efe8"/><ellipse cx="335" cy="248" rx="6" ry="6" fill="#f0efe8"/></g>' +
+    '<ellipse cx="238" cy="258" rx="39" ry="39" fill="none" stroke="#a3e635" stroke-width="8"/>' +
+    '<ellipse cx="330" cy="258" rx="33" ry="37" fill="none" stroke="#a3e635" stroke-width="8"/>' +
+    '<rect x="275" y="252" width="18" height="8" fill="#a3e635"/></g></svg>'
+  const heads = []
+  for (const id of Object.values(SLOTS)) {
+    const canvas = document.getElementById(id)
+    canvas.insertAdjacentHTML('afterend', HEAD_SVG)
+    const svg = canvas.nextElementSibling
+    heads.push({ svg, tilt: svg.querySelector('.lh-tilt'), eyes: svg.querySelector('.lh-eyes'), ex: 0, ey: 0, rot: 0, last: '' })
+  }
+  let nextBlink = Date.now() + 2500
+  let blinkUntil = 0
+  function trackHeads() {
+    const now = Date.now()
+    if (now > nextBlink) { blinkUntil = now + 140; nextBlink = now + 2500 + Math.random() * 3500 }
+    const blink = now < blinkUntil && !reduceMotion
+    for (const h of heads) {
+      if (h.svg.style.display !== 'block') continue
+      const r = h.svg.getBoundingClientRect()
+      if (!r.width) continue
+      let tx = 0, ty = 0, trot = 0
+      if (pointer.x >= 0 && !reduceMotion) {
+        const dx = pointer.x - (r.left + r.width / 2)
+        const dy = pointer.y - (r.top + r.height / 2)
+        const dist = Math.hypot(dx, dy) || 1
+        const reach = Math.min(1, dist / 160)
+        tx = dx / dist * reach * 11
+        ty = dy / dist * reach * 9
+        trot = Math.max(-1, Math.min(1, dx / 420)) * 9
+      }
+      // Ease toward the target so the head moves smoothly instead of snapping.
+      h.ex += (tx - h.ex) * 0.22
+      h.ey += (ty - h.ey) * 0.22
+      h.rot += (trot - h.rot) * 0.12
+      const tilt = 'rotate(' + h.rot.toFixed(1) + ' 268 400) translate(' + (h.ex * 0.4).toFixed(1) + ' ' + (h.ey * 0.3).toFixed(1) + ')'
+      const eyes = 'translate(' + h.ex.toFixed(1) + ' ' + h.ey.toFixed(1) + ')' + (blink ? ' translate(0 258) scale(1 0.12) translate(0 -258)' : '')
+      if (tilt + eyes !== h.last) {
+        h.tilt.setAttribute('transform', tilt)
+        h.eyes.setAttribute('transform', eyes)
+        h.last = tilt + eyes
+      }
+    }
+    requestAnimationFrame(trackHeads)
+  }
+  requestAnimationFrame(trackHeads)
+
   let state = 'hidden'       // hidden | live | peek | search | drop
   let liveKind = null        // working | done
   let pointerInside = false
@@ -111,6 +172,11 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
   let selected = 0
   let lastQuery = ''
   let indexingSince = 0
+  let lastRunSeen = 0
+  let failures = null        // { count, names } from the latest run that had unreadable files
+  let notice = null          // a short message in the peek, e.g. after dropping files
+  let noticeTimer = null
+  let pointer = { x: -1, y: -1 }
 
   // ---------- shape ----------
   function sizeFor(s) {
@@ -120,7 +186,7 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
       if (isMac) return { w: COMPACT, h: top, cls: '' }
       return { w: COMPACT, h: 6, cls: 'handle' }
     }
-    if (s === 'live') return { w: (NOTCH || COMPACT) + WING * 2, h: Math.max(top, 30), cls: '' }
+    if (s === 'live') return { w: (NOTCH || COMPACT) + (liveKind === 'needsHand' ? WING + 70 : WING) * 2, h: Math.max(top, 30), cls: '' }
     if (s === 'peek' || s === 'drop') return { w: Math.max((NOTCH || COMPACT) + WING * 2, 380), h: top + 100, cls: 'large' }
     // Search grows with its results: search row, one row per result (at least one line of text), footer.
     const rows = lastQuery ? Math.max(1, results.length) : 1
@@ -155,15 +221,23 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
   function idlePose() { return sources.length > 0 ? 'resting' : 'head' }
   function posesFor() {
     if (poseOverride) return { mini: poseOverride, big: poseOverride }
+    if (notice) return { mini: notice.pose, big: notice.pose }
     if (state === 'drop') return { mini: 'welcome', big: 'welcome' }
     if (activity.indexing) return { mini: 'working', big: 'working' }
+    if (liveKind === 'needsHand') return { mini: 'needsHand', big: 'needsHand' }
     if (liveKind === 'done') return { mini: 'done', big: 'done' }
     if (state === 'peek' && greeting) return { mini: 'welcome', big: 'welcome' }
-    return { mini: idlePose(), big: state === 'search' ? 'head' : (sources.length ? 'resting' : 'welcome') }
+    // When you come close it wakes up and looks at you ('head' is the live head that follows the cursor).
+    return { mini: idlePose(), big: 'head' }
   }
   function setPose(key, pose) {
     const p = players[key]
-    if (!p || !p.ready || p.pose === pose) return
+    const live = pose === 'head'
+    const canvas = document.getElementById(SLOTS[key])
+    canvas.style.display = live ? 'none' : ''
+    canvas.nextElementSibling.style.display = live ? 'block' : 'none'
+    if (p) p.live = live
+    if (!p || !p.ready || live || p.pose === pose) return
     p.pose = pose
     p.player.loadAnimation(POSES[pose])
   }
@@ -183,8 +257,9 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
     const visible = visibleMascots()
     for (const [key, p] of Object.entries(players)) {
       if (!p.ready || reduceMotion) continue
-      if (visible[key] && !p.player.isPlaying) p.player.play()
-      if (!visible[key] && p.player.isPlaying) p.player.pause()
+      const show = visible[key] && !p.live
+      if (show && !p.player.isPlaying) p.player.play()
+      if (!show && p.player.isPlaying) p.player.pause()
     }
   }
   async function startMascots() {
@@ -195,9 +270,11 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
         const player = new DotLottie({ canvas: document.getElementById(id), src: '/mascot/mascot.lottie', animationId: POSES.head, autoplay: !reduceMotion, loop: true })
         players[key] = { player, ready: false, pose: 'head' }
         player.addEventListener('load', () => {
+          const first = !players[key].ready
           players[key].ready = true
+          if (first) { players[key].pose = 'head'; refreshMascots() }
           if (reduceMotion) player.setFrame(Math.floor(player.totalFrames / 2))
-          else if (visibleMascots()[key]) player.play()
+          else if (visibleMascots()[key] && !players[key].live) player.play()
           else player.pause()
         })
       }
@@ -255,6 +332,8 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
   }
   document.getElementById('bigCanvas').addEventListener('click', e => { e.stopPropagation(); poke() })
   document.getElementById('searchCanvas').addEventListener('click', e => { e.stopPropagation(); poke() })
+  for (const h of heads.slice(1)) h.svg.addEventListener('click', e => { e.stopPropagation(); poke() })
+  api.onCursor(p => { pointer = p })
 
   // ---------- status ----------
   function fmt(n) { return Number(n || 0).toLocaleString() }
@@ -267,9 +346,15 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
   function renderText() {
     const title = document.getElementById('peekTitle')
     const sub = document.getElementById('peekSub')
-    if (state === 'drop') {
+    if (notice) {
+      title.textContent = notice.title
+      sub.textContent = notice.sub
+    } else if (state === 'drop') {
       title.textContent = 'Drop to add to your Library'
-      sub.textContent = 'Files are copied to ~/Duct Library and indexed.'
+      sub.textContent = 'Files are copied to ~/Duct Library and indexed. Drop a folder to watch it.'
+    } else if (liveKind === 'needsHand' && failures) {
+      title.textContent = "I couldn't read " + failures.count + ' file' + (failures.count === 1 ? '' : 's')
+      sub.textContent = failures.names.slice(0, 2).join(', ') + (failures.count > 2 ? ' and ' + (failures.count - 2) + ' more' : '') + '. Click to see them.'
     } else if (greeting) {
       title.textContent = 'Hi! I can find anything in your documents.'
       sub.innerHTML = 'Hover here anytime, or press <kbd>' + (isMac ? '⌘⇧Space' : 'Ctrl+Shift+Space') + '</kbd>'
@@ -280,6 +365,7 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
     document.getElementById('footStatus').textContent = statusLine()
     const live = document.getElementById('liveText')
     if (activity.indexing) { live.className = 'live-text'; live.textContent = fmt(activity.done) + '/' + fmt(activity.total) }
+    else if (liveKind === 'needsHand' && failures) { live.className = 'live-text warn'; live.textContent = failures.count + " couldn't be read" }
     else if (liveKind === 'done') { live.className = 'live-text done'; live.textContent = '✓ ' + fmt(stats.documents) }
     else live.textContent = ''
   }
@@ -297,11 +383,23 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
       if (a.indexing && state === 'hidden') { liveKind = 'working'; setState('live') }
       if (!a.indexing && wasIndexing) {
         // Finished: a short celebration in the wings, then tuck away again. Only long jobs get a chime.
-        liveKind = 'done'
-        if (Date.now() - indexingSince >= 8000) sound('done')
+        liveKind = a.lastRun && a.lastRun.failed > 0 ? liveKind : 'done'
+        if (liveKind === 'done' && Date.now() - indexingSince >= 8000) sound('done')
         if (state === 'hidden' || state === 'live') setState('live')
         clearTimeout(liveTimer)
-        liveTimer = setTimeout(() => { liveKind = null; if (state === 'live') setState('hidden'); else refreshMascots(); renderText() }, 3500)
+        if (liveKind === 'done') liveTimer = setTimeout(() => { liveKind = null; if (state === 'live') setState('hidden'); else refreshMascots(); renderText() }, 3500)
+      }
+      const run = a.lastRun
+      if (run && run.id !== lastRunSeen) {
+        lastRunSeen = run.id
+        if (run.failed > 0) {
+          // Unreadable files: the head-tilting "needs a hand" pose stays in the wings until you look.
+          failures = { count: run.failed, names: run.failures.map(f => f.name) }
+          liveKind = 'needsHand'
+          clearTimeout(liveTimer)
+          if (state === 'hidden' || state === 'live') setState('live')
+          sound('oops')
+        }
       }
       refreshMascots()
       renderText()
@@ -326,13 +424,28 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
 
   function collapse() {
     greeting = false
-    setState(activity.indexing || liveKind === 'done' ? 'live' : 'hidden')
+    setState(activity.indexing || liveKind ? 'live' : 'hidden')
     renderText()
   }
 
   document.getElementById('island').addEventListener('click', () => {
+    if (liveKind === 'needsHand' && state !== 'search') {
+      liveKind = null
+      failures = null
+      api.showMain('failed')
+      collapse()
+      return
+    }
     if (state !== 'search') openSearch()
   })
+
+  function showNotice(n) {
+    notice = n
+    clearTimeout(noticeTimer)
+    setState('peek')
+    renderText()
+    noticeTimer = setTimeout(() => { notice = null; if (!pointerInside) collapse(); else { refreshMascots(); renderText() } }, 5000)
+  }
 
   function openSearch() {
     if (state !== 'search') sound('open')
@@ -423,8 +536,23 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
     const files = Array.from(e.dataTransfer ? e.dataTransfer.files : [])
     collapse()
     if (!files.length) return
-    const result = await api.addFiles(files)
-    sound(result && result.added > 0 ? 'gulp' : result && result.duplicates > 0 ? 'boop' : 'oops')
+    const r = (await api.addFiles(files)) || {}
+    const unsupported = r.unsupported || []
+    if (unsupported.length || r.failed) {
+      sound('oops')
+      const exts = [...new Set(unsupported.map(n => (n.match(/\.[^.]+$/) || ['these'])[0].toLowerCase()))]
+      showNotice(unsupported.length
+        ? { pose: 'needsHand', title: "I can't read " + exts.slice(0, 3).join(', ') + ' files', sub: 'I read PDF, Word, Excel, PowerPoint, Markdown, HTML, text and images.' + (r.added ? ' Added ' + r.added + ' other file' + (r.added === 1 ? '' : 's') + '.' : '') }
+        : { pose: 'needsHand', title: "I couldn't read " + r.failed + ' file' + (r.failed === 1 ? '' : 's'), sub: 'They are in your Library but have no text I can use.' })
+    } else if ((r.watched || []).length) {
+      sound('gulp')
+      showNotice({ pose: 'done', title: 'Watching ' + fileName(r.watched[0]), sub: 'New and changed files there are indexed automatically.' })
+    } else if (r.added > 0) {
+      sound('gulp')
+    } else if (r.duplicates > 0) {
+      sound('boop')
+      showNotice({ pose: 'head', title: 'Already in your Library', sub: 'Those files were indexed before.' })
+    }
   })
 
   // ---------- start: a short wake-and-wave greeting ----------

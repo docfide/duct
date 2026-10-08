@@ -728,6 +728,7 @@ body.member .admin-only { display: none !important; }
           <span style="color:var(--lime);cursor:pointer;" onclick="toggleDocs()">[show]</span>
         </div>
         <div id="docList" style="display:none; max-height:200px; overflow-y:auto;">
+          <div id="docFilterNote" style="display:none;font-family:var(--mono);font-size:10px;color:var(--warning);padding-bottom:6px;">Files Duct couldn't read · <span style="color:var(--lime);cursor:pointer;" onclick="showAllDocuments()">show all</span></div>
           <div id="docEmpty" style="font-family:var(--mono);font-size:10px;color:var(--muted);">No documents indexed.</div>
           <div id="docItems"></div>
         </div>
@@ -1259,9 +1260,23 @@ body.member .admin-only { display: none !important; }
     return data
   }
 
+  // The island's "needs a hand" opens Duct here: only the files that couldn't be read, with their errors.
+  let docFilter = null
+  function showFailedDocuments() {
+    docFilter = 'failed'
+    document.getElementById('docList').style.display = 'block'
+    refreshDocs().then(() => document.getElementById('docList').scrollIntoView({ behavior: 'smooth', block: 'center' }))
+  }
+  function showAllDocuments() {
+    docFilter = null
+    refreshDocs()
+  }
+
   async function refreshDocs() {
     const res = await fetch('/api/documents'); const data = await res.json()
-    const docs = data.documents || []
+    const all = data.documents || []
+    const docs = docFilter === 'failed' ? all.filter(d => d.status === 'failed') : all
+    document.getElementById('docFilterNote').style.display = docFilter === 'failed' ? 'block' : 'none'
     const empty = document.getElementById('docEmpty')
     const items = document.getElementById('docItems')
     if (docs.length === 0) {
@@ -1270,7 +1285,7 @@ body.member .admin-only { display: none !important; }
       empty.style.display = 'none'
       items.innerHTML = docs.map(d => {
         const name = d.displayName || d.path.split('/').pop() || d.path
-        const meta = d.status === 'failed' ? '<span class="badge b-err" title="' + esc(d.error || '') + '">failed</span>'
+        const meta = d.status === 'failed' ? '<span class="badge b-err" title="' + esc(d.error || '') + '">failed</span>' + (docFilter === 'failed' ? '<div style="color:var(--muted);font-size:9px;white-space:normal;">' + esc(d.error || '') + '</div>' : '')
           : d.status === 'no-text' ? (d.source === 'url' ? '<span class="badge b-warn">no text</span>'
             : '<button class="btn btn-g doc-ocr" style="padding:1px 7px;font-size:9px;" data-path="' + esc(d.path) + '" title="No text found. It may be a scan.">Run OCR</button>')
           : d.chunkCount + ' ch'

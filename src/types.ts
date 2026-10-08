@@ -56,6 +56,12 @@ export interface IndexOptions {
   force?: boolean
 }
 
+export interface IndexFailure {
+  path: string
+  name: string
+  error: string
+}
+
 export interface IndexActivity {
   indexing: boolean
   /** Files finished and queued across all running index() calls. */
@@ -64,6 +70,8 @@ export interface IndexActivity {
   /** Display name of the file being indexed. */
   current: string
   embedding: boolean
+  /** The most recent finished run. `id` increases with every run, so short runs aren't missed by pollers. */
+  lastRun?: { id: number; done: number; failed: number; failures: IndexFailure[]; finishedAt: number }
 }
 
 export interface SearchResult {

@@ -249,3 +249,23 @@ describe('embeddings', () => {
     expect((await duct.search('cherries'))[0].chunk.content).toContain('cherries')
   })
 })
+
+describe('run reports', () => {
+  it('reports unreadable files from the last run, even after it finished', async () => {
+    const dir = freshDir('report')
+    writeFileSync(join(dir, 'good.txt'), 'readable text about figs')
+    writeFileSync(join(dir, 'broken.pdf'), 'not a pdf at all')
+    const duct = new Duct()
+    expect(duct.activity().lastRun).toBeUndefined()
+    await duct.index(dir)
+    const first = duct.activity().lastRun!
+    expect(first).toMatchObject({ done: 2, failed: 1 })
+    expect(first.failures[0]).toMatchObject({ name: 'broken.pdf' })
+    expect(first.failures[0].error).toBeTruthy()
+
+    await duct.index(join(dir, 'good.txt'))
+    const second = duct.activity().lastRun!
+    expect(second.id).toBeGreaterThan(first.id)
+    expect(second.failed).toBe(0)
+  })
+})

@@ -15,7 +15,7 @@ import { createLLMProvider, OpenAILLM, GeminiLLM } from './qa/provider.js'
 import { createEmbedder } from './embed/factory.js'
 import type { EmbedProvider } from './embed/factory.js'
 import type {
-  DuctConfig, Chunk, EmbeddingProvider, IndexResult, IndexOptions, IndexActivity, SearchResult,
+  DuctConfig, Chunk, EmbeddingProvider, IndexResult, IndexOptions, IndexActivity, IndexFailure, SearchResult,
   DocumentInfo, DocumentFormat, RuntimeConfig, Reranker, LLMProvider,
   QAResult, SchemaField, ExtractionResult, DocDiff, ExtractedDocument,
 } from './types.js'
@@ -55,7 +55,9 @@ async function findFiles(input: string): Promise<string[]> {
   return []
 }
 
-type IndexOutcome = { status: 'indexed' | 'no-text' | 'skipped' | 'failed'; chunks: number }
+type IndexOutcome = { status: 'indexed' | 'no-text' | 'skipped' | 'failed'; chunks: number; error?: string }
+
+const MAX_REPORTED_FAILURES = 50
 
 export class Duct {
   private embedder: EmbeddingProvider | null = null
@@ -75,7 +77,9 @@ export class Duct {
   private pendingChanges = new Map<string, NodeJS.Timeout>()
   private locks = new Map<string, Promise<void>>()
   private embedding: Promise<void> | null = null
-  private progress = { active: 0, done: 0, total: 0, current: '' }
+  private progress = { active: 0, done: 0, total: 0, current: '', failures: [] as IndexFailure[], failed: 0 }
+  private lastRun: IndexActivity['lastRun']
+  private runCounter = 0
   private embedProvider: string = ''
   private embedModel: string = ''
   private embedBaseUrl: string = ''
@@ -276,10 +280,20 @@ export class Duct {
           totalChunks += outcome.chunks
         } else if (outcome.status === 'failed') {
           failed++
+          this.progress.failed++
+          if (this.progress.failures.length < MAX_REPORTED_FAILURES) {
+            this.progress.failures.push({ path: filePath, name: isUrl(filePath) ? filePath : basename(filePath), error: outcome.error ?? 'Could not be read' })
+          }
         }
       }
     } finally {
-      if (--this.progress.active === 0) this.progress = { active: 0, done: 0, total: 0, current: '' }
+      // Overlapping index() calls share one run; it ends when the last of them finishes.
+      if (--this.progress.active === 0) {
+        if (this.progress.total > 0) {
+          this.lastRun = { id: ++this.runCounter, done: this.progress.done, failed: this.progress.failed, failures: this.progress.failures, finishedAt: Date.now() }
+        }
+        this.progress = { active: 0, done: 0, total: 0, current: '', failures: [], failed: 0 }
+      }
     }
 
     if (this.embedder && totalChunks > 0) await this.embedPending()
@@ -289,7 +303,7 @@ export class Duct {
   /** What indexing is doing right now, for progress displays. */
   activity(): IndexActivity {
     const { active, done, total, current } = this.progress
-    return { indexing: active > 0, done, total, current, embedding: this.embedding !== null }
+    return { indexing: active > 0, done, total, current, embedding: this.embedding !== null, ...(this.lastRun ? { lastRun: this.lastRun } : {}) }
   }
 
   private async indexOne(path: string, metadata: Record<string, unknown> | undefined, options: IndexOptions | undefined): Promise<IndexOutcome> {
@@ -360,7 +374,7 @@ export class Duct {
           chunkMetadata: docMeta,
         }, [])
       }
-      return { status: 'failed', chunks: 0 }
+      return { status: 'failed', chunks: 0, error: message }
     }
   }
 
