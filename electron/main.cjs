@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, dialog, nativeImage, shell, Notification, ipcMain, globalShortcut } = require('electron')
+const { app, BrowserWindow, Menu, Tray, dialog, nativeImage, shell, Notification, ipcMain, globalShortcut, safeStorage } = require('electron')
 const { createIsland } = require('./island.cjs')
 const path = require('path')
 const fs = require('fs')
@@ -22,6 +22,23 @@ function readPrefs() {
 function writePrefs(prefs) {
   try { fs.writeFileSync(prefsPath(), JSON.stringify(prefs, null, 2)) } catch (err) { console.error('Could not save preferences:', err) }
 }
+// API keys entered in Settings are encrypted with the OS keychain (safeStorage) and restored at launch.
+function secretsPath() { return path.join(app.getPath('userData'), 'secrets.bin') }
+function readSecrets() {
+  try {
+    if (!safeStorage.isEncryptionAvailable() || !fs.existsSync(secretsPath())) return {}
+    return JSON.parse(safeStorage.decryptString(fs.readFileSync(secretsPath())))
+  } catch (err) {
+    console.error('Could not read saved API keys:', err.message)
+    return {}
+  }
+}
+function saveSecrets(keys) {
+  if (!safeStorage.isEncryptionAvailable()) return   // without a keychain, keys stay in memory for this session only
+  const merged = { ...readSecrets(), ...keys }
+  fs.writeFileSync(secretsPath(), safeStorage.encryptString(JSON.stringify(merged)), { mode: 0o600 })
+}
+
 // The island is on by default on macOS, where it lives in the notch or menu bar; elsewhere it is opt-in.
 function islandEnabled() {
   const prefs = readPrefs()
@@ -51,7 +68,7 @@ function startIsland() {
     onShowMain: view => {
       mainWindow?.show()
       mainWindow?.focus()
-      if (view === 'failed') mainWindow?.webContents.executeJavaScript('typeof showFailedDocuments === "function" && showFailedDocuments()').catch(() => {})
+      if (view === 'failed') callPage('showFailed')
     },
     isSupportedFile: p => formats.isSupportedFile(p),
     isPackage: p => formats.PACKAGE_EXTENSIONS.has(path.extname(p).toLowerCase()),
@@ -80,7 +97,7 @@ function openQuickSearch() {
   if (island) { island.openSearch(); return }
   mainWindow?.show()
   mainWindow?.focus()
-  mainWindow?.webContents.executeJavaScript("document.getElementById('searchInput')?.focus()").catch(() => {})
+  callPage('focusSearch')
 }
 
 // One running copy only: a second launch focuses the existing window instead of opening the same index twice.
@@ -111,12 +128,14 @@ async function createDuct() {
     persistPath: path.join(app.getPath('userData'), 'data'),
     search: { rerank: true },
   })
+  const keys = readSecrets()
+  if (Object.keys(keys).length) duct.configure(keys)   // configure() never writes keys to disk
   return duct
 }
 
 async function startServer() {
   const { createServer } = await import('../dist/server.js')
-  const expressApp = createServer(duct, { uploadLimitMb: 100, libraryDir: libraryDir() })
+  const expressApp = createServer(duct, { uploadLimitMb: 100, libraryDir: libraryDir(), onSecrets: saveSecrets })
   return new Promise((resolve) => {
     server = expressApp.listen(0, '127.0.0.1', () => {
       serverUrl = `http://127.0.0.1:${server.address().port}`
@@ -125,9 +144,15 @@ async function startServer() {
   })
 }
 
+/** Calls one of the page's window.duct functions (assets/ui/app.js). */
+function callPage(name) {
+  if (!['refresh', 'showFailed', 'focusSearch', 'openSettings', 'exportResults'].includes(name)) return
+  mainWindow?.webContents.executeJavaScript(`window.duct && window.duct.${name}()`).catch(() => {})
+}
+
 // Asks the page to refresh its counts, document list and mascot after background changes.
 function refreshPage() {
-  mainWindow?.webContents.executeJavaScript('typeof showIdleMascot === "function" && (showIdleMascot(), refreshDocs())').catch(() => {})
+  callPage('refresh')
 }
 
 function notify(body) {
@@ -206,9 +231,7 @@ function createAppMenu() {
         {
           label: 'Settings…',
           accelerator: 'Cmd+,',
-          click: () => mainWindow?.webContents.executeJavaScript(
-            `document.getElementById('settings')?.scrollIntoView({behavior:'smooth'})`
-          ),
+          click: () => callPage('openSettings'),
         },
         { type: 'separator' },
         { label: 'Quit', accelerator: 'Cmd+Q', click: () => app.quit() },
@@ -253,9 +276,7 @@ function createAppMenu() {
         {
           label: 'Export Search Results…',
           accelerator: 'Cmd+E',
-          click: () => mainWindow?.webContents.executeJavaScript(
-            `document.querySelector('[onclick*="exportResults"]')?.click()`
-          ),
+          click: () => callPage('exportResults'),
         },
       ],
     },
@@ -388,7 +409,8 @@ ipcMain.handle('duct:watchDirectory', async () => {
   const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] })
   if (result.canceled || result.filePaths.length === 0) return null
   const dir = result.filePaths[0]
-  await duct.watch([dir], refreshPage)
+  // Return straight away so the page can show progress; indexing the folder continues in the background.
+  duct.watch([dir], refreshPage).then(refreshPage).catch(err => notify(`Could not watch ${dir}: ${err.message}`))
   return dir
 })
 

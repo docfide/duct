@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module'
 import { sep } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
-import type { Chunk, DocumentFormat, DocumentInfo, SearchResult } from '../types.js'
+import type { Chunk, DocumentFormat, DocumentInfo, SearchResult, SearchScope } from '../types.js'
 
 const require = createRequire(import.meta.url)
 
@@ -95,10 +95,19 @@ function cjkSegments(input: string): string[] {
   return [...input.normalize('NFKC').matchAll(CJK)].map(m => m[0])
 }
 
-function filterClause(filter: Record<string, unknown> | undefined): { sql: string; params: (string | number | null)[] } | null {
-  if (!filter) return { sql: '', params: [] }
+function filterClause(filter: Record<string, unknown> | undefined, scope?: SearchScope): { sql: string; params: (string | number | null)[] } | null {
   let sql = ''
   const params: (string | number | null)[] = []
+  if (scope?.formats?.length) {
+    sql += ` AND d.format IN (${scope.formats.map(() => '?').join(', ')})`
+    params.push(...scope.formats)
+  }
+  if (scope?.under) {
+    const prefix = scope.under.endsWith(sep) ? scope.under : scope.under + sep
+    sql += " AND (d.path = ? OR d.path LIKE ? ESCAPE '\\')"
+    params.push(scope.under, likePattern(prefix).slice(1))
+  }
+  if (!filter) return { sql, params }
   for (const [key, value] of Object.entries(filter)) {
     if (/["\\]/.test(key)) return null
     let bound: string | number | null
@@ -340,8 +349,8 @@ export class SqliteStore {
     }
   }
 
-  searchText(query: string, limit: number, filter?: Record<string, unknown>): SearchResult[] {
-    const where = filterClause(filter)
+  searchText(query: string, limit: number, filter?: Record<string, unknown>, scope?: SearchScope): SearchResult[] {
+    const where = filterClause(filter, scope)
     if (!where) return []
     const merged = new Map<string, SearchResult>()
 
@@ -358,6 +367,23 @@ export class SqliteStore {
         LIMIT ?
       `).all(fts, ...where.params, limit) as unknown as ChunkRow[]
       for (const r of rows) merged.set(r.uid, { chunk: this.toChunk(r), score: r.score ?? 0, snippet: r.snippet })
+    }
+
+    // File names: a document whose name contains every query word is a strong match (people search by name).
+    const nameWords = (query.normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}]+/gu) || []).filter(w => w.length > 2).slice(0, 8)
+    if (nameWords.length) {
+      const rows = this.db.prepare(`
+        SELECT c.uid, c.idx, c.heading, c.page, c.content, d.path, d.format, d.chunk_metadata
+        FROM documents d JOIN chunks c ON c.document_id = d.id AND c.idx = (SELECT min(idx) FROM chunks WHERE document_id = d.id)
+        WHERE ${nameWords.map(() => "lower(d.display_name) LIKE ? ESCAPE '\\'").join(' AND ')}${where.sql}
+        LIMIT ?
+      `).all(...nameWords.map(likePattern), ...where.params, limit) as unknown as ChunkRow[]
+      const best = Math.max(0, ...[...merged.values()].map(r => r.score))
+      for (const r of rows) {
+        const existing = merged.get(r.uid)
+        if (existing) existing.score += best + 1
+        else merged.set(r.uid, { chunk: this.toChunk(r), score: best + 1, snippet: r.content.slice(0, 200) })
+      }
     }
 
     // CJK text has no spaces between words, so match it as substrings instead of tokens.
@@ -425,7 +451,8 @@ export class SqliteStore {
     return entries
   }
 
-  searchVectors(query: number[], model: string, limit: number, filter?: Record<string, unknown>): SearchResult[] {
+  searchVectors(query: number[], model: string, limit: number, filter?: Record<string, unknown>, scope?: SearchScope): SearchResult[] {
+    const under = scope?.under ? (scope.under.endsWith(sep) ? scope.under : scope.under + sep) : undefined
     let qn = 0
     for (const x of query) qn += x * x
     qn = Math.sqrt(qn)
@@ -434,6 +461,8 @@ export class SqliteStore {
     for (const e of this.loadVectors(model)) {
       if (e.vector.length !== query.length || e.norm === 0) continue
       if (filter && Object.entries(filter).some(([k, v]) => e.meta[k] !== v)) continue
+      if (scope?.formats?.length && !scope.formats.includes(e.chunk.documentFormat)) continue
+      if (under && e.chunk.documentPath !== scope!.under && !e.chunk.documentPath.startsWith(under)) continue
       let dot = 0
       for (let i = 0; i < query.length; i++) dot += query[i] * e.vector[i]
       results.push({ chunk: e.chunk, score: dot / (qn * e.norm) })

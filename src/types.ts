@@ -81,6 +81,12 @@ export interface IndexActivity {
   lastRun?: { id: number; done: number; failed: number; failures: IndexFailure[]; finishedAt: number }
 }
 
+/** Narrows a search to some document formats and/or one folder (or a single file). */
+export interface SearchScope {
+  formats?: DocumentFormat[]
+  under?: string
+}
+
 export interface SearchResult {
   chunk: Chunk
   score: number

@@ -79,3 +79,18 @@ describe('upgrading an index without page numbers', () => {
     second.close()
   })
 })
+
+describe('file names', () => {
+  it('finds documents by name even when the words are not in the text', async () => {
+    const dir = join(work, 'names')
+    const { mkdirSync } = await import('node:fs')
+    mkdirSync(dir)
+    writeFileSync(join(dir, 'Lease Agreement 2024.txt'), 'Rent is due on the first of each month.')
+    writeFileSync(join(dir, 'notes.txt'), 'Nothing about leases here, just agreement on lunch.')
+    const duct = new Duct()
+    await duct.index(dir)
+    const results = await duct.search('lease agreement')
+    expect(results[0].chunk.documentPath).toMatch(/Lease Agreement 2024\.txt$/)
+    expect((await duct.search('2024 lease'))[0].chunk.documentPath).toMatch(/Lease Agreement/)
+  })
+})

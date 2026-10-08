@@ -1,0 +1,946 @@
+// Duct's main window. A plain ES module with no build step. The page allows no inline scripts, so every
+// handler is attached here. The desktop app adds window.electronAPI (electron/preload.cjs) and calls
+// window.duct.* (bottom of this file).
+
+const $ = (selector, root = document) => root.querySelector(selector)
+const $$ = (selector, root = document) => [...root.querySelectorAll(selector)]
+const MARK_START = String.fromCharCode(2)   // search snippets wrap matched words in these two characters
+const MARK_END = String.fromCharCode(3)
+const desktop = window.electronAPI || null
+
+const state = {
+  info: null,
+  config: {},
+  docs: [],
+  sources: [],
+  activity: {},
+  query: '',
+  mode: 'search',
+  view: 'home',
+  results: [],
+  selected: -1,
+  group: null,        // file-type filter id
+  source: null,       // { label, under }
+  docFilter: 'all',
+  wasBusy: false,
+}
+
+// ---------- server access (asks for the access token on a protected server) ----------
+
+const rawFetch = window.fetch.bind(window)
+let loginPromise = null
+
+async function login() {
+  const token = window.prompt('This Duct server needs an access token:')
+  if (!token) throw new Error('Access token required')
+  const res = await rawFetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) })
+  if (!res.ok) throw new Error('Invalid access token')
+}
+
+async function api(path, options = {}) {
+  let res = await rawFetch(path, options)
+  if (res.status === 401 && path !== '/api/login') {
+    loginPromise = loginPromise || login().finally(() => { loginPromise = null })
+    await loginPromise
+    res = await rawFetch(path, options)
+  }
+  return res
+}
+
+async function json(path, options) {
+  const res = await api(path, options)
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status)
+  return data
+}
+
+const send = (method, path, body) => json(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+
+// ---------- small helpers ----------
+
+function esc(value) {
+  return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+}
+
+/** Escapes a snippet, then turns the server's match markers into <mark>. */
+function markSnippet(snippet) {
+  return esc(snippet).split(MARK_START).join('<mark>').split(MARK_END).join('</mark>')
+}
+
+/** Highlights words in raw text and returns escaped HTML. */
+function highlight(text, terms) {
+  const words = terms.map(t => t.toLowerCase()).filter(t => t.length > 1)
+  if (!words.length) return esc(text)
+  const lower = text.toLowerCase()
+  const marked = new Array(text.length).fill(false)
+  for (const word of words) {
+    for (let i = lower.indexOf(word); i !== -1; i = lower.indexOf(word, i + 1)) {
+      for (let j = i; j < i + word.length; j++) marked[j] = true
+    }
+  }
+  let out = ''
+  let start = 0
+  for (let i = 1; i <= text.length; i++) {
+    if (i === text.length || marked[i] !== marked[start]) {
+      const part = esc(text.slice(start, i))
+      out += marked[start] ? '<mark>' + part + '</mark>' : part
+      start = i
+    }
+  }
+  return out
+}
+
+function fileName(path) { return path.split('/').pop().split(String.fromCharCode(92)).pop() || path }
+function folderOf(path) {
+  const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf(String.fromCharCode(92)))
+  return cut > 0 ? path.slice(0, cut) : ''
+}
+const isLink = path => /^https?:/i.test(path)
+const fmt = n => Number(n || 0).toLocaleString()
+const plural = (n, word) => fmt(n) + ' ' + word + (n === 1 ? '' : 's')
+
+function timeAgo(ms) {
+  const s = Math.max(1, Math.round((Date.now() - ms) / 1000))
+  if (s < 60) return 'just now'
+  const m = Math.round(s / 60)
+  if (m < 60) return m + ' min ago'
+  const h = Math.round(m / 60)
+  if (h < 24) return h + ' h ago'
+  const d = Math.round(h / 24)
+  return d < 30 ? d + ' d ago' : new Date(ms).toLocaleDateString()
+}
+
+function toast(message, error = false) {
+  const el = $('#toast')
+  el.textContent = message
+  el.className = 'toast show' + (error ? ' error' : '')
+  clearTimeout(toast.timer)
+  toast.timer = setTimeout(() => { el.className = 'toast' }, 3200)
+}
+
+// ---------- formats ----------
+
+const BADGES = {
+  pdf: ['PDF', 'pdf'], docx: ['DOC', 'doc'], doc: ['DOC', 'doc'], odt: ['ODT', 'doc'], rtf: ['RTF', 'doc'], pages: ['PAGES', 'doc'],
+  md: ['MD', 'doc'], html: ['HTML', 'doc'], epub: ['EPUB', 'doc'], xlsx: ['XLS', 'sheet'], ods: ['ODS', 'sheet'], numbers: ['NUM', 'sheet'],
+  pptx: ['PPT', 'slide'], odp: ['ODP', 'slide'], key: ['KEY', 'slide'], eml: ['EML', 'mail'], msg: ['MSG', 'mail'], txt: ['TXT', ''],
+  code: ['CODE', ''], svg: ['SVG', 'img'], image: ['IMG', 'img'], zip: ['ZIP', 'zip'], url: ['WEB', 'doc'],
+}
+const badge = format => { const [label, cls] = BADGES[format] || ['FILE', '']; return '<span class="type ' + cls + '">' + label + '</span>' }
+
+const GROUPS = [
+  { id: 'pdf', label: 'PDFs', test: f => f.format === 'pdf' },
+  { id: 'docs', label: 'Documents', test: f => (f.kind === 'document' && f.format !== 'pdf') || f.kind === 'ebook' },
+  { id: 'sheets', label: 'Spreadsheets', test: f => f.kind === 'spreadsheet' },
+  { id: 'slides', label: 'Presentations', test: f => f.kind === 'presentation' },
+  { id: 'email', label: 'Email', test: f => f.kind === 'email' },
+  { id: 'images', label: 'Images', test: f => f.kind === 'image' },
+  { id: 'text', label: 'Text & code', test: f => f.kind === 'text' || f.kind === 'code' },
+  { id: 'archives', label: 'Archives', test: f => f.kind === 'archive' },
+  { id: 'web', label: 'Web pages', test: f => f.format === 'url' },
+]
+
+function groupFormats(id) {
+  const group = GROUPS.find(g => g.id === id)
+  if (!group) return []
+  const formats = state.info.formats.filter(group.test).map(f => f.format)
+  return id === 'web' ? ['url'] : formats
+}
+
+function pageRef(chunk) {
+  const label = state.info.formats.find(f => f.format === chunk.documentFormat)?.pageLabel || 'p.'
+  return label + ' ' + chunk.page
+}
+
+// ---------- mascot ----------
+
+const POSES = { welcome: 'Pose - Welcome', working: 'Pose - Working', done: 'Pose - Done', nothingFound: 'Pose - Nothing Found', needsHand: 'Pose - Needs a Hand', resting: 'Pose - Resting' }
+const POSE_FILES = { welcome: 'pose-welcome.svg', working: 'pose-working.svg', done: 'pose-done.svg', nothingFound: 'pose-nothing-found.svg', needsHand: 'pose-needs-a-hand.svg', resting: 'pose-resting.svg' }
+const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+let DotLottie = null
+let lottieFailed = false
+
+function mascotEnabled() { try { return localStorage.getItem('duct.mascot') !== 'off' } catch { return true } }
+
+function poseFor(slot) {
+  const wanted = slot.dataset.mascot
+  if (wanted !== 'idle') return wanted
+  if (state.activity.indexing) return 'working'
+  return state.sources.length ? 'resting' : 'welcome'
+}
+
+async function renderMascots() {
+  document.body.classList.toggle('no-mascot', !mascotEnabled())
+  if (!mascotEnabled()) return
+  if (!DotLottie && !lottieFailed) {
+    try {
+      DotLottie = (await import('/vendor/dotlottie/index.js')).DotLottie
+      DotLottie.setWasmUrl('/vendor/dotlottie/dotlottie-player.wasm')
+    } catch { lottieFailed = true }
+  }
+  for (const slot of $$('[data-mascot]')) {
+    const visible = slot.offsetParent !== null
+    const pose = poseFor(slot)
+    if (lottieFailed) {
+      if (visible && slot.dataset.pose !== pose) { slot.innerHTML = '<img alt="" src="/mascot/' + POSE_FILES[pose] + '">'; slot.dataset.pose = pose }
+      continue
+    }
+    if (!slot.player) {
+      if (!visible) continue
+      const canvas = document.createElement('canvas')
+      canvas.width = slot.clientWidth * 2
+      canvas.height = slot.clientHeight * 2
+      slot.appendChild(canvas)
+      slot.player = new DotLottie({ canvas, src: '/mascot/mascot.lottie', animationId: POSES[pose], autoplay: !reduceMotion, loop: true })
+      slot.dataset.pose = pose
+      slot.player.addEventListener('load', () => {
+        if (reduceMotion) slot.player.setFrame(Math.floor(slot.player.totalFrames / 2))
+        else if (slot.offsetParent !== null) slot.player.play()
+      })
+      slot.player.addEventListener('loadError', () => { lottieFailed = true; renderMascots() })
+      continue
+    }
+    if (slot.dataset.pose !== pose) { slot.dataset.pose = pose; slot.player.loadAnimation(POSES[pose]) }
+    // Animations off screen are paused.
+    if (!reduceMotion && slot.player.isLoaded) {
+      if (visible && !slot.player.isPlaying) slot.player.play()
+      if (!visible && slot.player.isPlaying) slot.player.pause()
+    }
+  }
+}
+
+// ---------- data ----------
+
+async function loadData() {
+  const [docs, sources, activity] = await Promise.all([
+    json('/api/documents'),
+    json('/api/sources'),
+    json('/api/activity'),
+  ])
+  state.docs = docs.documents || []
+  state.sources = sources.sources || []
+  state.canWatch = !!sources.canAdd || !!(desktop && desktop.watchDirectory)
+  state.activity = activity
+}
+
+const readyDocs = () => state.docs.filter(d => d.status !== 'failed')
+const attentionDocs = () => state.docs.filter(d => d.status === 'failed' || d.status === 'no-text')
+
+function inScope(doc) {
+  if (state.group && !groupFormats(state.group).includes(doc.format)) return false
+  if (state.source) {
+    const under = state.source.under
+    if (doc.path !== under && !doc.path.startsWith(under.endsWith('/') ? under : under + '/') && !doc.path.startsWith(under + String.fromCharCode(92))) return false
+  }
+  return true
+}
+
+// ---------- sidebar ----------
+
+function renderSidebar() {
+  const ready = readyDocs()
+  $$('[data-bind="docCount"]').forEach(el => { el.textContent = fmt(state.docs.length) })
+  const attention = attentionDocs().length
+  $$('[data-bind="attentionCount"]').forEach(el => { el.textContent = fmt(attention) })
+  $('[data-view="attention"]').hidden = attention === 0
+
+  const kinds = GROUPS.map(g => ({ ...g, count: ready.filter(d => groupFormats(g.id).includes(d.format)).length })).filter(g => g.count > 0)
+  $('#kindList').innerHTML = kinds.map(g =>
+    '<button class="side-item' + (state.group === g.id ? ' active' : '') + '" data-group="' + g.id + '"><span class="name">' + esc(g.label) + '</span><span class="count">' + fmt(g.count) + '</span></button>').join('')
+    || '<p class="hint side-empty">Nothing indexed yet</p>'
+
+  const libraryCount = ready.filter(d => d.source === 'library').length
+  const sources = []
+  if (libraryCount) sources.push({ label: 'Duct Library', under: state.info.libraryDir, count: libraryCount })
+  for (const s of state.sources) {
+    sources.push({ label: fileName(s.path), title: s.path, under: s.path, count: ready.filter(d => d.path.startsWith(s.path)).length, watched: true })
+  }
+  $('#sourceList').innerHTML = sources.map(s =>
+    '<div class="source-row"><button class="side-item' + (state.source && state.source.under === s.under ? ' active' : '') + '" data-under="' + esc(s.under) + '" data-label="' + esc(s.label) + '" title="' + esc(s.title || s.under) + '">' +
+    '<span class="name">' + (s.watched ? '◉ ' : '▤ ') + esc(s.label) + '</span><span class="count">' + fmt(s.count) + '</span></button>' +
+    (s.watched && isAdmin() ? '<button class="remove" data-remove-source="' + esc(s.under) + '" aria-label="Stop watching ' + esc(s.label) + '" title="Stop watching">✕</button>' : '') + '</div>').join('')
+    || '<p class="hint side-empty">No sources yet</p>'
+
+  for (const el of $$('[data-requires="watch"]')) el.hidden = !state.canWatch || !isAdmin()
+  $$('.side-item[data-view]').forEach(el => el.classList.toggle('active', el.dataset.view === (state.view === 'documents' ? (state.docFilter === 'attention' ? 'attention' : 'documents') : state.view === 'home' || state.view === 'results' ? 'search' : '')))
+}
+
+$('#sidebar').addEventListener('click', async e => {
+  const group = e.target.closest('[data-group]')
+  const source = e.target.closest('[data-under]')
+  const remove = e.target.closest('[data-remove-source]')
+  const view = e.target.closest('[data-view]')
+  if (remove) {
+    const path = remove.dataset.removeSource
+    if (!confirm('Stop watching ' + path + '?\n\nIts documents leave the index. The files themselves are not touched.')) return
+    try { await json('/api/sources?path=' + encodeURIComponent(path), { method: 'DELETE' }); toast('Stopped watching ' + fileName(path)) } catch (err) { toast(err.message, true) }
+    if (state.source && state.source.under === path) state.source = null
+    return refreshAll()
+  }
+  if (group) state.group = state.group === group.dataset.group ? null : group.dataset.group
+  else if (source) state.source = state.source && state.source.under === source.dataset.under ? null : { under: source.dataset.under, label: source.dataset.label }
+  else if (view) {
+    if (view.dataset.view === 'search') { state.group = null; state.source = null; setView(state.query ? 'results' : 'home') }
+    else { state.docFilter = view.dataset.view === 'attention' ? 'attention' : 'all'; setView('documents') }
+    $('#sidebar').classList.remove('open')
+    return
+  }
+  $('#sidebar').classList.remove('open')
+  renderSidebar()
+  if (state.view === 'documents') renderDocuments()
+  else if (state.query) runSearch()
+  else renderScopeChips()
+})
+
+// ---------- views ----------
+
+function setView(view) {
+  state.view = view
+  $('#viewHome').hidden = view !== 'home'
+  $('#viewResults').hidden = view !== 'results'
+  $('#viewAsk').hidden = view !== 'ask'
+  $('#viewDocuments').hidden = view !== 'documents'
+  if (view !== 'results') closePreview()
+  if (view === 'home') renderHome()
+  if (view === 'documents') renderDocuments()
+  renderSidebar()
+  renderMascots()
+}
+
+function renderHome() {
+  const ready = readyDocs()
+  const a = state.activity
+  $('#homeTitle').textContent = ready.length ? 'Search ' + plural(ready.length, 'document') : 'Nothing indexed yet'
+  $('#homeSub').textContent = a.indexing
+    ? 'Reading ' + fmt(a.done) + ' of ' + fmt(a.total) + (a.current ? ': ' + a.current : '') + '. You can search already.'
+    : ready.length ? (state.sources.length ? 'Watching ' + plural(state.sources.length, 'folder') + '. New and changed files are added automatically.' : 'Type above, or press / to start.') : 'Add files or watch a folder to begin.'
+  const attention = attentionDocs()
+  const banner = $('#homeAttention')
+  banner.hidden = attention.length === 0
+  banner.innerHTML = attention.length ? '<span>' + plural(attention.length, 'file') + ' need' + (attention.length === 1 ? 's' : '') + ' attention</span><button class="btn btn-sm" data-action="show-attention">Review</button>' : ''
+  const recent = ready.slice().sort((x, y) => y.indexedAt - x.indexedAt).slice(0, 8)
+  $('#recent').innerHTML = recent.length ? '<h2>Recently added</h2>' + recent.map(d =>
+    '<button class="recent-item" data-open-doc="' + esc(d.path) + '">' + badge(d.format) + '<span class="name">' + esc(d.displayName || fileName(d.path)) + '</span><span class="when">' + timeAgo(d.indexedAt) + '</span></button>').join('') : ''
+}
+
+// ---------- search ----------
+
+function renderScopeChips(target = '#scopeChips') {
+  const box = $(target)
+  if (!box) return
+  const chips = []
+  if (state.group) chips.push(['group', GROUPS.find(g => g.id === state.group).label])
+  if (state.source) chips.push(['source', state.source.label])
+  box.innerHTML = chips.map(([kind, label]) => '<span class="chip">' + esc(label) + '<button data-clear-scope="' + kind + '" aria-label="Remove filter ' + esc(label) + '">✕</button></span>').join('')
+}
+
+for (const box of ['#scopeChips', '#docScopeChips']) {
+  $(box).addEventListener('click', e => {
+    const btn = e.target.closest('[data-clear-scope]')
+    if (!btn) return
+    if (btn.dataset.clearScope === 'group') state.group = null
+    else state.source = null
+    renderSidebar()
+    if (state.view === 'documents') renderDocuments()
+    else runSearch()
+  })
+}
+
+let searchSeq = 0
+async function runSearch() {
+  const q = state.query
+  if (!q) { setView('home'); return }
+  if (state.view !== 'results') setView('results')
+  renderScopeChips()
+  const params = new URLSearchParams({ q, topK: '40' })
+  if (state.group) params.set('formats', groupFormats(state.group).join(','))
+  if (state.source) params.set('under', state.source.under)
+  const seq = ++searchSeq
+  let data
+  try { data = await json('/api/search?' + params) } catch (err) { if (seq === searchSeq) toast('Search failed: ' + err.message, true); return }
+  if (seq !== searchSeq) return
+  state.results = data.results || []
+  renderResults()
+}
+
+function terms(result) {
+  const marked = []
+  const snippet = result && result.snippet ? result.snippet : ''
+  for (let i = snippet.indexOf(MARK_START); i !== -1; i = snippet.indexOf(MARK_START, i + 1)) {
+    const end = snippet.indexOf(MARK_END, i)
+    if (end > i) marked.push(snippet.slice(i + 1, end).toLowerCase())
+  }
+  const phrases = [...state.query.matchAll(/"([^"]+)"/g)].map(m => m[1].toLowerCase())
+  const words = state.query.replace(/"[^"]*"/g, ' ').toLowerCase().split(/\s+/).filter(w => w.length > 1)
+  return [...new Set([...phrases, ...marked, ...words])].slice(0, 12)
+}
+
+function renderResults() {
+  const results = state.results
+  $('#resultsTitle').textContent = results.length ? plural(results.length, 'result') + ' for “' + state.query + '”' : 'No results for “' + state.query + '”'
+  $('#results').innerHTML = results.map((r, i) => {
+    const c = r.chunk
+    const link = isLink(c.documentPath)
+    const folder = link ? new URL(c.documentPath).host : folderOf(c.documentPath).startsWith(state.info.libraryDir) ? 'Duct Library' : folderOf(c.documentPath)
+    return '<li class="result" data-i="' + i + '" tabindex="-1">' + badge(c.documentFormat) +
+      '<div class="result-main"><div class="result-title"><span class="name">' + esc(fileName(c.documentPath)) + '</span>' +
+      (c.page ? '<span class="where">' + esc(pageRef(c)) + '</span>' : '') +
+      (c.heading ? '<span class="section">› ' + esc(c.heading) + '</span>' : '') + '</div>' +
+      '<div class="folder">' + esc(folder) + '</div>' +
+      '<div class="snippet">' + (r.snippet ? markSnippet(r.snippet) : highlight(c.content.slice(0, 260), terms(r))) + '</div>' +
+      '<div class="result-actions"><button class="btn btn-sm btn-primary" data-act="open">' + (link ? 'Open link' : c.page ? 'Open at ' + esc(pageRef(c)) : 'Open') + '</button>' +
+      (desktop && desktop.revealDocument && !link ? '<button class="btn btn-sm" data-act="reveal">Show in folder</button>' : '') + '</div></div></li>'
+  }).join('')
+  const empty = $('#resultsEmpty')
+  empty.hidden = results.length > 0
+  if (!results.length) {
+    $('#resultsEmptyText').textContent = state.group || state.source ? 'Nothing matched within the current filter. Try removing it, or use fewer words.' : 'Try different or fewer words. Quoted "exact phrases" must match word for word.'
+  }
+  select(results.length ? 0 : -1, false)
+  renderMascots()
+}
+
+function select(i, scroll = true) {
+  state.selected = i
+  $$('.result').forEach((el, j) => el.classList.toggle('selected', j === i))
+  if (i < 0) { closePreview(); return }
+  const el = $$('.result')[i]
+  if (scroll && el) el.scrollIntoView({ block: 'nearest' })
+  if (window.innerWidth > 1180) renderPreview(state.results[i])
+}
+
+$('#results').addEventListener('click', e => {
+  const item = e.target.closest('.result')
+  if (!item) return
+  const r = state.results[Number(item.dataset.i)]
+  const act = e.target.closest('[data-act]')
+  if (act && act.dataset.act === 'open') return openResult(r)
+  if (act && act.dataset.act === 'reveal') return desktop.revealDocument(r.chunk.documentPath)
+  select(Number(item.dataset.i), false)
+  if (window.innerWidth <= 1180) renderPreview(r)
+})
+$('#results').addEventListener('dblclick', e => {
+  const item = e.target.closest('.result')
+  if (item) openResult(state.results[Number(item.dataset.i)])
+})
+
+// ---------- preview ----------
+
+function renderPreview(r) {
+  if (!r) return closePreview()
+  const c = r.chunk
+  const link = isLink(c.documentPath)
+  const label = state.info.formats.find(f => f.format === c.documentFormat)?.label || c.documentFormat
+  $('#previewBody').innerHTML =
+    '<h2>' + esc(fileName(c.documentPath)) + '</h2>' +
+    '<div class="meta">' + esc(label) + (c.page ? ' · ' + esc(pageRef(c)) : '') + (c.heading ? ' · ' + esc(c.heading) : '') + '<br>' + esc(link ? c.documentPath : folderOf(c.documentPath)) + '</div>' +
+    '<div class="actions"><button class="btn btn-primary" data-act="open">' + (link ? 'Open link' : c.page ? 'Open at ' + esc(pageRef(c)) : 'Open') + '</button>' +
+    (desktop && desktop.revealDocument && !link ? '<button class="btn" data-act="reveal">Show in folder</button>' : '') +
+    '<button class="btn" data-act="copy">Copy path</button></div>' +
+    '<p class="passage-label">Matching passage</p><div class="passage">' + highlight(c.content, terms(r)) + '</div>'
+  $('#preview').hidden = false
+  $('.layout').classList.remove('no-preview')
+  $('#preview').dataset.i = String(state.results.indexOf(r))
+}
+
+function closePreview() {
+  $('#preview').hidden = true
+  $('.layout').classList.add('no-preview')
+}
+
+$('#preview').addEventListener('click', async e => {
+  const act = e.target.closest('[data-act]')
+  if (!act) return
+  const r = state.results[Number($('#preview').dataset.i)]
+  if (!r) return
+  if (act.dataset.act === 'open') openResult(r)
+  if (act.dataset.act === 'reveal') desktop.revealDocument(r.chunk.documentPath)
+  if (act.dataset.act === 'copy') {
+    try { await navigator.clipboard.writeText(r.chunk.documentPath); toast('Path copied') } catch { toast("Couldn't copy the path", true) }
+  }
+})
+
+// ---------- opening documents ----------
+
+async function openDocument(path, page, highlightTerms = []) {
+  if (isLink(path)) { window.open(path, '_blank', 'noopener'); return }
+  if (desktop && desktop.openDocument) {
+    if (!(await desktop.openDocument(path, page, highlightTerms))) toast("Couldn't open " + fileName(path), true)
+    return
+  }
+  if (/\.pdf$/i.test(path)) {
+    window.open('/viewer?path=' + encodeURIComponent(path) + '&page=' + (page || 1) + '&terms=' + encodeURIComponent(JSON.stringify(highlightTerms)), '_blank', 'noopener')
+    return
+  }
+  window.open('/api/file/' + encodeURIComponent(fileName(path)) + '?path=' + encodeURIComponent(path), '_blank', 'noopener')
+}
+
+const openResult = r => r && openDocument(r.chunk.documentPath, r.chunk.page, terms(r))
+
+// ---------- ask (Labs) ----------
+
+async function ask(question) {
+  setView('ask')
+  const log = $('#askLog')
+  const block = document.createElement('div')
+  block.className = 'qa'
+  block.innerHTML = '<div class="question"></div><div class="answer thinking">Reading the most relevant passages…</div>'
+  block.querySelector('.question').textContent = question
+  log.appendChild(block)
+  block.scrollIntoView({ block: 'end', behavior: 'smooth' })
+  try {
+    const data = await send('POST', '/api/ask', { question, topK: 6 })
+    const answer = block.querySelector('.answer')
+    answer.classList.remove('thinking')
+    answer.textContent = data.answer   // model output is shown as plain text, never as HTML
+    const sources = document.createElement('div')
+    sources.className = 'sources'
+    ;(data.sources || []).slice(0, 6).forEach((s, i) => {
+      const b = document.createElement('button')
+      b.className = 'source'
+      b.textContent = '[' + (i + 1) + '] ' + fileName(s.documentPath) + (s.heading ? ' › ' + s.heading : '')
+      b.addEventListener('click', () => openDocument(s.documentPath))
+      sources.appendChild(b)
+    })
+    block.appendChild(sources)
+  } catch (err) {
+    const answer = block.querySelector('.answer')
+    answer.classList.remove('thinking')
+    answer.textContent = 'Could not answer: ' + err.message
+  }
+}
+
+function setMode(mode) {
+  state.mode = mode
+  $$('.mode').forEach(b => { b.classList.toggle('active', b.dataset.mode === mode); b.setAttribute('aria-selected', String(b.dataset.mode === mode)) })
+  const q = $('#q')
+  q.placeholder = mode === 'ask' ? 'Ask a question about your documents' : 'Search your documents'
+  $('#askSetup').hidden = state.config.llmProvider !== 'none'
+  if (mode === 'ask') setView('ask')
+  else setView(state.query ? 'results' : 'home')
+  q.focus()
+}
+
+$$('.mode').forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)))
+
+// ---------- search box ----------
+
+let typingTimer = null
+$('#q').addEventListener('input', e => {
+  if (state.mode !== 'search') return
+  clearTimeout(typingTimer)
+  typingTimer = setTimeout(() => { state.query = e.target.value.trim(); runSearch() }, 120)
+})
+
+$('#searchForm').addEventListener('submit', e => {
+  e.preventDefault()
+  const value = $('#q').value.trim()
+  if (!value) return
+  if (state.mode === 'ask') { ask(value); $('#q').value = ''; return }
+  state.query = value
+  if (state.selected >= 0 && state.results.length) openResult(state.results[state.selected])
+  else runSearch()
+})
+
+$('#q').addEventListener('keydown', e => {
+  if (state.mode !== 'search') return
+  if (e.key === 'ArrowDown') { e.preventDefault(); select(Math.min(state.results.length - 1, state.selected + 1)) }
+  if (e.key === 'ArrowUp') { e.preventDefault(); select(Math.max(0, state.selected - 1)) }
+  if (e.key === 'Escape') { $('#q').value = ''; state.query = ''; setView('home') }
+})
+
+document.addEventListener('keydown', e => {
+  const typing = e.target.closest && e.target.closest('input, textarea, select, [contenteditable]')
+  if ((e.key === '/' && !typing) || ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k')) { e.preventDefault(); focusSearch() }
+})
+
+function focusSearch() {
+  const q = $('#q')
+  q.focus()
+  q.select()
+}
+
+// ---------- documents ----------
+
+function renderDocuments() {
+  $$('.seg-item').forEach(b => b.classList.toggle('active', b.dataset.docFilter === state.docFilter))
+  // "Needs attention" always lists every problem; the type and source filters only narrow "All documents".
+  const attention = state.docFilter === 'attention'
+  const docs = (attention ? attentionDocs() : state.docs.filter(inScope)).slice().sort((a, b) => b.indexedAt - a.indexedAt)
+  $('#documentsTitle').textContent = attention ? 'Needs attention' : 'All documents'
+  if (attention) $('#docScopeChips').innerHTML = ''
+  else renderScopeChips('#docScopeChips')
+  if (!docs.length) {
+    $('#docTable').innerHTML = '<div class="empty">' + (state.docFilter === 'attention' ? 'Every file was read. Nothing needs attention.' : 'No documents here yet.') + '</div>'
+    return
+  }
+  const statusOf = d => d.status === 'failed' ? '<span class="status bad">Couldn’t read</span>' : d.status === 'no-text' ? '<span class="status warn">No text (scan?)</span>' : '<span class="status ok">Indexed</span>'
+  $('#docTable').innerHTML = '<div class="doc-row head" role="row"><span></span><span>Name</span><span class="folder-col">Folder</span><span>Status</span><span></span></div>' +
+    docs.slice(0, 2000).map(d => {
+      const link = isLink(d.path)
+      const actions = []
+      if (d.status !== 'failed') actions.push('<button class="btn btn-sm" data-doc-act="open">Open</button>')
+      if (d.status === 'no-text' && !link && isAdmin()) actions.push('<button class="btn btn-sm" data-doc-act="ocr">Read with OCR</button>')
+      if (desktop && desktop.revealDocument && !link) actions.push('<button class="btn btn-sm" data-doc-act="reveal">Show</button>')
+      if (isAdmin()) actions.push('<button class="btn btn-sm btn-danger" data-doc-act="remove" title="Remove from Duct">✕</button>')
+      return '<div class="doc-row" role="row" data-path="' + esc(d.path) + '">' + badge(d.format) +
+        '<span class="name" title="' + esc(d.path) + '">' + esc(d.displayName || fileName(d.path)) + '</span>' +
+        '<span class="folder">' + esc(link ? d.path : d.source === 'library' ? 'Duct Library' : folderOf(d.path)) + '</span>' +
+        statusOf(d) + '<span class="row-actions">' + actions.join('') + '</span>' +
+        (d.status === 'failed' && d.error ? '<span class="err">' + esc(d.error) + '</span>' : '') + '</div>'
+    }).join('')
+}
+
+$$('.seg-item').forEach(b => b.addEventListener('click', () => { state.docFilter = b.dataset.docFilter; renderDocuments(); renderSidebar() }))
+
+$('#docTable').addEventListener('click', async e => {
+  const act = e.target.closest('[data-doc-act]')
+  const row = e.target.closest('[data-path]')
+  if (!act || !row) return
+  const path = row.dataset.path
+  const doc = state.docs.find(d => d.path === path)
+  if (act.dataset.docAct === 'open') openDocument(path)
+  if (act.dataset.docAct === 'reveal') desktop.revealDocument(path)
+  if (act.dataset.docAct === 'ocr') {
+    act.disabled = true
+    act.textContent = 'Reading…'
+    try {
+      const data = await send('POST', '/api/ocr', { path })
+      toast(data.chunks > 0 ? 'Text found and indexed' : 'OCR found no readable text', data.chunks === 0)
+    } catch (err) { toast('OCR failed: ' + err.message, true) }
+    refreshAll()
+  }
+  if (act.dataset.docAct === 'remove') {
+    const fromLibrary = doc && doc.source === 'library'
+    if (!confirm(fromLibrary ? 'Remove ' + fileName(path) + ' from your Duct Library?\n\nThe copy in the Library is deleted.' : 'Remove ' + fileName(path) + ' from Duct?\n\nThe file itself is not touched.')) return
+    try { await json('/api/documents?path=' + encodeURIComponent(path), { method: 'DELETE' }); toast('Removed ' + fileName(path)) } catch (err) { toast(err.message, true) }
+    refreshAll()
+  }
+})
+
+document.addEventListener('click', e => {
+  const open = e.target.closest('[data-open-doc]')
+  if (open) openDocument(open.dataset.openDoc)
+})
+
+// ---------- adding things ----------
+
+async function uploadFiles(files) {
+  const list = [...files]
+  if (!list.length) return
+  let added = 0, duplicates = 0, failed = 0, unsupported = 0
+  showProgress('Adding ' + plural(list.length, 'file') + '…')
+  for (let start = 0; start < list.length; start += 10) {
+    const form = new FormData()
+    list.slice(start, start + 10).forEach(f => form.append('files', f))
+    setProgress(start, list.length, list[start].name)
+    try {
+      const res = await api('/api/index', { method: 'POST', body: form })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) { if (/Unsupported/.test(data.error || '')) unsupported += Math.min(10, list.length - start); else throw new Error(data.error || 'HTTP ' + res.status); continue }
+      for (const r of data.results || []) { if (r.duplicateOf) duplicates++; else if (r.failed) failed++; else added += r.documents || 0 }
+    } catch (err) { toast('Upload failed: ' + err.message, true); failed += Math.min(10, list.length - start) }
+  }
+  setProgress(list.length, list.length, '')
+  const parts = [plural(added, 'file') + ' added']
+  if (duplicates) parts.push(duplicates + ' already there')
+  if (failed) parts.push(failed + " couldn't be read")
+  if (unsupported) parts.push(unsupported + ' not supported')
+  toast(parts.join(', '), failed > 0 && added === 0)
+  await refreshAll()
+  finishWelcomeIfReady()
+}
+
+$('#fileInput').addEventListener('change', e => { uploadFiles(e.target.files); e.target.value = '' })
+
+async function watchFolder() {
+  if (desktop && desktop.watchDirectory) {
+    const dir = await desktop.watchDirectory()
+    if (!dir) return
+    toast('Watching ' + fileName(dir))
+    showProgress('Reading ' + fileName(dir) + '…')
+    await refreshAll()
+    return
+  }
+  // A server started with --watch-root: ask for a folder on the server.
+  const form = $('#welcome').hidden ? null : $('#welcomeWatchForm')
+  if (form) { form.hidden = false; form.querySelector('input').focus(); return }
+  const dir = window.prompt('Folder on the server to watch (inside a --watch-root):')
+  if (dir) await watchServerFolder(dir)
+}
+
+async function watchServerFolder(dir) {
+  try {
+    await send('POST', '/api/watch', { directories: [dir] })
+    toast('Watching ' + dir)
+    showProgress('Reading ' + fileName(dir) + '…')
+    await refreshAll()
+  } catch (err) { toast(err.message, true) }
+}
+
+$('#welcomeWatchForm').addEventListener('submit', e => {
+  e.preventDefault()
+  const dir = e.target.dir.value.trim()
+  if (dir) watchServerFolder(dir)
+})
+
+$('#urlForm').addEventListener('submit', async e => {
+  if (e.submitter && e.submitter.value === 'cancel') return
+  const url = e.target.url.value.trim()
+  e.target.url.value = ''
+  if (!url) return
+  try {
+    const data = await send('POST', '/api/index', { url })
+    const r = (data.results || [])[0] || {}
+    toast(r.failed ? "Couldn't read that page" : 'Added ' + url, !!r.failed)
+  } catch (err) { toast(err.message, true) }
+  refreshAll()
+})
+
+// Drag and drop anywhere adds files to the Library.
+let dragDepth = 0
+window.addEventListener('dragenter', e => { if (e.dataTransfer && [...e.dataTransfer.types].includes('Files')) { e.preventDefault(); dragDepth++; $('#dropOverlay').hidden = false } })
+window.addEventListener('dragover', e => { if (dragDepth) e.preventDefault() })
+window.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; $('#dropOverlay').hidden = true } })
+window.addEventListener('drop', e => {
+  if (!dragDepth) return
+  e.preventDefault()
+  dragDepth = 0
+  $('#dropOverlay').hidden = true
+  uploadFiles(e.dataTransfer.files)
+})
+
+// ---------- first run ----------
+
+function skippedWelcome() { try { return localStorage.getItem('duct.welcomed') === '1' } catch { return false } }
+function rememberWelcome() { try { localStorage.setItem('duct.welcomed', '1') } catch {} }
+
+function showWelcome() {
+  $('#welcome').hidden = false
+  $('#app').hidden = true
+  $('#welcomeStart').hidden = false
+  $('#welcomeProgress').hidden = true
+  $('[data-action="watch-folder"]', $('#welcome')).hidden = !state.canWatch
+  renderMascots()
+}
+
+function showApp() {
+  $('#welcome').hidden = true
+  $('#app').hidden = false
+  setView(state.query ? 'results' : 'home')
+}
+
+function showProgress(text) {
+  if ($('#welcome').hidden) return
+  $('#welcomeStart').hidden = true
+  $('#welcomeProgress').hidden = false
+  $('#welcomeProgressText').textContent = text
+  $('#welcome [data-mascot]').dataset.mascot = 'working'
+  renderMascots()
+}
+
+function setProgress(done, total, current) {
+  if ($('#welcome').hidden) return
+  const bar = $('#welcomeBar')
+  bar.classList.toggle('indeterminate', !total)
+  bar.style.width = total ? Math.round((done / total) * 100) + '%' : ''
+  $('#welcomeProgressText').textContent = total ? 'Read ' + fmt(done) + ' of ' + plural(total, 'file') : 'Getting started…'
+  $('#welcomeCurrent').textContent = current || ' '
+}
+
+function finishWelcomeIfReady() {
+  if ($('#welcome').hidden || state.activity.indexing) return
+  if (readyDocs().length || attentionDocs().length) {
+    $('#welcome [data-mascot]').dataset.mascot = 'done'
+    renderMascots()
+    setTimeout(() => { rememberWelcome(); showApp() }, 900)
+  }
+}
+
+// ---------- settings ----------
+
+const KEY_FIELDS = [['openaiKey', 'OpenAI'], ['geminiKey', 'Gemini'], ['cohereKey', 'Cohere'], ['voyageKey', 'Voyage'], ['mistralKey', 'Mistral'], ['jinaKey', 'Jina']]
+const isAdmin = () => !state.info || state.info.role === 'admin'
+
+async function openSettings(tab = 'general') {
+  try { state.config = await json('/api/config') } catch {}
+  const dialog = $('#settings')
+  for (const el of $$('[data-setting]', dialog)) {
+    const value = state.config[el.dataset.setting]
+    if (el.type === 'checkbox') el.checked = !!value
+    else el.value = value ?? ''
+  }
+  $('#mascotToggle').checked = mascotEnabled()
+  $('#libraryDir').textContent = state.info.libraryDir
+  $('#keyStorage').textContent = desktop ? 'Keys are stored in your system keychain and never written to disk in plain text.' : 'Keys are kept in memory until the server restarts. They are never written to disk.'
+  $('#keys').innerHTML = KEY_FIELDS.map(([field, label]) =>
+    '<div class="key-row"><label for="key-' + field + '">' + label + '</label><input id="key-' + field + '" type="password" autocomplete="off" data-key="' + field + '" placeholder="' + (state.config.keysSet && state.config.keysSet[field] ? 'Saved' : 'Not set') + '">' +
+    '<span class="set">' + (state.config.keysSet && state.config.keysSet[field] ? '✓ set' : '') + '</span></div>').join('')
+  const notice = $('#embedNotice')
+  notice.hidden = !state.activity.embeddingError
+  notice.textContent = state.activity.embeddingError ? 'Search by meaning is paused: ' + state.activity.embeddingError + '. Keyword search still works.' : ''
+  $('#settingsSources').innerHTML = state.sources.length ? state.sources.map(s => '<div class="kv"><code>' + esc(s.path) + '</code></div>').join('') : '<p class="hint">None yet.</p>'
+  $$('[data-desktop]', dialog).forEach(el => { el.hidden = !desktop })
+  updateUrlFields()
+  showTab(isAdmin() || !['search', 'ai'].includes(tab) ? tab : 'general')
+  if (!dialog.open) dialog.showModal()
+}
+
+function showTab(tab) {
+  $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab))
+  $$('.panel').forEach(p => { p.hidden = p.dataset.panel !== tab })
+}
+
+function updateUrlFields() {
+  const embed = $('[data-setting="embedProvider"]').value
+  const llm = $('[data-setting="llmProvider"]').value
+  $('[data-show-for="embed-url"]').hidden = embed !== 'ollama' && embed !== 'openai-compatible'
+  $('[data-show-for="llm-url"]').hidden = llm !== 'ollama' && llm !== 'openai'
+}
+
+$$('.tab').forEach(t => t.addEventListener('click', () => showTab(t.dataset.tab)))
+
+$('#settings').addEventListener('change', async e => {
+  const el = e.target
+  if (el.id === 'mascotToggle') {
+    try { localStorage.setItem('duct.mascot', el.checked ? 'on' : 'off') } catch {}
+    renderMascots()
+    return
+  }
+  const body = {}
+  if (el.dataset.setting) body[el.dataset.setting] = el.type === 'checkbox' ? el.checked : el.value
+  else if (el.dataset.key && el.value.trim()) body[el.dataset.key] = el.value.trim()
+  else return
+  updateUrlFields()
+  try {
+    const data = await send('PUT', '/api/config', body)
+    state.config = data.config || state.config
+    if (el.dataset.key) { el.value = ''; el.placeholder = 'Saved'; el.nextElementSibling.textContent = '✓ set' }
+    toast('Saved')
+  } catch (err) { toast('Not saved: ' + err.message, true) }
+})
+
+// ---------- status ----------
+
+function renderStatus() {
+  const pill = $('#statusPill')
+  const a = state.activity
+  pill.className = 'status-pill'
+  if (a.indexing) {
+    pill.classList.add('busy')
+    pill.innerHTML = '<span class="dot"></span>Indexing ' + fmt(a.done) + ' / ' + fmt(a.total)
+    pill.title = a.current || ''
+  } else if (a.embedding) {
+    pill.classList.add('busy')
+    pill.innerHTML = '<span class="dot"></span>Preparing search by meaning'
+    pill.title = ''
+  } else if (a.embeddingError) {
+    pill.classList.add('warn')
+    pill.textContent = 'Search by meaning paused'
+    pill.title = a.embeddingError + '. Click for settings.'
+  } else {
+    pill.textContent = plural(readyDocs().length, 'document')
+    pill.title = state.sources.length ? 'Watching ' + plural(state.sources.length, 'folder') : ''
+  }
+}
+
+let pollTimer = null
+async function poll() {
+  clearTimeout(pollTimer)
+  try {
+    state.activity = await json('/api/activity')
+    const busy = state.activity.indexing || state.activity.embedding
+    if (busy && !$('#welcome').hidden) setProgress(state.activity.done, state.activity.total, state.activity.current)
+    if (state.wasBusy && !busy) await refreshAll()   // a run finished: new documents, counts and statuses
+    state.wasBusy = busy
+    renderStatus()
+    if (state.view === 'home') renderHome()
+    renderMascots()
+  } catch {}
+  pollTimer = setTimeout(poll, state.activity.indexing || state.activity.embedding ? 900 : 3000)
+}
+
+async function refreshAll() {
+  try { await loadData() } catch (err) { toast(err.message, true) }
+  renderSidebar()
+  renderStatus()
+  if (state.view === 'home') renderHome()
+  if (state.view === 'documents') renderDocuments()
+  if (state.view === 'results' && state.query) runSearch()
+  renderMascots()
+  finishWelcomeIfReady()
+  if (!state.wasBusy && (state.activity.indexing || state.activity.embedding)) { state.wasBusy = true; poll() }
+}
+
+// ---------- actions ----------
+
+const ACTIONS = {
+  'add-files': () => { closeAddMenu(); $('#fileInput').click() },
+  'watch-folder': () => { closeAddMenu(); watchFolder() },
+  'add-url': () => { closeAddMenu(); $('#urlDialog').showModal() },
+  'toggle-add': () => { const menu = $('#addMenu'); menu.hidden = !menu.hidden; $('[data-action="toggle-add"]').setAttribute('aria-expanded', String(!menu.hidden)) },
+  'open-settings': el => openSettings(el.dataset.tab || 'general'),
+  'skip-welcome': () => { rememberWelcome(); showApp() },
+  'finish-welcome': () => { rememberWelcome(); showApp() },
+  'show-attention': () => { state.docFilter = 'attention'; setView('documents') },
+  'close-preview': () => closePreview(),
+  'toggle-sidebar': () => $('#sidebar').classList.toggle('open'),
+  'export': () => exportResults(),
+  'clear-index': async () => {
+    if (!confirm('Clear the whole index?\n\nDocuments can be indexed again later. Files on disk are not touched, and watched folders stay watched.')) return
+    try { await json('/api/clear', { method: 'DELETE' }); toast('Index cleared') } catch (err) { toast(err.message, true) }
+    refreshAll()
+  },
+  'status': () => {
+    if (state.activity.embeddingError) openSettings('ai')
+    else if (!state.activity.indexing) { state.docFilter = 'all'; setView('documents') }
+  },
+}
+
+function closeAddMenu() { $('#addMenu').hidden = true; $('[data-action="toggle-add"]').setAttribute('aria-expanded', 'false') }
+
+document.addEventListener('click', e => {
+  const el = e.target.closest('[data-action]')
+  if (el && ACTIONS[el.dataset.action]) { e.preventDefault(); ACTIONS[el.dataset.action](el); return }
+  if (!e.target.closest('.menu-wrap')) closeAddMenu()
+})
+
+function exportResults() {
+  if (!state.query) { toast('Search for something first', true); return }
+  window.location.href = '/api/export?format=csv&q=' + encodeURIComponent(state.query)
+}
+
+// ---------- start ----------
+
+async function start() {
+  try {
+    state.info = await json('/api/info')
+    state.config = await json('/api/config').catch(() => ({}))
+    await loadData()
+  } catch (err) {
+    document.body.textContent = "Duct couldn't start: " + err.message
+    return
+  }
+  $('#fileInput').accept = state.info.accept
+  $$('[data-bind="supported"]').forEach(el => { el.textContent = state.info.supported })
+  $$('[data-bind="version"]').forEach(el => { el.textContent = 'v' + state.info.version })
+  if (!isAdmin()) $$('[data-admin]').forEach(el => { el.hidden = true })
+  $('#askSetup').hidden = state.config.llmProvider !== 'none'
+  renderSidebar()
+  renderStatus()
+  const empty = state.docs.length === 0 && state.sources.length === 0
+  if (empty && !skippedWelcome() && isAdmin()) showWelcome()
+  else showApp()
+  poll()
+}
+
+// Called by the desktop app (electron/main.cjs).
+window.duct = {
+  refresh: () => refreshAll(),
+  showFailed: () => { showApp(); state.docFilter = 'attention'; setView('documents') },
+  focusSearch: () => { showApp(); setMode('search'); focusSearch() },
+  openSettings: () => openSettings(),
+  exportResults,
+}
+
+start()

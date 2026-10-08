@@ -40,9 +40,11 @@ describe('server mascot assets', () => {
 
   it('references only local mascot assets from the page', async () => {
     const page = await (await fetch(`${base}/`)).text()
-    expect(page).toContain("import('/vendor/dotlottie/index.js')")
-    expect(page).toContain("setWasmUrl('/vendor/dotlottie/dotlottie-player.wasm')")
-    expect(page).not.toMatch(/jsdelivr|unpkg/)
+    expect(page).toContain('<script type="module" src="/ui/app.js"></script>')
+    const script = await (await fetch(`${base}/ui/app.js`)).text()
+    expect(script).toContain("import('/vendor/dotlottie/index.js')")
+    expect(script).toContain("setWasmUrl('/vendor/dotlottie/dotlottie-player.wasm')")
+    expect(page + script).not.toMatch(/jsdelivr|unpkg/)
   })
 })
 
@@ -57,7 +59,7 @@ describe('pages', () => {
   afterAll(() => server.close())
 
   // The pages are template literals in TypeScript; a stray backslash or backtick only shows up in the browser.
-  for (const [path, expected] of [['/', 2], ['/viewer', 1], ['/island', 1]] as const) {
+  for (const [path, expected] of [['/', 0], ['/viewer', 1], ['/island', 1]] as const) {
     it(`${path} has inline scripts that parse`, async () => {
       const vm = await import('node:vm')
       const page = await (await fetch(base + path)).text()
@@ -69,6 +71,14 @@ describe('pages', () => {
       }
     })
   }
+
+  it('serves the main UI as static files whose script parses', async () => {
+    const vm = await import('node:vm')
+    for (const file of ['index.html', 'app.css', 'app.js']) expect((await fetch(`${base}/ui/${file}`)).status, file).toBe(200)
+    const script = await (await fetch(`${base}/ui/app.js`)).text()
+    expect(() => new vm.Script(`(async () => {\n${script}\n})`)).not.toThrow()
+    expect(script).not.toMatch(/\bon(click|change|submit)=/)
+  })
 
   it('serves pdf.js for the viewer locally', async () => {
     for (const file of ['build/pdf.mjs', 'build/pdf.worker.mjs', 'web/pdf_viewer.mjs', 'web/pdf_viewer.css', 'standard_fonts/FoxitSans.pfb']) {

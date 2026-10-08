@@ -16,7 +16,7 @@ import { createLLMProvider, OpenAILLM, GeminiLLM } from './qa/provider.js'
 import { createEmbedder } from './embed/factory.js'
 import type { EmbedProvider } from './embed/factory.js'
 import type {
-  DuctConfig, Chunk, EmbeddingProvider, IndexResult, IndexOptions, IndexActivity, IndexFailure, SearchResult,
+  DuctConfig, Chunk, EmbeddingProvider, IndexResult, IndexOptions, IndexActivity, IndexFailure, SearchResult, SearchScope,
   DocumentInfo, DocumentFormat, RuntimeConfig, Reranker, LLMProvider,
   QAResult, SchemaField, ExtractionResult, DocDiff, ExtractedDocument,
 } from './types.js'
@@ -510,7 +510,11 @@ export class Duct {
     return this.store.getDocument(path) ?? (isUrl(path) ? undefined : this.store.getDocument(resolve(path)))
   }
 
-  async search(query: string, topK = 10, filter?: Record<string, unknown>): Promise<SearchResult[]> {
+  /**
+   * Searches the index. `filter` matches document metadata exactly; `scope` narrows the search to some
+   * formats and/or one folder.
+   */
+  async search(query: string, topK = 10, filter?: Record<string, unknown>, scope?: SearchScope): Promise<SearchResult[]> {
     const fetchK = Math.max(topK * 3, 30)
     const activeFilter = filter && Object.keys(filter).length > 0 ? filter : undefined
     let results: SearchResult[]
@@ -518,18 +522,18 @@ export class Duct {
     if ((this.searchMode === 'vector' || this.searchMode === 'hybrid') && this.embedder) {
       try {
         const queryEmb = this.embedder.embedQuery ? await this.embedder.embedQuery(query) : (await this.embedder.embed([query]))[0]
-        const vectorResults = this.store.searchVectors(queryEmb, this.embedKey(), fetchK, activeFilter)
+        const vectorResults = this.store.searchVectors(queryEmb, this.embedKey(), fetchK, activeFilter, scope)
         if (this.searchMode === 'vector' && vectorResults.length > 0) {
           results = vectorResults
         } else {
-          const textResults = this.store.searchText(query, fetchK, activeFilter)
+          const textResults = this.store.searchText(query, fetchK, activeFilter, scope)
           results = vectorResults.length > 0 ? reciprocalRankFusion(textResults, vectorResults, fetchK, this.searchAlpha) : textResults
         }
       } catch {
-        results = this.store.searchText(query, fetchK, activeFilter)
+        results = this.store.searchText(query, fetchK, activeFilter, scope)
       }
     } else {
-      results = this.store.searchText(query, fetchK, activeFilter)
+      results = this.store.searchText(query, fetchK, activeFilter, scope)
     }
 
     try {

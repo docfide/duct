@@ -19,7 +19,8 @@
   "files": [
     "dist",
     "assets/mascot",
-    "assets/ocr"
+    "assets/ocr",
+    "assets/ui"
   ],
   "scripts": {
     "build": "tsc",
@@ -46,7 +47,8 @@
       "electron/**/*",
       "package.json",
       "assets/mascot/**/*",
-      "assets/ocr/**/*"
+      "assets/ocr/**/*",
+      "assets/ui/**/*"
     ],
     "mac": {
       "category": "public.app-category.productivity",

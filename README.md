@@ -96,11 +96,12 @@ duct serve
 # → http://localhost:3456
 ```
 
-Four tabs:
-- **Search** — search indexed documents with mode badge
-- **Ask** — Q&A with configurable LLM, agentic mode toggle
-- **Upload** — drag-and-drop files or index by URL
-- **Settings** — configure LLM provider, API keys, search mode, chunking
+- **First run:** choose a folder or add files, watch Duct read them, then start searching.
+- **Search as you type:** results show the page, slide, sheet or chapter with the matching words highlighted. A preview pane shows the passage, and **Open at p. 12** opens the document there.
+- **Filters:** narrow by file type (PDFs, documents, spreadsheets, presentations, email…) or source (your Library or a watched folder). File names are searchable too.
+- **Documents:** everything indexed, plus a **Needs attention** list of files that couldn't be read or need OCR.
+- **Ask** (Labs): answers from your documents with numbered sources, using the AI model you choose.
+- **Settings:** OCR, search mode, AI providers and API keys (stored in the system keychain in the desktop app), Library and watched folders.
 
 ```bash
 duct serve --port 8080 --persist .duct-data --auth-token my-secret --llm ollama

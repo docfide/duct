@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Browsers log in to a token-protected server once (`POST /api/login`, HttpOnly cookie).
 
 ### Added
+- Redesigned main window: search as you type with a preview pane, file-type and source filters, a Documents view with **Needs attention**, a settings dialog, and Ask as a Labs mode in the search bar. It works down to phone-width windows.
+- First-run screen: choose a folder or add files, watch the progress, start searching.
+- File names are searchable, not just file contents.
+- In the desktop app, API keys entered in Settings are kept in the system keychain (macOS Keychain, Windows DPAPI, the Linux secret store).
+- The main page's Content-Security-Policy forbids inline scripts. The UI now lives in `assets/ui/` instead of a template string.
 - Many more formats (see docs/formats.md): legacy Word (.doc), OpenDocument (.odt, .ods, .odp), Apple Pages/Numbers/Keynote (including package folders), RTF, EPUB, email (.eml, Outlook .msg, with attachments), old Excel (.xls, .xlsb), ZIP archives, subtitles, YAML/TOML and other text formats, source code, SVG text, and iPhone HEIC photos (OCR). PowerPoint speaker notes are indexed with their slide.
 - Results name the location by format: "slide 4", "sheet 2", "ch. 3" or "p. 12".
 - Folder scans skip `node_modules`, `.git`, caches, the Trash, hidden folders, Office lock files and `.env` files.

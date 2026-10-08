@@ -20,6 +20,7 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY assets/mascot ./assets/mascot
 COPY assets/ocr ./assets/ocr
+COPY assets/ui ./assets/ui
 COPY README.md LICENSE ./
 
 EXPOSE 3456

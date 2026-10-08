@@ -95,9 +95,18 @@ describe('server security', () => {
     expect(res.headers.get('x-content-type-options')).toBe('nosniff')
   })
 
-  it('escapes LLM answers before inserting them into the page', async () => {
-    const page = await (await fetch(`${s.base}/`)).text()
-    expect(page).toContain('esc(data.answer')
+  it('shows LLM answers as text, never as HTML', async () => {
+    const script = await (await fetch(`${s.base}/ui/app.js`)).text()
+    expect(script).toContain('answer.textContent = data.answer')
+    expect(script).not.toMatch(/innerHTML\s*=\s*data\.answer/)
+  })
+
+  it('forbids inline scripts on the main page', async () => {
+    const csp = (await fetch(`${s.base}/`)).headers.get('content-security-policy') || ''
+    const scriptSrc = csp.split(';').find(d => d.trim().startsWith('script-src')) || ''
+    expect(scriptSrc).not.toContain('unsafe-inline')
+    const islandCsp = (await fetch(`${s.base}/island`)).headers.get('content-security-policy') || ''
+    expect(islandCsp).toContain("'unsafe-inline'")
   })
 })
 
