@@ -22,7 +22,7 @@ function screenMetrics(display) {
   return { bar: isMac ? menuBar : 0, notch: hasNotch ? NOTCH_WIDTH : 0 }
 }
 
-function createIsland({ serverUrl, onShowMain, onAddFiles }) {
+function createIsland({ serverUrl, onShowMain, onAddFiles, sound = true, hello = false }) {
   let win = null
   let shape = null
   let inside = false
@@ -36,7 +36,8 @@ function createIsland({ serverUrl, onShowMain, onAddFiles }) {
   function load() {
     const display = screen.getPrimaryDisplay()
     metrics = screenMetrics(display)
-    win.loadURL(`${serverUrl}/island?notch=${metrics.notch}&bar=${metrics.bar}&platform=${process.platform}`)
+    win.loadURL(`${serverUrl}/island?notch=${metrics.notch}&bar=${metrics.bar}&platform=${process.platform}&sound=${sound ? 1 : 0}&hello=${hello ? 1 : 0}`)
+    hello = false
   }
 
   function create() {
@@ -58,6 +59,8 @@ function createIsland({ serverUrl, onShowMain, onAddFiles }) {
       // On macOS a panel can take keyboard input for the search box without bringing Duct's main window forward.
       ...(process.platform === 'darwin' ? { type: 'panel', enableLargerThanScreen: true } : {}),
       webPreferences: {
+        // Sounds answer clicks and drops, but the first-launch hello plays before any click.
+        autoplayPolicy: 'no-user-gesture-required',
         preload: path.join(__dirname, 'island-preload.cjs'),
         contextIsolation: true,
         nodeIntegration: false,
@@ -127,6 +130,10 @@ function createIsland({ serverUrl, onShowMain, onAddFiles }) {
   create()
 
   return {
+    setSound(on) {
+      sound = on
+      if (win && !win.isDestroyed()) win.webContents.send('island:settings', { sound: on })
+    },
     /** Opens the quick search (used by the global shortcut). */
     openSearch() {
       if (!win || win.isDestroyed()) return

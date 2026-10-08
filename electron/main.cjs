@@ -27,10 +27,26 @@ function islandEnabled() {
   return typeof prefs.island === 'boolean' ? prefs.island : process.platform === 'darwin'
 }
 
+function soundsEnabled() {
+  return readPrefs().sounds !== false
+}
+
+function setSoundsEnabled(on) {
+  writePrefs({ ...readPrefs(), sounds: on })
+  island?.setSound(on)
+  createAppMenu()
+  updateTrayMenu()
+}
+
 function startIsland() {
   if (island || !serverUrl) return
+  const prefs = readPrefs()
+  // The hello sound plays once, on the first launch with the island.
+  if (!prefs.greeted) writePrefs({ ...prefs, greeted: true })
   island = createIsland({
     serverUrl,
+    sound: soundsEnabled(),
+    hello: !prefs.greeted,
     onShowMain: () => { mainWindow?.show(); mainWindow?.focus() },
     onAddFiles: async files => {
       const result = await addFilesToLibrary(files)
@@ -249,6 +265,7 @@ function createAppMenu() {
       submenu: [
         { label: process.platform === 'darwin' ? 'Show Duct in the Menu Bar Notch' : 'Show Duct at the Top of the Screen', type: 'checkbox', checked: islandEnabled(), click: item => setIslandEnabled(item.checked) },
         { label: 'Quick Search', accelerator: SEARCH_SHORTCUT, registerAccelerator: false, click: openQuickSearch },
+        { label: 'Play Sounds', type: 'checkbox', checked: soundsEnabled(), click: item => setSoundsEnabled(item.checked) },
         { type: 'separator' },
         { label: 'Reload', accelerator: 'Cmd+R', role: 'reload' },
         { label: 'Toggle DevTools', accelerator: 'Cmd+Alt+I', role: 'toggleDevTools' },
@@ -325,6 +342,7 @@ function updateTrayMenu() {
     { label: 'Show Duct', click: () => { mainWindow?.show(); mainWindow?.focus() } },
     { label: 'Quick Search', click: openQuickSearch },
     { label: process.platform === 'darwin' ? 'Show in the Notch' : 'Show at the Top of the Screen', type: 'checkbox', checked: islandEnabled(), click: item => setIslandEnabled(item.checked) },
+    { label: 'Play Sounds', type: 'checkbox', checked: soundsEnabled(), click: item => setSoundsEnabled(item.checked) },
     { type: 'separator' },
     { label: 'Quit', click: () => app.quit() },
   ]))

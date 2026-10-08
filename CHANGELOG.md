@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Duct's own PDF viewer (`/viewer`, built on pdf.js): opens at the result's page and highlights the matched words, including stemmed forms ("terminate" highlights "termination"), with previous/next match, page and zoom controls.
 - The island: on macOS the mascot lives in the notch, or in a small pill in the menu bar on Macs without one. It shows indexing progress, greets you on launch, peeks out on hover and opens a quick search on click or with ⌘⇧Space (Ctrl+Shift+Space elsewhere). Drop files on it to add them to the Library. Toggle it from View or the tray menu.
+- Island sounds: short synthesized chirps (no audio files) for a poke, the dizzy triple-poke, opening quick search, dropped files (added, already indexed, or not supported), a long indexing job finishing (8 s or more), and a hello on the very first launch. The main window stays silent. Turn them off with View › Play Sounds or the tray menu.
 - The tray mascot sleeps while folders are watched and wakes up while indexing.
 - Page numbers: PDF and PPTX chunks record their page or slide. Results show "p. 47", with **Open at p. 47** (browser viewer or the desktop PDF window) and **Show in folder** in the desktop app.
 - Highlighted snippets around each match.

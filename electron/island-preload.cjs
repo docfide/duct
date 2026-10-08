@@ -10,4 +10,5 @@ contextBridge.exposeInMainWorld('ductIsland', {
   addFiles: (files) => ipcRenderer.invoke('island:add-files', files.map(f => webUtils.getPathForFile(f)).filter(Boolean)),
   onPointer: (callback) => ipcRenderer.on('island:pointer', (_event, inside) => callback(inside)),
   onOpenSearch: (callback) => ipcRenderer.on('island:open-search', () => callback()),
+  onSettings: (callback) => ipcRenderer.on('island:settings', (_event, settings) => callback(settings)),
 })

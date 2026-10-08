@@ -110,6 +110,7 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
   let results = []
   let selected = 0
   let lastQuery = ''
+  let indexingSince = 0
 
   // ---------- shape ----------
   function sizeFor(s) {
@@ -204,12 +205,50 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
     } catch {}
   }
 
+  // ---------- sounds ----------
+  // Short synthesized sounds (no audio files): only for things the user did or is waiting on, never per file.
+  // Off with View > Play Sounds; the page is told through api.onSettings.
+  let soundOn = params.get('sound') !== '0'
+  const VOLUME = 0.22
+  let audio = null
+  function tone(freq, dur, opts) {
+    const o = opts || {}
+    if (!audio) audio = new AudioContext()
+    const t = audio.currentTime + (o.delay || 0)
+    const osc = audio.createOscillator()
+    const gain = audio.createGain()
+    osc.type = o.type || 'sine'
+    osc.frequency.setValueAtTime(freq, t)
+    if (o.to) osc.frequency.exponentialRampToValueAtTime(o.to, t + dur)
+    gain.gain.setValueAtTime(0.0001, t)
+    gain.gain.exponentialRampToValueAtTime((o.gain || 1) * VOLUME, t + 0.012)
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + dur)
+    osc.connect(gain).connect(audio.destination)
+    osc.start(t)
+    osc.stop(t + dur + 0.03)
+  }
+  const SOUNDS = {
+    hello: () => { tone(660, 0.12, { to: 880 }); tone(880, 0.16, { to: 1175, delay: 0.11 }) },
+    open: () => tone(1250, 0.05, { gain: 0.35 }),
+    boop: () => tone(460, 0.13, { to: 300, type: 'triangle' }),
+    dizzy: () => { for (let i = 0; i < 6; i++) tone(i % 2 ? 620 : 500, 0.09, { delay: i * 0.075, type: 'triangle', gain: 0.6 }) },
+    done: () => { tone(784, 0.16); tone(1047, 0.3, { delay: 0.12 }) },
+    gulp: () => { tone(340, 0.16, { to: 150 }); tone(900, 0.06, { delay: 0.17, gain: 0.4 }) },
+    oops: () => { tone(392, 0.15, { type: 'triangle' }); tone(330, 0.22, { delay: 0.14, type: 'triangle' }) },
+  }
+  function sound(name) {
+    if (!soundOn) return
+    try { SOUNDS[name]() } catch {}
+  }
+  api.onSettings(settings => { soundOn = !!settings.sound })
+
   // Click the mascot: a happy hop. Click it three times quickly and it gets dizzy.
   let clicks = []
   function poke() {
     const now = Date.now()
     clicks = clicks.filter(t => now - t < 900).concat(now)
     poseOverride = clicks.length >= 3 ? 'nothingFound' : 'done'
+    sound(clicks.length >= 3 ? 'dizzy' : 'boop')
     refreshMascots()
     clearTimeout(poke.timer)
     poke.timer = setTimeout(() => { poseOverride = null; refreshMascots() }, clicks.length >= 3 ? 2600 : 1300)
@@ -254,10 +293,12 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
       ])
       const wasIndexing = activity.indexing
       activity = a; stats = s; sources = src.sources || []
+      if (a.indexing && !wasIndexing) indexingSince = Date.now()
       if (a.indexing && state === 'hidden') { liveKind = 'working'; setState('live') }
       if (!a.indexing && wasIndexing) {
-        // Finished: a short celebration in the wings, then tuck away again.
+        // Finished: a short celebration in the wings, then tuck away again. Only long jobs get a chime.
         liveKind = 'done'
+        if (Date.now() - indexingSince >= 8000) sound('done')
         if (state === 'hidden' || state === 'live') setState('live')
         clearTimeout(liveTimer)
         liveTimer = setTimeout(() => { liveKind = null; if (state === 'live') setState('hidden'); else refreshMascots(); renderText() }, 3500)
@@ -294,6 +335,7 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
   })
 
   function openSearch() {
+    if (state !== 'search') sound('open')
     greeting = false
     setState('search')
     renderText()
@@ -380,7 +422,9 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
     dragDepth = 0
     const files = Array.from(e.dataTransfer ? e.dataTransfer.files : [])
     collapse()
-    if (files.length) await api.addFiles(files)
+    if (!files.length) return
+    const result = await api.addFiles(files)
+    sound(result && result.added > 0 ? 'gulp' : result && result.duplicates > 0 ? 'boop' : 'oops')
   })
 
   // ---------- start: a short wake-and-wave greeting ----------
@@ -391,6 +435,7 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
     greeting = true
     setState('peek')
     renderText()
+    if (params.get('hello') === '1') sound('hello')   // only on the very first launch
     setTimeout(() => { if (greeting && !pointerInside) collapse() }, 3800)
   }, 700)
 </script>
