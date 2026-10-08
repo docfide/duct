@@ -262,6 +262,36 @@ export class TensflareAccount {
     return tokens.access_token
   }
 
+  /** A HostedAiClient (src/hosted.ts) that calls Tensflare's hosted AI with this account. */
+  hostedAi() {
+    let dimensions = 1024
+    const post = async (path: string, body: unknown) => {
+      const res = await this.fetchImpl(`${this.apiUrl}${path}`, {
+        method: 'POST', headers: { Authorization: `Bearer ${await this.accessToken()}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body), signal: AbortSignal.timeout(120_000),
+      })
+      const data = await res.json().catch(() => ({})) as Record<string, unknown>
+      if (!res.ok) throw new Error(typeof data['error'] === 'string' ? data['error'] : `Hosted AI failed (HTTP ${res.status})`)
+      return data
+    }
+    return {
+      get dimensions() { return dimensions },
+      embed: async (texts: string[], kind: 'document' | 'query') => {
+        const data = await post('/v1/ai/embed', { texts, kind })
+        if (typeof data['dimensions'] === 'number') dimensions = data['dimensions']
+        return data['vectors'] as number[][]
+      },
+      generate: async (prompt: string, system?: string) => String((await post('/v1/ai/generate', { prompt, system }))['text'] ?? ''),
+    }
+  }
+
+  /** Hosted AI availability and this month's credits. */
+  async aiInfo(): Promise<{ entitled: boolean; answers: boolean; embeddings: { model: string; dimensions: number } | null; credits: { used: number; limit: number; resets: string } }> {
+    const res = await this.fetchImpl(`${this.apiUrl}/v1/ai`, { headers: { Authorization: `Bearer ${await this.accessToken()}` }, signal: AbortSignal.timeout(15_000) })
+    if (!res.ok) throw new Error(`Couldn’t load hosted AI status (HTTP ${res.status})`)
+    return res.json() as never
+  }
+
   /** Plan, renewal and recent payments, for Settings › Account. */
   async billing(): Promise<BillingSummary> {
     const res = await this.fetchImpl(`${this.apiUrl}/v1/billing`, { headers: { Authorization: `Bearer ${await this.accessToken()}` }, signal: AbortSignal.timeout(15_000) })

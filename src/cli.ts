@@ -12,6 +12,8 @@ import { createServer } from './server.js'
 import { FileAccountStorage, TensflareAccount } from './account.js'
 import { Telemetry } from './telemetry.js'
 import { installCrashHandlers } from './diagnostics.js'
+import { setHostedAi } from './hosted.js'
+import { SettingsSync } from './sync.js'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { VERSION } from './version.js'
@@ -577,6 +579,9 @@ program
       const telemetry = new Telemetry({ dir: dataDir(options.persist), channel, duct, plan: () => account.status().plan })
       telemetry.start()
       account.refresh().catch(() => {})
+      setHostedAi(account.hostedAi())
+      const sync = new SettingsSync(duct, account, dataDir(options.persist))
+      sync.start()
       const server = createServer(duct, {
         authToken: token,
         memberTokens,
@@ -588,6 +593,7 @@ program
         telemetry,
         crashDir,
         channel,
+        sync,
       })
       server.listen(options.port, options.host, () => {
         const shownHost = loopback ? 'localhost' : options.host

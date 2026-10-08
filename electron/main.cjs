@@ -192,13 +192,17 @@ async function startServer() {
   account = new TensflareAccount({ storage: accountStorage(), openUrl: url => shell.openExternal(url) })
   account.refresh().catch(() => {})
   setInterval(() => { account.refresh().catch(() => {}) }, 60 * 60 * 1000).unref()
+  ;(await import('../dist/hosted.js')).setHostedAi(account.hostedAi())
+  const { SettingsSync } = await import('../dist/sync.js')
+  const sync = new SettingsSync(duct, account, app.getPath('userData'))
+  sync.start()
   telemetry = new Telemetry({
     dir: app.getPath('userData'), channel: 'desktop', duct,
     plan: () => account.status().plan,
     prefs: () => ({ island: islandEnabled(), sounds: soundsEnabled() }),
   })
   telemetry.start()
-  const expressApp = createServer(duct, { uploadLimitMb: 100, libraryDir: libraryDir(), onSecrets: saveSecrets, account, telemetry, crashDir: crashDir(), channel: 'desktop' })
+  const expressApp = createServer(duct, { uploadLimitMb: 100, libraryDir: libraryDir(), onSecrets: saveSecrets, account, telemetry, crashDir: crashDir(), channel: 'desktop', sync })
   return new Promise((resolve) => {
     server = expressApp.listen(0, '127.0.0.1', () => {
       serverUrl = `http://127.0.0.1:${server.address().port}`

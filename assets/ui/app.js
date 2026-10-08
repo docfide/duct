@@ -1134,8 +1134,23 @@ async function renderAccount() {
     (a.needsReconnect ? '<p class="notice">Connect to the internet to keep paid features working. Everything local still works.</p>' : '') +
     (a.entitlements.length ? '<ul>' + a.entitlements.map(e => '<li>' + esc(ENTITLEMENT_LABELS[e] || e) + '</li>').join('') + '</ul>' : '<p class="hint">Your plan is Free. Everything local is included.</p>') +
     (until && !a.needsReconnect ? '<p class="hint">Paid features keep working offline until ' + esc(until) + '.</p>' : '') + billingHtml +
+    (await aiAndSyncHtml()) +
     '<div class="about-actions">' + (sub ? '<button class="btn btn-primary" data-action="account-portal" data-next="/account">Manage plan and billing</button>' : '<button class="btn btn-primary" data-action="account-portal" data-next="/account/upgrade">Upgrade</button><button class="btn" data-action="account-portal" data-next="/account">Account settings</button>') +
     '<button class="btn" data-action="account-signout">Sign out</button></div></div>'
+}
+
+/** Hosted AI credits and the sync switch, for the Account tab. */
+async function aiAndSyncHtml() {
+  const [ai, sync] = await Promise.all([json('/api/account/ai').catch(() => ({})), json('/api/sync').catch(() => ({}))])
+  let html = ''
+  if (ai.entitled) {
+    html += '<p class="hint">Hosted AI: ' + esc(String(ai.credits.used)) + ' of ' + esc(String(ai.credits.limit)) + ' credits used this month. Choose “Tensflare” in Settings › AI to use it.</p>'
+  }
+  if (sync.available) {
+    html += '<label class="check"><input type="checkbox" id="syncToggle"' + (sync.enabled ? ' checked' : '') + '> <span><strong>Sync settings across my devices</strong><small>Search and AI settings and feature switches. Never your documents, file names, folders or API keys.' +
+      (sync.enabled && sync.lastSync ? ' Last synced ' + esc(new Date(sync.lastSync).toLocaleString()) + '.' : '') + (sync.error ? ' <span class="warn">' + esc(sync.error) + '</span>' : '') + '</small></span></label>'
+  }
+  return html
 }
 
 async function renderTelemetry() {
@@ -1173,6 +1188,11 @@ $('#settings').addEventListener('change', async e => {
   if (el.id === 'mascotToggle') {
     try { localStorage.setItem('duct.mascot', el.checked ? 'on' : 'off') } catch {}
     renderMascots()
+    return
+  }
+  if (el.id === 'syncToggle') {
+    try { await send('PUT', '/api/sync', { enabled: el.checked }); toast(el.checked ? 'Sync on' : 'Sync off') } catch (err) { el.checked = !el.checked; toast(err.message, true) }
+    renderAccount()
     return
   }
   if (el.id === 'telemetryToggle') {

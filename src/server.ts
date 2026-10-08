@@ -20,6 +20,7 @@ import type { ExportItem } from './export.js'
 import { createApiRouter } from './api/v1.js'
 import type { TensflareAccount } from './account.js'
 import type { Telemetry } from './telemetry.js'
+import type { SettingsSync } from './sync.js'
 import { clearCrashes, collectDiagnostics, listCrashes, sendFeedback, validateFeedback } from './diagnostics.js'
 import { Collections } from './api/collections.js'
 import { FEATURE_LABELS, FEATURE_NAMES, FORMAT_KINDS, FeatureDisabledError } from './features.js'
@@ -93,6 +94,8 @@ export interface ServerOptions {
   channel?: string
   /** Overrides where feedback is sent (tests, staging). */
   feedbackUrl?: string
+  /** Settings sync between the account's devices (Pro and Team). */
+  sync?: SettingsSync
 }
 
 /** 403 for a switched-off feature, otherwise `status` with the error's message. */
@@ -331,6 +334,23 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     try { res.json({ url: await account.webLink(next) }) } catch (err) { res.status(502).json({ error: (err as Error).message }) }
   })
 
+  // Hosted AI status and this month's credits (Pro and Team).
+  app.get('/api/account/ai', async (_req, res) => {
+    if (!account || !account.status().signedIn || !account.has('ai.hosted')) { res.json({ entitled: false }); return }
+    try { res.json(await account.aiInfo()) } catch (err) { res.status(502).json({ error: (err as Error).message }) }
+  })
+
+  app.get('/api/sync', (_req, res) => {
+    res.json(opts?.sync ? opts.sync.status() : { available: false, enabled: false })
+  })
+
+  app.put('/api/sync', adminOnly, async (req, res) => {
+    if (!opts?.sync) { res.status(404).json({ error: 'Sync isn’t available here.' }); return }
+    if (typeof req.body?.enabled !== 'boolean') { res.status(400).json({ error: 'Send { "enabled": true | false }' }); return }
+    if (req.body.enabled && !opts.sync.status().available) { res.status(403).json({ error: 'Sync is part of Pro and Team.' }); return }
+    res.json({ ...(await opts.sync.enable(req.body.enabled)), available: opts.sync.status().available })
+  })
+
   app.post('/api/account/signout', adminOnly, async (_req, res) => {
     if (account) await account.signOut()
     signIn = { running: false }
@@ -388,7 +408,9 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
 
   app.put('/api/features', adminOnly, (req, res) => {
     try {
-      res.json({ ok: true, features: duct.setFeatures(req.body) })
+      const features = duct.setFeatures(req.body)
+      opts?.sync?.changed()
+      res.json({ ok: true, features })
     } catch (err) {
       sendError(res, err, 400)
     }
@@ -558,6 +580,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
   app.put('/api/config', adminOnly, (req, res) => {
     try {
       duct.configure(req.body)
+      opts?.sync?.changed()
       const keys = Object.fromEntries(API_KEY_FIELDS.filter(k => typeof req.body?.[k] === 'string' && req.body[k]).map(k => [k, req.body[k] as string]))
       if (Object.keys(keys).length) opts?.onSecrets?.(keys)
       res.json({ ok: true, config: publicConfig() })

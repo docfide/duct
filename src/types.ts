@@ -113,7 +113,7 @@ export interface DuctConfig {
   }
   /** Embedding settings; `false` disables embeddings even when API keys are present. */
   embed?: false | {
-    provider?: 'openai' | 'gemini' | 'cohere' | 'voyage' | 'mistral' | 'jina' | 'ollama' | 'openai-compatible'
+    provider?: 'openai' | 'gemini' | 'cohere' | 'voyage' | 'mistral' | 'jina' | 'ollama' | 'openai-compatible' | 'tensflare'
     model?: string
     baseUrl?: string
     apiKey?: string
@@ -123,7 +123,7 @@ export interface DuctConfig {
   /** Refuse to fetch URLs that resolve to loopback, private or link-local addresses. Enabled by `duct serve`. */
   blockPrivateUrls?: boolean
   llm?: {
-    provider?: 'ollama' | 'openai' | 'gemini'
+    provider?: 'ollama' | 'openai' | 'gemini' | 'tensflare'
     model?: string
     baseUrl?: string
   }
