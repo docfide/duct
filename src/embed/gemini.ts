@@ -22,10 +22,14 @@ export class GeminiEmbedder implements EmbeddingProvider {
 
   async embed(texts: string[]): Promise<number[][]> {
     const model = await this.getModel()
+    // One request per batch instead of one per text (the API accepts up to 100 per call).
     const results: number[][] = []
-    for (const text of texts) {
-      const result = await model.embedContent(text)
-      results.push(result.embedding.values)
+    for (let i = 0; i < texts.length; i += 100) {
+      const batch = texts.slice(i, i + 100)
+      const response = await model.batchEmbedContents({
+        requests: batch.map(text => ({ content: { role: 'user', parts: [{ text }] } })),
+      })
+      results.push(...response.embeddings.map(e => e.values))
     }
     return results
   }

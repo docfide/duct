@@ -1,24 +1,23 @@
 import express from 'express'
 import multer from 'multer'
 import rateLimit from 'express-rate-limit'
-import { existsSync, mkdirSync, unlinkSync } from 'node:fs'
-import { extname, join } from 'node:path'
+import { createHash, timingSafeEqual } from 'node:crypto'
+import { existsSync, mkdirSync, realpathSync, unlinkSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { createRequire } from 'node:module'
+import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { Duct } from './index.js'
+import { isUrl } from './extract/web.js'
+import { addToLibrary, defaultLibraryDir } from './library.js'
+import { VERSION } from './version.js'
+
+// Mascot art ships with the package; the dotLottie player and its wasm are served
+// locally (never from a CDN) so the UI works offline.
+const mascotDir = fileURLToPath(new URL('../assets/mascot', import.meta.url))
+const lottiePlayerDir = dirname(createRequire(import.meta.url).resolve('@lottiefiles/dotlottie-web'))
 
 const VALID_EXTS = new Set(['.pdf', '.docx', '.md', '.markdown', '.html', '.htm', '.txt', '.csv', '.json', '.log', '.xml', '.xlsx', '.pptx', '.png', '.jpg', '.jpeg', '.tiff', '.tif', '.bmp', '.gif', '.webp'])
-
-const uploadDir = join(process.cwd(), '.duct-uploads')
-if (!existsSync(uploadDir)) mkdirSync(uploadDir, { recursive: true })
-
-const storage = multer.diskStorage({
-  destination: uploadDir,
-  filename: (_req, file, cb) => {
-    const ext = extname(file.originalname).toLowerCase()
-    cb(null, Date.now() + '-' + Math.random().toString(36).slice(2) + ext)
-  },
-})
-
-const originalNames = new Map<string, string>()
 
 function parseMetadata(raw: unknown): Record<string, unknown> | undefined {
   if (!raw) return undefined
@@ -29,10 +28,84 @@ function parseMetadata(raw: unknown): Record<string, unknown> | undefined {
   return undefined
 }
 
-export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimitMb?: number }) {
+const LOOPBACK_HOSTS = ['localhost', '127.0.0.1', '::1']
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "connect-src 'self'",
+  "worker-src 'self' blob:",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join('; ')
+
+export interface ServerOptions {
+  /** Require this token (Bearer header or login cookie) on every /api request. */
+  authToken?: string
+  uploadLimitMb?: number
+  /** Directories POST /api/watch may watch (and their subfolders). Empty or unset disables watching through the API. */
+  watchRoots?: string[]
+  /** Hostnames accepted in the Host header. Defaults to loopback names; '*' accepts any (only with authToken). */
+  allowedHosts?: string[] | '*'
+  /** Where uploaded files are kept. Defaults to ~/Duct Library; created on first upload. */
+  libraryDir?: string
+}
+
+function hostnameOf(hostHeader: string | undefined): string {
+  if (!hostHeader) return ''
+  const v6 = hostHeader.match(/^\[([^\]]+)\]/)
+  if (v6) return v6[1].toLowerCase()
+  return hostHeader.replace(/:\d+$/, '').toLowerCase()
+}
+
+function sameToken(a: string, b: string): boolean {
+  const ha = createHash('sha256').update(a).digest()
+  const hb = createHash('sha256').update(b).digest()
+  return timingSafeEqual(ha, hb)
+}
+
+function readCookie(header: string | undefined, name: string): string | undefined {
+  if (!header) return undefined
+  for (const part of header.split(';')) {
+    const [k, ...v] = part.trim().split('=')
+    if (k === name) return decodeURIComponent(v.join('='))
+  }
+  return undefined
+}
+
+function isInside(child: string, parent: string): boolean {
+  const rel = relative(parent, child)
+  return rel === '' || (!!rel && !rel.startsWith('..') && !isAbsolute(rel))
+}
+
+function realOrResolved(p: string): string {
+  try { return realpathSync(p) } catch { return resolve(p) }
+}
+
+export function createServer(duct: Duct, opts?: ServerOptions) {
   const app = express()
   const token = opts?.authToken
   const maxMb = opts?.uploadLimitMb ?? 50
+  const allowedHosts = opts?.allowedHosts ?? LOOPBACK_HOSTS
+  const watchRoots = opts?.watchRoots ?? []
+  const libraryDir = resolve(opts?.libraryDir ?? defaultLibraryDir())
+  const incomingDir = join(libraryDir, '.incoming')
+
+  // Uploads land in the library's .incoming folder, then move into the library under their real name.
+  const storage = multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      try {
+        mkdirSync(incomingDir, { recursive: true })
+        cb(null, incomingDir)
+      } catch (err) {
+        cb(err as Error, incomingDir)
+      }
+    },
+    filename: (_req, file, cb) => cb(null, `${Date.now()}-${randomBytes(6).toString('hex')}${extname(file.originalname).toLowerCase()}`),
+  })
 
   const upload = multer({
     storage,
@@ -50,24 +123,70 @@ export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimi
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: 'Too many requests. Rate limit: 120 requests per minute.' },
+    // Only a shared (token-protected) server is rate limited; a local-only one serves just this machine.
+    skip: () => !token,
   })
 
   function auth(req: express.Request, res: express.Response, next: express.NextFunction): void {
     if (!token) return next()
     const header = req.headers['authorization']
-    if (header === `Bearer ${token}`) return next()
+    const bearer = typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : undefined
+    const cookie = readCookie(req.headers.cookie, 'duct_token')
+    if ((bearer && sameToken(bearer, token)) || (cookie && sameToken(cookie, token))) return next()
     res.status(401).json({ error: 'Unauthorized. Provide a valid Bearer token.' })
   }
 
+  // Security headers on every response.
+  app.use((_req, res, next) => {
+    res.setHeader('Content-Security-Policy', CSP)
+    res.setHeader('X-Content-Type-Options', 'nosniff')
+    res.setHeader('X-Frame-Options', 'DENY')
+    res.setHeader('Referrer-Policy', 'no-referrer')
+    next()
+  })
+
+  // Reject unexpected Host headers (DNS rebinding) and cross-site writes (CSRF).
+  app.use((req, res, next) => {
+    if (allowedHosts !== '*' && !allowedHosts.includes(hostnameOf(req.headers.host))) {
+      res.status(403).json({ error: 'Host not allowed.' })
+      return
+    }
+    const origin = req.headers.origin
+    if (origin && req.method !== 'GET' && req.method !== 'HEAD') {
+      let originHost = ''
+      try { originHost = new URL(origin).host } catch {}
+      if (originHost !== req.headers.host) {
+        res.status(403).json({ error: 'Cross-origin request blocked.' })
+        return
+      }
+    }
+    next()
+  })
+
   app.use(express.json({ limit: '10mb' }))
   app.use('/api/', apiLimiter)
+
+  // Browser login: exchanges the token for an HttpOnly cookie so the UI works on a protected server.
+  app.post('/api/login', (req, res) => {
+    if (!token) { res.json({ ok: true }); return }
+    const given = typeof req.body?.token === 'string' ? req.body.token : ''
+    if (!given || !sameToken(given, token)) { res.status(401).json({ error: 'Invalid token.' }); return }
+    const secure = req.secure ? '; Secure' : ''
+    res.setHeader('Set-Cookie', `duct_token=${encodeURIComponent(given)}; HttpOnly; SameSite=Strict; Path=/${secure}`)
+    res.json({ ok: true })
+  })
+
   app.use('/api/', auth)
 
   app.post('/api/index', (req, res) => {
-    const isUrl = req.body?.url
+    const url = req.body?.url
     const bodyMeta = parseMetadata(req.body?.metadata)
-    if (isUrl) {
-      duct.index(isUrl, bodyMeta).then(r => res.json({ results: [{ file: isUrl, ...r }] })).catch(e => res.status(500).json({ error: e.message }))
+    if (url !== undefined) {
+      if (typeof url !== 'string' || !isUrl(url)) {
+        res.status(400).json({ error: 'The "url" field must be an http(s) URL.' })
+        return
+      }
+      duct.index(url, bodyMeta).then(r => res.json({ results: [{ file: url, ...r }] })).catch(e => res.status(500).json({ error: e.message }))
       return
     }
     upload.array('files')(req, res, async (err) => {
@@ -89,12 +208,11 @@ export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimi
       try {
         const results = []
         for (const file of files) {
-          originalNames.set(file.path, file.originalname)
-          const result = await duct.index(file.path, meta)
-          results.push({ file: file.originalname, ...result })
+          results.push(await addToLibrary(duct, libraryDir, file.path, { originalName: file.originalname, metadata: meta, move: true }))
         }
         res.json({ results })
       } catch (err) {
+        for (const file of files) { try { if (existsSync(file.path)) unlinkSync(file.path) } catch {} }
         res.status(500).json({ error: (err as Error).message })
       }
     })
@@ -107,11 +225,7 @@ export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimi
     const filter = parseMetadata(req.query.filter as string)
     try {
       const results = await duct.search(q, topK, filter)
-      const mapped = results.map(r => ({
-        ...r,
-        chunk: { ...r.chunk, documentPath: originalNames.get(r.chunk.documentPath) || r.chunk.documentPath },
-      }))
-      res.json({ results: mapped })
+      res.json({ results })
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })
     }
@@ -122,10 +236,6 @@ export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimi
     if (!question) { res.status(400).json({ error: 'Question is required' }); return }
     try {
       const result = agentic ? await duct.agenticSearch(question) : await duct.ask(question, topK)
-      result.sources = result.sources.map(s => ({
-        ...s,
-        documentPath: originalNames.get(s.documentPath) || s.documentPath,
-      }))
       res.json(result)
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })
@@ -135,28 +245,25 @@ export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimi
   app.get('/api/documents', (req, res) => {
     const path = req.query.path as string
     if (path) {
-      const raw = duct.getDocument(path)
-      if (!raw) { res.status(404).json({ error: 'Document not found' }); return }
-      const doc = { ...raw, path: originalNames.get(raw.path) || raw.path, storePath: raw.path }
+      const doc = duct.getDocument(path)
+      if (!doc) { res.status(404).json({ error: 'Document not found' }); return }
       res.json({ document: doc })
       return
     }
-    const docs = duct.getDocuments().map(d => ({
-      ...d,
-      path: originalNames.get(d.path) || d.path,
-      storePath: d.path,
-    }))
-    res.json({ documents: docs })
+    res.json({ documents: duct.getDocuments() })
   })
 
   app.delete('/api/documents', async (req, res) => {
     const path = req.query.path as string
     if (!path) { res.status(400).json({ error: 'Query parameter "path" is required' }); return }
+    const doc = duct.getDocument(path)
+    if (!doc) { res.status(404).json({ error: 'Document not found' }); return }
     try {
-      await duct.removeDocument(path)
-      originalNames.delete(path)
-      if (path.startsWith(uploadDir)) {
-        try { unlinkSync(path) } catch {}
+      await duct.removeDocument(doc.path)
+      // Library copies belong to Duct and are deleted; anything else (watched folders) is only unindexed.
+      const resolved = resolve(doc.path)
+      if (doc.source === 'library' && isInside(resolved, libraryDir) && resolved !== libraryDir) {
+        try { unlinkSync(resolved) } catch {}
       }
       res.json({ ok: true })
     } catch (err) {
@@ -202,7 +309,7 @@ export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimi
       const results = await duct.search(q, 100)
       const mapped = results.map(r => ({
         score: r.score,
-        document: originalNames.get(r.chunk.documentPath) || r.chunk.documentPath,
+        document: r.chunk.documentPath,
         heading: r.chunk.heading || null,
         content: r.chunk.content.slice(0, 2000),
       }))
@@ -251,9 +358,19 @@ export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimi
       res.status(400).json({ error: 'Directories array is required' })
       return
     }
+    if (watchRoots.length === 0) {
+      res.status(403).json({ error: 'Watching folders through the API is disabled. Start the server with --watch-root <dir>.' })
+      return
+    }
     for (const dir of directories) {
       if (typeof dir !== 'string' || !existsSync(dir)) {
         res.status(400).json({ error: `Directory does not exist: ${dir}` })
+        return
+      }
+      const real = realOrResolved(dir)
+      // Roots are resolved per request so symlinks (e.g. macOS /var -> /private/var) and late-created roots match.
+      if (!watchRoots.some(root => isInside(real, realOrResolved(root)))) {
+        res.status(403).json({ error: `Not inside an allowed watch root: ${dir}` })
         return
       }
     }
@@ -274,8 +391,12 @@ export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimi
     }
   })
 
+  app.use('/mascot', express.static(mascotDir, { maxAge: '1d' }))
+  app.get('/vendor/dotlottie/index.js', (_req, res) => res.sendFile(join(lottiePlayerDir, 'index.js')))
+  app.get('/vendor/dotlottie/dotlottie-player.wasm', (_req, res) => res.sendFile(join(lottiePlayerDir, 'dotlottie-player.wasm')))
+
   app.get('*', (_req, res) => {
-    res.type('html').send(html)
+    res.type('html').send(html.replace('__DUCT_VERSION__', VERSION))
   })
 
   return app
@@ -431,6 +552,11 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
 .toast.error { background: var(--danger); color: #fff; }
 
 .t-ui { font-family: var(--mono); font-size: 12px; color: var(--body); }
+
+/* MASCOT */
+.mascot { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 24px 16px 32px; text-align: center; }
+.mascot canvas, .mascot img { width: 180px; height: 180px; }
+.mascot-caption { font-family: var(--mono); font-size: 12px; color: var(--subtle); max-width: 360px; line-height: 1.6; }
 </style>
 </head>
 <body>
@@ -450,7 +576,7 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
         <div class="ds-tag">LOCAL SEARCH ENGINE</div>
       </div>
     </div>
-    <div class="version">v0.1.0</div>
+    <div class="version">v__DUCT_VERSION__</div>
   </div>
 
   <div class="body">
@@ -488,7 +614,7 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
 
         <div class="inline-form" style="margin-top:8px;">
           <input type="text" id="watchInput" placeholder="/absolute/path/to/dir" />
-          <button class="btn btn-g" onclick="watchDir()">Watch</button>
+          <button class="btn btn-g" id="watchBtn" onclick="watchDir()">Watch</button>
         </div>
         <div id="watchList" style="margin-top:8px;"></div>
       </div>
@@ -505,7 +631,7 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
       </div>
 
       <div class="cell">
-        <div class="sec-label">Search Settings</div>
+        <div class="sec-label" id="settings">Search Settings</div>
         
         <div class="field-group">
           <label>Search Engine</label>
@@ -561,8 +687,12 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
           <input type="text" id="cfgLLMModel" placeholder="llama3.2" onchange="saveLLMConfig()" />
         </div>
         <div class="field-group">
-          <label>Base URL / API Key</label>
-          <input type="password" id="cfgLLMBaseUrl" placeholder="http://localhost:11434" onchange="saveLLMConfig()" />
+          <label>Base URL</label>
+          <input type="text" id="cfgLLMBaseUrl" placeholder="http://localhost:11434 (Ollama)" onchange="saveLLMConfig()" />
+        </div>
+        <div class="field-group">
+          <label>API Key</label>
+          <input type="password" id="cfgLLMKey" placeholder="For OpenAI or Gemini. Not saved to disk" autocomplete="off" onchange="saveLLMConfig()" />
         </div>
       </div>
 
@@ -577,7 +707,7 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
           <div class="sec-label">
             <span>Search Engine</span>
             <div style="display:flex;gap:8px;">
-              <button class="btn btn-g" style="padding:2px 8px;font-size:9px;" onclick="exportResults()">EXPORT JSON</button>
+              <button class="btn btn-g" style="padding:2px 8px;font-size:9px;" onclick="exportResults()">EXPORT CSV</button>
               <button class="btn btn-d" style="padding:2px 8px;font-size:9px;" onclick="clearAll()">CLEAR INDEX</button>
             </div>
           </div>
@@ -588,12 +718,12 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
             <button class="btn btn-p" id="searchBtn">Search</button>
           </div>
 
-          <div id="results" style="margin-top:16px;">
-            <!-- Results will be injected here -->
-            <div id="emptyState" style="text-align:center;padding:40px;font-family:var(--mono);font-size:12px;color:var(--muted);">
-              Awaiting query...
-            </div>
+          <div id="mascot" class="mascot" style="margin-top:16px;">
+            <canvas id="mascotCanvas" width="360" height="360" aria-hidden="true"></canvas>
+            <img id="mascotImg" alt="" style="display:none;" />
+            <div id="mascotCaption" class="mascot-caption" role="status"></div>
           </div>
+          <div id="results" style="margin-top:16px;"></div>
         </div>
 
         <!-- ASK PANEL -->
@@ -639,6 +769,72 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
   let indexing = false
   let searchMode = 'bm25'
 
+  // On a token-protected server, ask for the token once, exchange it for a login cookie, and retry.
+  const rawFetch = window.fetch.bind(window)
+  let loginPromise = null
+  async function login() {
+    const given = window.prompt('This Duct server needs an access token:')
+    if (!given) throw new Error('Access token required')
+    const res = await rawFetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: given }) })
+    if (!res.ok) throw new Error('Invalid access token')
+  }
+  window.fetch = async (input, init) => {
+    const res = await rawFetch(input, init)
+    if (res.status !== 401 || String(input).startsWith('/api/login')) return res
+    loginPromise = loginPromise || login().finally(() => { loginPromise = null })
+    await loginPromise
+    return rawFetch(input, init)
+  }
+
+  // Mascot: animation ids inside /mascot/mascot.lottie, and the static SVG used if the player can't load.
+  const MASCOT_POSES = {
+    welcome: ['Pose - Welcome', 'pose-welcome.svg'],
+    working: ['Pose - Working', 'pose-working.svg'],
+    done: ['Pose - Done', 'pose-done.svg'],
+    nothingFound: ['Pose - Nothing Found', 'pose-nothing-found.svg'],
+    needsHand: ['Pose - Needs a Hand', 'pose-needs-a-hand.svg'],
+    resting: ['Pose - Resting', 'pose-resting.svg'],
+  }
+  let mascotPlayer = null
+  let mascotPose = 'welcome'
+  let mascotFallback = false
+
+  function showMascot(pose, caption) {
+    document.getElementById('results').innerHTML = ''
+    document.getElementById('mascot').style.display = 'flex'
+    document.getElementById('mascotCaption').textContent = caption
+    if (pose === mascotPose && (mascotPlayer || mascotFallback)) { if (mascotPlayer && mascotPlayer.autoplay) mascotPlayer.play(); return }
+    mascotPose = pose
+    if (mascotPlayer) mascotPlayer.loadAnimation(MASCOT_POSES[pose][0])
+    else if (mascotFallback) document.getElementById('mascotImg').src = '/mascot/' + MASCOT_POSES[pose][1]
+  }
+
+  function hideMascot() {
+    document.getElementById('mascot').style.display = 'none'
+    if (mascotPlayer) mascotPlayer.pause()
+  }
+
+  function mascotReady(player) {
+    mascotPlayer = player
+    if (player.activeAnimationId !== MASCOT_POSES[mascotPose][0]) player.loadAnimation(MASCOT_POSES[mascotPose][0])
+  }
+
+  function useMascotFallback() {
+    if (mascotFallback) return
+    mascotFallback = true
+    mascotPlayer = null
+    document.getElementById('mascotCanvas').style.display = 'none'
+    const img = document.getElementById('mascotImg')
+    img.src = '/mascot/' + MASCOT_POSES[mascotPose][1]
+    img.style.display = 'block'
+  }
+
+  async function showIdleMascot() {
+    const stats = await refreshStats()
+    if (!stats || stats.documents === 0) showMascot('welcome', 'Drop files or watch a folder to start searching.')
+    else showMascot('resting', 'Ready to search ' + stats.documents + ' document' + (stats.documents === 1 ? '' : 's') + '.')
+  }
+
   document.getElementById('fileInput').addEventListener('change', handleFiles)
   document.getElementById('searchInput').addEventListener('keydown', e => { if (e.key === 'Enter') search() })
   document.getElementById('searchBtn').addEventListener('click', search)
@@ -672,6 +868,7 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
     progress.innerHTML = ''
     const errors = []
     const list = Array.from(files)
+    showMascot('working', 'Indexing ' + list.length + ' file' + (list.length === 1 ? '' : 's') + '…')
 
     const showFile = (f, status, cls) => {
       const div = document.createElement('div')
@@ -682,36 +879,44 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
 
     for (const f of list) showFile(f, 'Uploading...', '')
 
-    for (let i = 0; i < list.length; i++) {
-      const f = list[i]
-      const row = progress.children[i]
-      row.querySelector('.status').textContent = 'Indexing...'
+    const setStatus = (i, text, color) => {
+      const status = progress.children[i].querySelector('.status')
+      status.textContent = text
+      if (color) status.style.color = color
+    }
 
+    // Several files per request keeps large drops well under the API rate limit.
+    const BATCH = 10
+    for (let start = 0; start < list.length; start += BATCH) {
+      const batch = list.slice(start, start + BATCH)
       const formData = new FormData()
-      formData.append('files', f)
+      batch.forEach((f, j) => { formData.append('files', f); setStatus(start + j, 'Indexing...') })
       try {
         const res = await fetch('/api/index', { method: 'POST', body: formData })
         const data = await res.json()
-        if (data.error) {
-          row.querySelector('.status').textContent = 'Err: ' + data.error
-          row.querySelector('.status').style.color = 'var(--danger)'
-          errors.push(f.name + ': ' + data.error)
-        } else {
-          row.querySelector('.status').textContent = 'OK'
-          row.querySelector('.status').style.color = 'var(--success)'
-        }
+        if (data.error) throw new Error(data.error)
+        batch.forEach((f, j) => {
+          const r = (data.results || [])[j] || {}
+          if (r.duplicateOf) setStatus(start + j, 'Already indexed as ' + r.duplicateOf, 'var(--subtle)')
+          else if (r.failed) { setStatus(start + j, "Couldn't read", 'var(--danger)'); errors.push(f.name) }
+          else if (r.documents && !r.chunks) setStatus(start + j, 'No text found (OCR?)', 'var(--warning)')
+          else setStatus(start + j, 'OK', 'var(--success)')
+        })
       } catch (err) {
-        row.querySelector('.status').textContent = 'Err'
-        row.querySelector('.status').style.color = 'var(--danger)'
-        errors.push(f.name + ': ' + err.message)
+        batch.forEach((f, j) => { setStatus(start + j, 'Err: ' + err.message, 'var(--danger)'); errors.push(f.name + ': ' + err.message) })
       }
     }
 
     indexing = false
     refreshStats()
     refreshDocs()
-    if (errors.length === 0) toast('All files indexed')
-    else toast(errors.length + ' file(s) failed', true)
+    if (errors.length === 0) {
+      toast('All files indexed')
+      showMascot('done', 'All ' + list.length + ' file' + (list.length === 1 ? '' : 's') + ' indexed. Try a search.')
+    } else {
+      toast(errors.length + ' file(s) failed', true)
+      showMascot('needsHand', errors.length + ' of ' + list.length + ' file' + (list.length === 1 ? '' : 's') + " couldn't be read. Details are listed under Ingest.")
+    }
   }
 
   async function indexUrl() {
@@ -728,7 +933,25 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
     } catch (err) { toast('Error: ' + err.message, true) }
   }
 
+  function addWatchedDir(dir) {
+    const list = document.getElementById('watchList')
+    list.innerHTML += '<div style="font-family:var(--mono);font-size:10px;color:var(--muted);padding:4px 0;">&#128065; ' + esc(dir) + '</div>'
+  }
+
+  // Desktop app: folders are chosen with the native picker and watched by the main process.
+  if (window.electronAPI && window.electronAPI.watchDirectory) {
+    document.getElementById('watchInput').style.display = 'none'
+    document.getElementById('watchBtn').textContent = 'Watch a folder…'
+  }
+
   async function watchDir() {
+    if (window.electronAPI && window.electronAPI.watchDirectory) {
+      try {
+        const dir = await window.electronAPI.watchDirectory()
+        if (dir) { toast('Now watching ' + dir); addWatchedDir(dir); showIdleMascot(); refreshDocs() }
+      } catch (e) { toast('Error: ' + e.message, true) }
+      return
+    }
     const dir = document.getElementById('watchInput').value.trim()
     if (!dir) return
     try {
@@ -741,8 +964,7 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
       if (data.ok) {
         toast('Now watching ' + dir)
         document.getElementById('watchInput').value = ''
-        const list = document.getElementById('watchList')
-        list.innerHTML += '<div style="font-family:var(--mono);font-size:10px;color:var(--muted);padding:4px 0;">&#128065; ' + esc(dir) + '</div>'
+        addWatchedDir(dir)
       } else {
         toast('Error: ' + data.error, true)
       }
@@ -754,16 +976,17 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
     if (!q) return
     const btn = document.getElementById('searchBtn')
     btn.disabled = true; btn.textContent = '...'
-    document.getElementById('emptyState') && (document.getElementById('emptyState').style.display = 'none')
 
     try {
       const res = await fetch('/api/search?q=' + encodeURIComponent(q) + '&topK=10')
       const data = await res.json()
-      const div = document.getElementById('results')
+      if (data.error) throw new Error(data.error)
       if (!data.results || data.results.length === 0) {
-        div.innerHTML = '<div style="text-align:center;padding:40px;font-family:var(--mono);font-size:12px;color:var(--muted);">No results found.</div>'
+        showMascot('nothingFound', 'No matches for "' + q + '". Try different or fewer words.')
         btn.disabled = false; btn.textContent = 'Search'; return
       }
+      hideMascot()
+      const div = document.getElementById('results')
       div.innerHTML = data.results.map((r, i) => {
         const heading = r.chunk.heading ? ' <span class="r-section">› ' + esc(r.chunk.heading) + '</span>' : ''
         const ext = r.chunk.documentPath.split('.').pop()
@@ -776,7 +999,7 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
           '</div>'
       }).join('')
     } catch (err) {
-      document.getElementById('results').innerHTML = '<div style="color:var(--danger);padding:20px;font-family:var(--mono);font-size:12px;">Error: ' + esc(err.message) + '</div>'
+      showMascot('needsHand', 'Search failed: ' + err.message)
     }
     btn.disabled = false; btn.textContent = 'Search'
   }
@@ -808,7 +1031,8 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
         msgs.appendChild(el('div', 'msg a', '<span style="color:var(--danger)">Error:</span> ' + esc(data.error)))
       } else {
         const answerDiv = el('div', 'msg a', '')
-        const answerText = data.answer.replace(/\\n/g, '<br>')
+        // LLM output can echo document text, so it is always escaped before display.
+        const answerText = esc(data.answer || '').replace(/\\n/g, '<br>')
         let sourcesHtml = '<div class="source"><strong>SOURCES</strong><br>'
         for (const s of (data.sources || []).slice(0, 5)) {
           sourcesHtml += '<a href="#" class="source-link" data-path="' + esc(s.documentPath) + '">' + esc(s.documentPath.split('/').pop() || s.documentPath) + '</a> <span style="color:var(--muted)">[' + s.score.toFixed(2) + ']</span><br>'
@@ -851,8 +1075,7 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
   async function clearAll() {
     if(!confirm('Clear all indexed documents?')) return
     await fetch('/api/clear', { method: 'DELETE' })
-    document.getElementById('results').innerHTML = '<div id="emptyState" style="text-align:center;padding:40px;font-family:var(--mono);font-size:12px;color:var(--muted);">Awaiting query...</div>'
-    refreshStats()
+    showIdleMascot()
     refreshDocs()
     toast('Index cleared')
   }
@@ -867,10 +1090,12 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
     const res = await fetch('/api/stats'); const data = await res.json()
     document.getElementById('docCount').textContent = data.documents
     document.getElementById('chunkCount').textContent = data.chunks
+    return data
   }
 
   async function refreshDocs() {
-    const res = await fetch('/api/documents'); const docs = await res.json()
+    const res = await fetch('/api/documents'); const data = await res.json()
+    const docs = data.documents || []
     const empty = document.getElementById('docEmpty')
     const items = document.getElementById('docItems')
     if (docs.length === 0) {
@@ -878,8 +1103,11 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
     } else {
       empty.style.display = 'none'
       items.innerHTML = docs.map(d => {
-        const name = d.path.split('/').pop() || d.path
-        return '<div class="doc-item"><span class="name" title="' + esc(d.path) + '">' + esc(name) + '</span><span class="meta">' + d.chunkCount + ' ch</span></div>'
+        const name = d.displayName || d.path.split('/').pop() || d.path
+        const meta = d.status === 'failed' ? '<span class="badge b-err" title="' + esc(d.error || '') + '">failed</span>'
+          : d.status === 'no-text' ? '<span class="badge b-warn" title="No text found. It may be a scan that needs OCR.">no text</span>'
+          : d.chunkCount + ' ch'
+        return '<div class="doc-item"><span class="name" title="' + esc(d.path) + '">' + esc(name) + '</span><span class="meta">' + meta + '</span></div>'
       }).join('')
     }
   }
@@ -909,27 +1137,43 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
     } catch(e){}
   }
 
+  async function putConfig(body, label) {
+    try {
+      const res = await fetch('/api/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status)
+      toast(label + ' saved')
+      return true
+    } catch (err) {
+      toast(label + ' not saved: ' + err.message, true)
+      return false
+    }
+  }
+
   async function saveEmbedConfig() {
     const embedProvider = document.getElementById('cfgEmbedProvider').value
     const embedModel = document.getElementById('cfgEmbedModel').value
     const embedBaseUrl = document.getElementById('cfgEmbedBaseUrl').value
-    await fetch('/api/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ embedProvider, embedModel, embedBaseUrl }) })
-    toast('Embed config saved')
+    await putConfig({ embedProvider, embedModel, embedBaseUrl }, 'Embedding settings')
   }
 
   async function saveSearchConfig() {
     const mode = document.getElementById('cfgSearchMode').value
-    document.getElementById('engineMode').textContent = mode
-    await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ searchMode: mode }) })
-    toast('Search config saved')
+    if (await putConfig({ searchMode: mode }, 'Search settings')) document.getElementById('engineMode').textContent = mode
   }
 
   async function saveLLMConfig() {
     const provider = document.getElementById('cfgLLMProvider').value
-    const model = document.getElementById('cfgLLMModel').value
-    const baseUrl = document.getElementById('cfgLLMBaseUrl').value
-    await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ llmProvider: provider, llmModel: model, llmBaseUrl: baseUrl }) })
-    toast('LLM config saved')
+    const body = {
+      llmProvider: provider,
+      llmModel: document.getElementById('cfgLLMModel').value,
+      llmBaseUrl: document.getElementById('cfgLLMBaseUrl').value,
+    }
+    // API keys are kept in memory by the server and never written to disk.
+    const key = document.getElementById('cfgLLMKey').value.trim()
+    if (key && provider === 'openai') body.openaiKey = key
+    if (key && provider === 'gemini') body.geminiKey = key
+    if (await putConfig(body, 'LLM settings')) document.getElementById('cfgLLMKey').value = ''
   }
 
   function toast(msg, isError) { const t = document.getElementById('toast'); t.textContent = msg; t.className = 'toast' + (isError ? ' error' : ''); t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 3000) }
@@ -957,9 +1201,33 @@ body { background: var(--black); color: var(--text); font-family: var(--sans); m
     return result
   }
 
-  refreshStats()
+  showIdleMascot()
   refreshDocs()
   loadConfig()
+</script>
+<script type="module">
+  try {
+    const { DotLottie } = await import('/vendor/dotlottie/index.js')
+    DotLottie.setWasmUrl('/vendor/dotlottie/dotlottie-player.wasm')
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    const player = new DotLottie({
+      canvas: document.getElementById('mascotCanvas'),
+      src: '/mascot/mascot.lottie',
+      animationId: MASCOT_POSES[mascotPose][0],
+      autoplay: !reduceMotion,
+      loop: true,
+    })
+    let ready = false
+    player.addEventListener('load', () => {
+      if (!ready) { ready = true; mascotReady(player) }
+      // With reduced motion, hold a frame from the middle: some poses start empty.
+      if (reduceMotion) player.setFrame(Math.floor(player.totalFrames / 2))
+      else player.play()
+    })
+    player.addEventListener('loadError', useMascotFallback)
+  } catch {
+    useMascotFallback()
+  }
 </script>
 </body>
 </html>`

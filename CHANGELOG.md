@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+- `duct serve` listens on `127.0.0.1` by default and refuses other interfaces without `--auth-token`. It accepts only expected `Host` headers, rejects cross-origin writes, and sends a Content-Security-Policy.
+- The API no longer indexes local paths sent as URLs, never indexes files without a supported extension, and only deletes files that Duct stored in its Library.
+- `POST /api/watch` only accepts folders under `--watch-root`; the desktop app picks folders with the native dialog instead.
+- URLs that resolve to private, loopback or link-local addresses are refused by `duct serve`, including after redirects.
+- LLM answers are escaped before display, and API keys are never written to disk.
+- Browsers log in to a token-protected server once (`POST /api/login`, HttpOnly cookie).
+
+### Added
+- SQLite index (`duct.db`): loads instantly, saves incrementally, and skips unchanged files (timestamp, size, content hash). Older JSON indexes are migrated automatically.
+- Remembered watched folders: `restoreSources()`, `listSources()`, `removeSource()`. Changes made while Duct was closed are caught up on, and deleted or moved files leave the index.
+- The Library: uploads and "Add Files" are kept in `~/Duct Library` under their real names; identical files are reported as duplicates. Use `addToLibrary` from `@docfide/duct/library` and `--library <dir>`.
+- Documents have `displayName`, `source` and `status` (`indexed`, `no-text`, `failed`), shown in the web UI.
+- Mascot animations in the web UI and desktop app, plus new app and tray icons (`npm run icons`).
+- `embed: false` / `--no-embed` disable embeddings; `EmbeddingProvider.embedQuery` for query-specific embeddings (Cohere).
+
+### Changed
+- The CLI keeps one index in `$DUCT_HOME` or `~/.duct`, so `duct index` then `duct search` works across runs.
+- Keyword search uses FTS5: stemming ("terminate" finds "termination"), accent-insensitive matching, quoted phrases, and Chinese, Japanese and Korean text. Metadata filters apply before results are limited.
+- OCR is optional and offline: images and scanned PDFs are flagged `needsOcr` unless OCR is on, and the English model is bundled. Single-page scans are now detected.
+- PDF text keeps its line breaks and whole words. Detected tables are no longer appended as a second copy.
+- Changing the embedding model re-embeds in the background instead of mixing vectors from different models. Gemini embeddings are batched.
+- Requires Node.js 22.13 or later.
+
+### Fixed
+- The desktop app no longer deletes its index on quit, and only one copy can run at a time.
+- The web UI documents list, search and LLM settings saving, the separate API key field, uploads of more than 120 files, the "Export CSV" label, and the version shown.
+- Selecting "None" as LLM provider disables it. `HybridSearcher` uses the embedder it is given instead of OpenAI/Gemini from the environment.
+- OCR of scanned PDFs (rendering now uses pdf.js's own canvas).
+- Settings changed in the UI are kept after restart. `duct diff` works across runs.
+
 ## [0.2.0] - Metadata & Search Docs
 
 ### Added

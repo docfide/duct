@@ -1,50 +1,67 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync, unlinkSync, watch } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, watch } from 'node:fs'
+import type { FSWatcher } from 'node:fs'
 import { readdir } from 'node:fs/promises'
-import { join, extname } from 'node:path'
-import { extract } from './extract/index.js'
+import { basename, extname, join, resolve } from 'node:path'
+import { detectFormat, extract } from './extract/index.js'
 import { chunk } from './chunk/index.js'
 import { extractUrl, isUrl } from './extract/web.js'
 import { extractTablesFromContent } from './extract/table.js'
-import { MemoryVectorStore } from './store/memory.js'
-import { BM25Searcher } from './search/bm25.js'
+import { SqliteStore } from './store/sqlite.js'
+import { terminateOcr } from './ocr/index.js'
 import { HybridSearcher, reciprocalRankFusion } from './search/hybrid.js'
 import { SimpleReranker, NoopReranker } from './search/reranker.js'
-import { createLLMProvider, OpenAILLM, GeminiLLM, OllamaLLM } from './qa/provider.js'
+import { createLLMProvider, OpenAILLM, GeminiLLM } from './qa/provider.js'
 import { createEmbedder } from './embed/factory.js'
 import type { EmbedProvider } from './embed/factory.js'
 import type {
-  DuctConfig, Chunk, EmbeddingProvider, IndexResult, SearchResult, Searcher,
+  DuctConfig, Chunk, EmbeddingProvider, IndexResult, IndexOptions, SearchResult,
   DocumentInfo, DocumentFormat, RuntimeConfig, Reranker, LLMProvider,
-  QAResult, SchemaField, ExtractionResult, DocDiff,
+  QAResult, SchemaField, ExtractionResult, DocDiff, ExtractedDocument,
 } from './types.js'
 
-const VALID_EXTS = new Set(['.pdf', '.docx', '.md', '.markdown', '.html', '.htm', '.txt', '.csv', '.json', '.log', '.xml', '.xlsx', '.pptx', '.png', '.jpg', '.jpeg', '.tiff', '.tif', '.bmp', '.gif', '.webp'])
+export const VALID_EXTS = new Set(['.pdf', '.docx', '.md', '.markdown', '.html', '.htm', '.txt', '.csv', '.json', '.log', '.xml', '.xlsx', '.pptx', '.png', '.jpg', '.jpeg', '.tiff', '.tif', '.bmp', '.gif', '.webp'])
+
+const WATCH_DEBOUNCE_MS = 300
+const EMBED_BATCH = 20
+const API_KEY_FIELDS = ['openaiKey', 'geminiKey', 'cohereKey', 'voyageKey', 'mistralKey', 'jinaKey'] as const
+
+function safeWarn(msg: string): void {
+  try {
+    console.warn(msg)
+  } catch {
+    // EPIPE when stdout/stderr is closed (e.g., Electron quitting)
+  }
+}
+
+export function hashBytes(data: Buffer | string): string {
+  return createHash('sha256').update(data).digest('hex')
+}
 
 async function findFiles(input: string): Promise<string[]> {
   if (isUrl(input)) return [input]
   const st = statSync(input)
   if (st.isFile()) {
-    const ext = extname(input).toLowerCase()
-    if (ext && !VALID_EXTS.has(ext)) return []
-    return [input]
+    // Files without a supported extension (including extensionless ones like id_rsa) are never indexed.
+    if (!VALID_EXTS.has(extname(input).toLowerCase())) return []
+    return [resolve(input)]
   }
   if (st.isDirectory()) {
     const entries = await readdir(input, { recursive: true, withFileTypes: true })
     return entries
       .filter(e => e.isFile() && VALID_EXTS.has(extname(e.name).toLowerCase()))
-      .map(e => join(e.parentPath, e.name))
+      .map(e => resolve(e.parentPath, e.name))
   }
   return []
 }
 
+type IndexOutcome = { status: 'indexed' | 'no-text' | 'skipped' | 'failed'; chunks: number }
+
 export class Duct {
   private embedder: EmbeddingProvider | null = null
-  private store: MemoryVectorStore
-  private searcher: Searcher
+  private store: SqliteStore
   private reranker: Reranker
   private llmProvider: LLMProvider | null = null
-  private documents: Map<string, DocumentInfo> = new Map()
-  private chunksCount: number = 0
   private chunkStrategy: 'sliding-window' | 'by-heading'
   private chunkSize: number
   private chunkOverlap: number
@@ -54,17 +71,19 @@ export class Duct {
   private rerankEnabled: boolean
   private hydeEnabled: boolean
   private persistPath?: string
-  private loaded = false
-  private versionHistory: Map<string, { version: number; content: string; timestamp: number }[]> = new Map()
-  private watchers: Set<ReturnType<typeof watch>> = new Set()
+  private watchers = new Map<string, FSWatcher>()
+  private pendingChanges = new Map<string, NodeJS.Timeout>()
+  private locks = new Map<string, Promise<void>>()
+  private embedding: Promise<void> | null = null
   private embedProvider: string = ''
   private embedModel: string = ''
   private embedBaseUrl: string = ''
+  private llmModel: string = ''
+  private llmBaseUrl: string = ''
+  private blockPrivateUrls: boolean
 
   constructor(config: DuctConfig = {}) {
-    this.store = new MemoryVectorStore()
-    const rawSearcher = new BM25Searcher()
-    this.searcher = new HybridSearcher(rawSearcher, null, config.search?.alpha ?? 0.5)
+    this.blockPrivateUrls = config.blockPrivateUrls ?? false
     this.reranker = new NoopReranker()
     this.chunkStrategy = config.chunk?.strategy ?? 'sliding-window'
     this.chunkSize = config.chunk?.size ?? 1500
@@ -76,24 +95,29 @@ export class Duct {
     this.hydeEnabled = config.search?.hyde ?? false
     this.persistPath = config.persistPath
     if (this.persistPath) mkdirSync(this.persistPath, { recursive: true })
-    this.embedProvider = config.embed?.provider || ''
-    this.embedModel = config.embed?.model || ''
-    this.embedBaseUrl = config.embed?.baseUrl || ''
+    this.store = new SqliteStore(this.persistPath ? join(this.persistPath, 'duct.db') : ':memory:')
+    const embed = config.embed || undefined
+    this.embedProvider = embed?.provider || ''
+    this.embedModel = embed?.model || ''
+    this.embedBaseUrl = embed?.baseUrl || ''
     this.initEmbedder(config)
     this.initLLM(config)
+    if (this.persistPath) this.migrateLegacyIndex(this.persistPath)
+    this.applySavedSettings(config)
     this.initReranker()
   }
 
   private initEmbedder(config: DuctConfig): void {
+    if (config.embed === false) {
+      this.embedder = null
+      return
+    }
     this.embedder = createEmbedder({
       provider: config.embed?.provider as EmbedProvider | undefined,
       model: config.embed?.model,
       baseUrl: config.embed?.baseUrl,
       apiKey: config.embed?.apiKey,
     })
-    if (this.embedder) {
-      this.searcher = new HybridSearcher(new BM25Searcher(), this.store, this.searchAlpha)
-    }
   }
 
   private initLLM(config: DuctConfig): void {
@@ -106,6 +130,8 @@ export class Duct {
       }
       return
     }
+    this.llmModel = llm.model || ''
+    this.llmBaseUrl = llm.baseUrl || ''
     this.llmProvider = createLLMProvider({
       provider: llm.provider || 'ollama',
       model: llm.model,
@@ -119,149 +145,264 @@ export class Duct {
     this.reranker = this.rerankEnabled ? new SimpleReranker() : new NoopReranker()
   }
 
+  /** Settings changed through configure() are saved; values passed to the constructor take precedence. */
+  private applySavedSettings(config: DuctConfig): void {
+    const saved = this.store.getSettings() as Partial<RuntimeConfig>
+    const pick: Partial<RuntimeConfig> = {}
+    const take = <K extends keyof RuntimeConfig>(key: K, explicit: boolean) => {
+      if (!explicit && saved[key] !== undefined) pick[key] = saved[key] as RuntimeConfig[K]
+    }
+    take('ocr', config.ocr !== undefined)
+    take('chunkStrategy', config.chunk?.strategy !== undefined)
+    take('chunkSize', config.chunk?.size !== undefined)
+    take('chunkOverlap', config.chunk?.overlap !== undefined)
+    take('searchMode', config.search?.mode !== undefined)
+    take('searchAlpha', config.search?.alpha !== undefined)
+    take('rerank', config.search?.rerank !== undefined)
+    take('hyde', config.search?.hyde !== undefined)
+    for (const key of ['llmProvider', 'llmModel', 'llmBaseUrl'] as const) take(key, config.llm !== undefined)
+    for (const key of ['embedProvider', 'embedModel', 'embedBaseUrl'] as const) take(key, config.embed !== undefined)
+    if (Object.keys(pick).length > 0) this.applyConfig(pick, false)
+  }
+
+  /** Imports an index written by Duct 0.2 (meta.json / bm25.json / vectors.json) into SQLite, once. */
+  private migrateLegacyIndex(dir: string): void {
+    const metaPath = join(dir, 'meta.json')
+    const bm25Path = join(dir, 'bm25.json')
+    const vectorsPath = join(dir, 'vectors.json')
+    const configPath = join(dir, 'config.json')
+    if (![metaPath, bm25Path, vectorsPath, configPath].some(p => existsSync(p))) return
+    try {
+      if (this.store.stats().documents === 0 && existsSync(bm25Path)) {
+        const meta = existsSync(metaPath) ? JSON.parse(readFileSync(metaPath, 'utf-8')) : {}
+        const infos = new Map<string, DocumentInfo>()
+        for (const d of Array.isArray(meta.documents) ? meta.documents : []) {
+          if (typeof d === 'object' && d?.path) infos.set(d.path, d)
+        }
+        const bm25 = JSON.parse(readFileSync(bm25Path, 'utf-8')) as { chunks?: { chunk: Chunk }[] }
+        const byDoc = new Map<string, Chunk[]>()
+        const seen = new Set<string>()
+        for (const { chunk: c } of bm25.chunks ?? []) {
+          const key = `${c.documentPath}\u0000${c.index}\u0000${c.content}`
+          if (seen.has(key)) continue
+          seen.add(key)
+          byDoc.set(c.documentPath, [...(byDoc.get(c.documentPath) ?? []), c])
+        }
+        const rowIds = new Map<string, number>()
+        for (const [path, chunks] of byDoc) {
+          const info = infos.get(path)
+          const ids = this.store.replaceDocument({
+            path,
+            displayName: basename(path),
+            source: isUrl(path) ? 'url' : 'path',
+            format: info?.format ?? chunks[0].documentFormat,
+            size: info?.size ?? 0,
+            mtimeMs: null,
+            contentHash: '',
+            status: 'indexed',
+            metadata: info?.metadata ?? {},
+            chunkMetadata: chunks[0].metadata ?? {},
+          }, chunks)
+          chunks.forEach((c, i) => rowIds.set(c.id, ids[i]))
+        }
+        if (existsSync(vectorsPath)) {
+          const entries = JSON.parse(readFileSync(vectorsPath, 'utf-8')) as { chunk: Chunk; embedding: number[] }[]
+          this.store.addVectors(entries
+            .filter(e => rowIds.has(e.chunk.id))
+            .map(e => ({ chunkRowId: rowIds.get(e.chunk.id)!, model: 'legacy', vector: e.embedding })))
+          if (this.embedder) this.store.adoptVectors('legacy', this.embedKey(), this.embedder.dimensions)
+        }
+      }
+      if (existsSync(configPath) && Object.keys(this.store.getSettings()).length === 0) {
+        const old = JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>
+        for (const k of API_KEY_FIELDS) delete old[k]
+        this.store.setSettings(old)
+      }
+      for (const p of [metaPath, bm25Path, vectorsPath, configPath]) {
+        if (existsSync(p)) renameSync(p, p + '.migrated')
+      }
+    } catch (err) {
+      safeWarn(`  Could not migrate the old index in ${dir}: ${(err as Error).message}`)
+    }
+  }
+
   setLLMProvider(provider: LLMProvider | null): void {
     this.llmProvider = provider
   }
 
-  private async ensureLoaded(): Promise<void> {
-    if (this.loaded || !this.persistPath) return
-    this.loaded = true
-    const dir = this.persistPath
-    const metaPath = join(dir, 'meta.json')
-    const bm25Path = join(dir, 'bm25.json')
-    const vectorsPath = join(dir, 'vectors.json')
-    if (existsSync(metaPath)) {
-      const meta = JSON.parse(readFileSync(metaPath, 'utf-8'))
-      if (Array.isArray(meta.documents)) {
-        if (typeof meta.documents[0] === 'string') {
-          const paths = meta.documents as string[]
-          this.documents = new Map()
-          for (const p of paths) this.documents.set(p, { path: p, format: 'txt' as DocumentFormat, chunkCount: 0, size: 0, indexedAt: 0, metadata: {} })
-        } else {
-          const docs = (meta.documents as DocumentInfo[]).map(d => ({ ...d, metadata: d.metadata ?? {} }))
-          this.documents = new Map(docs.map(d => [d.path, d]))
-        }
-      }
-      this.chunksCount = meta.chunks || 0
-    }
-    if (existsSync(bm25Path)) await this.searcher.load(bm25Path)
-    if (this.embedder && existsSync(vectorsPath)) await this.store.load(vectorsPath)
+  /** Identifies the current embedding model, so vectors from another model are never mixed in. */
+  private embedKey(): string {
+    if (!this.embedder) return ''
+    return `${this.embedder.constructor.name}:${this.embedModel || 'default'}:${this.embedder.dimensions}`
   }
 
-  async index(input: string | string[], metadata?: Record<string, unknown>): Promise<IndexResult> {
-    await this.ensureLoaded()
+  /** Runs `fn` after any earlier work on the same key has finished. */
+  private withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.locks.get(key) ?? Promise.resolve()
+    const run = previous.then(fn)
+    const settled = run.then(() => {}, () => {})
+    this.locks.set(key, settled)
+    settled.then(() => { if (this.locks.get(key) === settled) this.locks.delete(key) })
+    return run
+  }
+
+  async index(input: string | string[], metadata?: Record<string, unknown>, options?: IndexOptions): Promise<IndexResult> {
     const paths = Array.isArray(input) ? input : [input]
     const resolved: string[] = []
     for (const p of paths) {
       try {
         resolved.push(...(await findFiles(p)))
       } catch (err) {
-        console.warn(`  Skipping "${p}": ${(err as Error).message}`)
+        safeWarn(`  Skipping "${p}": ${(err as Error).message}`)
       }
     }
     const start = Date.now()
     let totalDocs = 0
     let totalChunks = 0
-    const docMeta = metadata ?? {}
+    let failed = 0
 
     for (const filePath of resolved) {
-      try {
-        if (this.documents.has(filePath)) {
-          if (this.versionHistory.has(filePath)) {
-            const versions = this.versionHistory.get(filePath)!
-            const lastContent = versions[versions.length - 1]?.content
-            const doc = await this.extractPath(filePath)
-            if (doc.content !== lastContent) {
-              await this.removeDocument(filePath)
-            } else {
-              continue
-            }
-          } else {
-            continue
-          }
-        }
+      const outcome = await this.withLock(filePath, () => this.indexOne(filePath, metadata, options))
+      if (outcome.status === 'indexed' || outcome.status === 'no-text') {
         totalDocs++
-
-        const doc = await this.extractPath(filePath)
-        const tableAugmented = extractTablesFromContent(doc.content)
-        const chunks = chunk(tableAugmented, filePath, doc.format, this.chunkStrategy, this.chunkSize, this.chunkOverlap)
-
-        for (const c of chunks) {
-          c.metadata = { ...docMeta, ...doc.metadata }
-        }
-
-        await this.searcher.add(chunks)
-        this.chunksCount += chunks.length
-        totalChunks += chunks.length
-
-        this.documents.set(filePath, {
-          path: filePath,
-          format: doc.format,
-          chunkCount: chunks.length,
-          size: (doc.metadata.size as number) || 0,
-          indexedAt: Date.now(),
-          metadata: { ...docMeta },
-        })
-
-        const versions = this.versionHistory.get(filePath) || []
-        versions.push({ version: versions.length + 1, content: doc.content, timestamp: Date.now() })
-        this.versionHistory.set(filePath, versions)
-
-        if (this.embedder) {
-          const batchSize = 20
-          for (let i = 0; i < chunks.length; i += batchSize) {
-            const batch = chunks.slice(i, i + batchSize)
-            const embeddings = await this.embedder.embed(batch.map(c => c.content))
-            await this.store.add(batch, embeddings)
-          }
-        }
-      } catch (err) {
-        console.warn(`  Error indexing "${filePath}": ${(err as Error).message}`)
+        totalChunks += outcome.chunks
+      } else if (outcome.status === 'failed') {
+        failed++
       }
     }
 
-    if (this.persistPath) await this._save()
-    return { documents: totalDocs, chunks: totalChunks, time: Date.now() - start }
+    if (this.embedder && totalChunks > 0) await this.embedPending()
+    return { documents: totalDocs, chunks: totalChunks, time: Date.now() - start, ...(failed > 0 ? { failed } : {}) }
   }
 
-  private async extractPath(filePath: string): Promise<import('./types.js').ExtractedDocument> {
+  private async indexOne(path: string, metadata: Record<string, unknown> | undefined, options: IndexOptions | undefined): Promise<IndexOutcome> {
+    const url = isUrl(path)
+    const existing = this.store.getDocument(path)
+    const usable = existing && existing.status !== 'failed'
+    const metaChanged = metadata !== undefined && JSON.stringify(metadata) !== JSON.stringify(existing?.metadata ?? {})
+    const docMeta = metadata ?? existing?.metadata ?? {}
+    let mtimeMs: number | null = null
+    let size = 0
+    let hash = ''
+    try {
+      if (!url) {
+        const st = statSync(path)
+        mtimeMs = st.mtimeMs
+        size = st.size
+        // Unchanged since last time: same timestamp and size, or the same bytes.
+        if (usable && !metaChanged && existing.mtimeMs === mtimeMs && existing.size === size) return { status: 'skipped', chunks: 0 }
+        hash = hashBytes(readFileSync(path))
+        if (usable && !metaChanged && existing.contentHash === hash) {
+          this.store.touchDocument(path, mtimeMs, size)
+          return { status: 'skipped', chunks: 0 }
+        }
+      }
+
+      const doc = await this.extractPath(path)
+      if (url) {
+        hash = hashBytes(doc.content)
+        size = doc.content.length
+        if (usable && !metaChanged && existing.contentHash === hash) return { status: 'skipped', chunks: 0 }
+      }
+
+      // Tables are already part of the text; indexing a second Markdown copy would double-count their words.
+      const chunks = chunk(doc.content, path, doc.format, this.chunkStrategy, this.chunkSize, this.chunkOverlap)
+      const chunkMetadata = { ...docMeta, ...doc.metadata }
+      for (const c of chunks) c.metadata = chunkMetadata
+      const status = chunks.length > 0 ? 'indexed' : 'no-text'
+
+      this.store.replaceDocument({
+        path,
+        displayName: options?.displayName ?? existing?.displayName ?? (url ? path : basename(path)),
+        source: options?.source ?? existing?.source ?? (url ? 'url' : 'path'),
+        format: doc.format,
+        size,
+        mtimeMs,
+        contentHash: hash,
+        status,
+        metadata: docMeta,
+        chunkMetadata,
+      }, chunks)
+      this.store.addVersion(path, hash, doc.content)
+      return { status, chunks: chunks.length }
+    } catch (err) {
+      const message = (err as Error).message
+      safeWarn(`  Error indexing "${path}": ${message}`)
+      // Keep a previously good copy searchable; only record the failure for documents not indexed yet.
+      if (!usable) {
+        this.store.replaceDocument({
+          path,
+          displayName: options?.displayName ?? (url ? path : basename(path)),
+          source: options?.source ?? (url ? 'url' : 'path'),
+          format: url ? 'url' : detectFormat(path),
+          size,
+          mtimeMs,
+          contentHash: hash,
+          status: 'failed',
+          error: message,
+          metadata: docMeta,
+          chunkMetadata: docMeta,
+        }, [])
+      }
+      return { status: 'failed', chunks: 0 }
+    }
+  }
+
+  /** Embeds every chunk that has no vector for the current model. Safe to call repeatedly. */
+  async embedPending(): Promise<void> {
+    if (!this.embedder) return
+    if (this.embedding) return this.embedding
+    const embedder = this.embedder
+    const model = this.embedKey()
+    this.embedding = (async () => {
+      try {
+        while (this.embedder === embedder) {
+          const batch = this.store.chunksNeedingVectors(model, EMBED_BATCH)
+          if (batch.length === 0) break
+          const vectors = await embedder.embed(batch.map(b => b.content))
+          if (vectors.length !== batch.length) throw new Error(`embedding provider returned ${vectors.length} vectors for ${batch.length} texts`)
+          this.store.addVectors(batch.map((b, i) => ({ chunkRowId: b.rowId, model, vector: vectors[i] })))
+        }
+      } catch (err) {
+        safeWarn(`  Embedding paused (keyword search still works): ${(err as Error).message}`)
+      } finally {
+        this.embedding = null
+      }
+    })()
+    return this.embedding
+  }
+
+  private async extractPath(filePath: string): Promise<ExtractedDocument> {
     if (isUrl(filePath)) {
-      return await extractUrl(filePath)
+      return await extractUrl(filePath, { blockPrivate: this.blockPrivateUrls })
     }
     return await extract(filePath, { ocr: this.ocr })
   }
 
+  private findDocument(path: string) {
+    return this.store.getDocument(path) ?? (isUrl(path) ? undefined : this.store.getDocument(resolve(path)))
+  }
+
   async search(query: string, topK = 10, filter?: Record<string, unknown>): Promise<SearchResult[]> {
-    await this.ensureLoaded()
+    const fetchK = Math.max(topK * 3, 30)
+    const activeFilter = filter && Object.keys(filter).length > 0 ? filter : undefined
     let results: SearchResult[]
 
-    if (this.searchMode === 'vector' && this.embedder) {
+    if ((this.searchMode === 'vector' || this.searchMode === 'hybrid') && this.embedder) {
       try {
-        const [queryEmb] = await this.embedder.embed([query])
-        results = await this.store.search(queryEmb, topK * 2)
+        const queryEmb = this.embedder.embedQuery ? await this.embedder.embedQuery(query) : (await this.embedder.embed([query]))[0]
+        const vectorResults = this.store.searchVectors(queryEmb, this.embedKey(), fetchK, activeFilter)
+        if (this.searchMode === 'vector' && vectorResults.length > 0) {
+          results = vectorResults
+        } else {
+          const textResults = this.store.searchText(query, fetchK, activeFilter)
+          results = vectorResults.length > 0 ? reciprocalRankFusion(textResults, vectorResults, fetchK, this.searchAlpha) : textResults
+        }
       } catch {
-        results = await this.searcher.search(query, topK * 2)
-      }
-    } else if (this.searchMode === 'hybrid' && this.embedder) {
-      try {
-        const [queryEmb] = await this.embedder.embed([query])
-        const bm25Results = await this.searcher.search(query, topK * 3)
-        const vectorResults = await this.store.search(queryEmb, topK * 3)
-        results = reciprocalRankFusion(bm25Results, vectorResults, topK, this.searchAlpha)
-      } catch {
-        results = await this.searcher.search(query, topK * 2)
+        results = this.store.searchText(query, fetchK, activeFilter)
       }
     } else {
-      results = await this.searcher.search(query, topK * 2)
-    }
-
-    if (filter && Object.keys(filter).length > 0) {
-      results = results.filter(r => {
-        for (const [key, value] of Object.entries(filter)) {
-          if (r.chunk.metadata[key] !== value) return false
-        }
-        return true
-      })
+      results = this.store.searchText(query, fetchK, activeFilter)
     }
 
     try {
@@ -277,7 +418,6 @@ export class Duct {
   }
 
   async ask(query: string, topK = 5): Promise<QAResult> {
-    await this.ensureLoaded()
     const start = Date.now()
 
     let hydeQuery = query
@@ -328,14 +468,14 @@ export class Duct {
 
   async extractSchema(fields: SchemaField[], paths?: string[]): Promise<ExtractionResult[]> {
     if (!this.llmProvider) throw new Error('LLM provider required for schema extraction. Configure in settings.')
-    const docs = paths || [...this.documents.keys()]
+    const docs = paths || this.store.listDocuments().filter(d => d.status === 'indexed').map(d => d.path)
     const results: ExtractionResult[] = []
 
-    for (const path of docs) {
-      const content = this.documents.get(path)
-      if (!content) continue
+    for (const requested of docs) {
+      const known = this.findDocument(requested)
+      if (!known) continue
+      const path = known.path
       const allChunks: string[] = []
-      const { chunk } = await import('./chunk/index.js')
       const doc = await this.extractPath(path)
       const chunks = chunk(doc.content, path, doc.format, 'sliding-window', 4000, 0)
       for (const c of chunks) allChunks.push(c.content)
@@ -357,14 +497,11 @@ export class Duct {
   }
 
   async diff(path: string): Promise<DocDiff | null> {
-    const versions = this.versionHistory.get(path)
-    if (!versions || versions.length < 2) return null
+    const known = this.findDocument(path)
+    const versions = this.store.lastVersions(known?.path ?? path)
+    if (versions.length < 2) return null
 
-    const a = versions[versions.length - 2]
-    const b = versions[versions.length - 1]
-    const tokensA = new Set(a.content.split(/\s+/))
-    const tokensB = new Set(b.content.split(/\s+/))
-
+    const [a, b] = versions
     const additions: string[] = []
     const removals: string[] = []
 
@@ -444,72 +581,136 @@ Return ONLY a JSON array of strings, like: ["sub-question 1", "sub-question 2"]`
     return { answer, sources, time: Date.now() - start }
   }
 
+
+  /**
+   * Indexes the folders (existing files first), then keeps them in sync: new and changed files are
+   * indexed, deleted or moved files are removed. Folders are remembered; see restoreSources().
+   */
   async watch(paths: string[], callback?: () => void): Promise<void> {
     for (const p of paths) {
-      const st = statSync(p)
-      if (!st.isDirectory()) continue
-      const w = watch(p, { recursive: true }, async (eventType, filename) => {
-        if (!filename) return
-        const ext = extname(filename).toLowerCase()
-        if (!VALID_EXTS.has(ext)) return
-        const fullPath = join(p, filename.toString())
-        try {
-          statSync(fullPath)
-          await this.index(fullPath)
-          callback?.()
-        } catch (err) {
-          const msg = (err as Error).message
-          if (!msg.includes('ENOENT')) console.warn(`  Watch error for "${fullPath}": ${msg}`)
-        }
-      })
-      this.watchers.add(w)
+      const dir = resolve(p)
+      if (!statSync(dir).isDirectory()) continue
+      this.store.addSource(dir, 'watch')
+      this.startWatcher(dir, callback)
+      await this.reconcile(dir)
     }
   }
 
+  /** Re-watches every remembered folder, catching up on changes made while Duct wasn't running. */
+  async restoreSources(callback?: () => void): Promise<string[]> {
+    const restored: string[] = []
+    for (const source of this.store.listSources()) {
+      if (source.kind !== 'watch') continue
+      if (!existsSync(source.path)) {
+        safeWarn(`  Watched folder is unavailable, keeping its documents: ${source.path}`)
+        continue
+      }
+      this.startWatcher(source.path, callback)
+      await this.reconcile(source.path)
+      restored.push(source.path)
+    }
+    return restored
+  }
+
+  listSources(): { path: string; kind: string }[] {
+    return this.store.listSources()
+  }
+
+  /** Stops watching a folder and forgets it; by default its documents leave the index too. */
+  async removeSource(path: string, options: { removeDocuments?: boolean } = {}): Promise<void> {
+    const dir = resolve(path)
+    this.watchers.get(dir)?.close()
+    this.watchers.delete(dir)
+    this.store.removeSource(dir)
+    if (options.removeDocuments ?? true) {
+      for (const doc of this.store.documentsUnder(dir)) await this.removeDocument(doc.path)
+    }
+  }
+
+  private async reconcile(dir: string): Promise<void> {
+    await this.index(dir, undefined, { source: 'watch' })
+    for (const doc of this.store.documentsUnder(dir)) {
+      if (!existsSync(doc.path)) await this.removeDocument(doc.path)
+    }
+  }
+
+  private startWatcher(dir: string, callback?: () => void): void {
+    if (this.watchers.has(dir)) return
+    const watcher = watch(dir, { recursive: true }, (_event, filename) => {
+      if (!filename) return
+      const fullPath = join(dir, filename.toString())
+      // Editors and copies fire several events per save; handle each path once it settles.
+      clearTimeout(this.pendingChanges.get(fullPath))
+      this.pendingChanges.set(fullPath, setTimeout(() => {
+        this.pendingChanges.delete(fullPath)
+        this.handleChange(fullPath).then(changed => { if (changed) callback?.() })
+      }, WATCH_DEBOUNCE_MS))
+    })
+    watcher.on('error', err => safeWarn(`  Watch error for "${dir}": ${err.message}`))
+    this.watchers.set(dir, watcher)
+  }
+
+  private async handleChange(fullPath: string): Promise<boolean> {
+    try {
+      if (existsSync(fullPath)) {
+        const isDir = statSync(fullPath).isDirectory()
+        if (!isDir && !VALID_EXTS.has(extname(fullPath).toLowerCase())) return false
+        const result = await this.index(fullPath, undefined, { source: 'watch' })
+        return result.documents > 0
+      }
+      // Deleted, or renamed/moved away: drop the file, or everything under it if it was a folder.
+      const gone = [this.store.getDocument(fullPath), ...this.store.documentsUnder(fullPath)]
+        .filter((d): d is NonNullable<typeof d> => !!d)
+      for (const path of new Set(gone.map(d => d.path))) await this.removeDocument(path)
+      return gone.length > 0
+    } catch (err) {
+      safeWarn(`  Watch error for "${fullPath}": ${(err as Error).message}`)
+      return false
+    }
+  }
+
+  /** Stops all watchers. Watched folders stay remembered for restoreSources(). */
   unwatch(): void {
-    for (const w of this.watchers) {
+    for (const timer of this.pendingChanges.values()) clearTimeout(timer)
+    this.pendingChanges.clear()
+    for (const w of this.watchers.values()) {
       try { w.close() } catch (err) {
-        console.warn(`  Error closing watcher: ${(err as Error).message}`)
+        safeWarn(`  Error closing watcher: ${(err as Error).message}`)
       }
     }
     this.watchers.clear()
   }
 
   async removeDocument(path: string): Promise<void> {
-    await this.ensureLoaded()
-    const info = this.documents.get(path)
-    if (!info) return
-    this.documents.delete(path)
-    this.chunksCount -= info.chunkCount
-    await this.searcher.remove(path)
-    if (this.embedder) await this.store.remove(path)
-    if (this.persistPath) await this._save()
+    const doc = this.findDocument(path)
+    if (doc) this.store.removeDocument(doc.path)
   }
 
   async clear(): Promise<void> {
-    this.documents.clear()
-    this.chunksCount = 0
-    await this.store.clear()
-    await this.searcher.clear()
-    this.versionHistory.clear()
-    if (this.persistPath) {
-      for (const f of ['meta.json', 'bm25.json', 'vectors.json']) {
-        const p = join(this.persistPath, f)
-        if (existsSync(p)) unlinkSync(p)
-      }
-    }
+    this.store.clear()
   }
 
   stats(): { documents: number; chunks: number } {
-    return { documents: this.documents.size, chunks: this.chunksCount }
+    return this.store.stats()
   }
 
   getDocument(path: string): DocumentInfo | undefined {
-    return this.documents.get(path)
+    const doc = this.findDocument(path)
+    if (!doc) return undefined
+    const { id: _id, mtimeMs: _m, contentHash: _h, ...info } = doc
+    return info
+  }
+
+  /** The indexed document with exactly these bytes (sha256 hex), if any. */
+  findDocumentByHash(hash: string): DocumentInfo | undefined {
+    const doc = this.store.findByHash(hash)
+    if (!doc) return undefined
+    const { id: _id, mtimeMs: _m, contentHash: _h, ...info } = doc
+    return info
   }
 
   getDocuments(): DocumentInfo[] {
-    return [...this.documents.values()]
+    return this.store.listDocuments().map(({ id: _id, mtimeMs: _m, contentHash: _h, ...info }) => info)
   }
 
   getConfig(): RuntimeConfig {
@@ -523,8 +724,8 @@ Return ONLY a JSON array of strings, like: ["sub-question 1", "sub-question 2"]`
       rerank: this.rerankEnabled,
       hyde: this.hydeEnabled,
       llmProvider: this.llmProvider?.name || 'none',
-      llmModel: '',
-      llmBaseUrl: '',
+      llmModel: this.llmModel,
+      llmBaseUrl: this.llmBaseUrl,
       openaiKey: process.env['OPENAI_API_KEY'] || '',
       geminiKey: process.env['GEMINI_API_KEY'] || '',
       embedProvider: this.embedProvider,
@@ -538,72 +739,73 @@ Return ONLY a JSON array of strings, like: ["sub-question 1", "sub-question 2"]`
   }
 
   configure(cfg: Partial<RuntimeConfig>): void {
+    this.applyConfig(cfg, true)
+  }
+
+  private applyConfig(cfg: Partial<RuntimeConfig>, persist: boolean): void {
     if (cfg.ocr !== undefined) this.ocr = cfg.ocr
     if (cfg.chunkStrategy !== undefined) this.chunkStrategy = cfg.chunkStrategy
     if (cfg.chunkSize !== undefined) this.chunkSize = cfg.chunkSize
     if (cfg.chunkOverlap !== undefined) this.chunkOverlap = cfg.chunkOverlap
     if (cfg.searchMode !== undefined) this.searchMode = cfg.searchMode
-    if (cfg.searchAlpha !== undefined) {
-      this.searchAlpha = cfg.searchAlpha
-      if (this.searcher instanceof HybridSearcher) {
-        this.searcher.setAlpha(cfg.searchAlpha)
-      }
-    }
+    if (cfg.searchAlpha !== undefined) this.searchAlpha = Math.max(0, Math.min(1, cfg.searchAlpha))
     if (cfg.rerank !== undefined) {
       this.rerankEnabled = cfg.rerank
       this.initReranker()
     }
     if (cfg.hyde !== undefined) this.hydeEnabled = cfg.hyde
-    if (cfg.llmProvider !== undefined && cfg.llmProvider !== 'none') {
-      this.llmProvider = createLLMProvider({
-        provider: cfg.llmProvider,
-        model: cfg.llmModel || undefined,
-        baseUrl: cfg.llmBaseUrl || undefined,
-        openaiKey: cfg.openaiKey || process.env['OPENAI_API_KEY'],
-        geminiKey: cfg.geminiKey || process.env['GEMINI_API_KEY'],
-      })
-    }
     if (cfg.openaiKey) process.env['OPENAI_API_KEY'] = cfg.openaiKey
     if (cfg.geminiKey) process.env['GEMINI_API_KEY'] = cfg.geminiKey
     if (cfg.cohereKey) process.env['COHERE_API_KEY'] = cfg.cohereKey
     if (cfg.voyageKey) process.env['VOYAGE_API_KEY'] = cfg.voyageKey
     if (cfg.mistralKey) process.env['MISTRAL_API_KEY'] = cfg.mistralKey
     if (cfg.jinaKey) process.env['JINA_API_KEY'] = cfg.jinaKey
+    if (cfg.llmModel !== undefined) this.llmModel = cfg.llmModel
+    if (cfg.llmBaseUrl !== undefined) this.llmBaseUrl = cfg.llmBaseUrl
+    if (cfg.llmProvider === 'none') {
+      this.llmProvider = null
+    } else if (cfg.llmProvider !== undefined) {
+      this.llmProvider = createLLMProvider({
+        provider: cfg.llmProvider,
+        model: this.llmModel || undefined,
+        baseUrl: this.llmBaseUrl || undefined,
+        openaiKey: process.env['OPENAI_API_KEY'],
+        geminiKey: process.env['GEMINI_API_KEY'],
+      })
+    }
 
     const embedChanged = cfg.embedProvider !== undefined || cfg.embedModel !== undefined || cfg.embedBaseUrl !== undefined
-    const keysChanged = cfg.openaiKey !== undefined || cfg.geminiKey !== undefined ||
-      cfg.cohereKey !== undefined || cfg.voyageKey !== undefined ||
-      cfg.mistralKey !== undefined || cfg.jinaKey !== undefined
-
+    const keysChanged = API_KEY_FIELDS.some(k => cfg[k] !== undefined)
     if (embedChanged || keysChanged) {
+      const before = this.embedKey()
       if (cfg.embedProvider !== undefined) this.embedProvider = cfg.embedProvider
       if (cfg.embedModel !== undefined) this.embedModel = cfg.embedModel
       if (cfg.embedBaseUrl !== undefined) this.embedBaseUrl = cfg.embedBaseUrl
-
-      const provider = (this.embedProvider || '') as EmbedProvider
       this.embedder = createEmbedder({
-        provider: provider || undefined,
+        provider: (this.embedProvider || undefined) as EmbedProvider | undefined,
         model: this.embedModel || undefined,
         baseUrl: this.embedBaseUrl || undefined,
       })
-      if (this.embedder) {
-        this.searcher = new HybridSearcher(new BM25Searcher(), this.store, this.searchAlpha)
+      // A different model can't be compared with old vectors: embed everything again in the background.
+      if (this.embedder && this.embedKey() !== before) {
+        const pending = this.embedding ?? Promise.resolve()
+        pending.then(() => this.embedPending())
       }
     }
 
-    if (this.persistPath) {
-      writeFileSync(join(this.persistPath, 'config.json'), JSON.stringify(this.getConfig()))
+    if (persist) {
+      // Only what was explicitly configured is saved, and API keys never are.
+      const saved: Record<string, unknown> = { ...cfg }
+      for (const k of API_KEY_FIELDS) delete saved[k]
+      this.store.setSettings(saved)
     }
   }
 
-  private async _save(): Promise<void> {
-    const dir = this.persistPath!
-    await this.searcher.save(join(dir, 'bm25.json'))
-    if (this.embedder) await this.store.save(join(dir, 'vectors.json'))
-    writeFileSync(join(dir, 'meta.json'), JSON.stringify({
-      documents: [...this.documents.values()],
-      chunks: this.chunksCount,
-    }))
+  /** Closes watchers and the database. The instance can't be used afterwards. */
+  close(): void {
+    this.unwatch()
+    this.store.close()
+    terminateOcr().catch(() => {})
   }
 }
 

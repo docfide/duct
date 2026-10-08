@@ -22,11 +22,19 @@ export class CohereEmbedder implements EmbeddingProvider {
   }
 
   async embed(texts: string[]): Promise<number[][]> {
+    return this.request(texts, 'search_document')
+  }
+
+  async embedQuery(text: string): Promise<number[]> {
+    return (await this.request([text], 'search_query'))[0]
+  }
+
+  private async request(texts: string[], inputType: 'search_document' | 'search_query'): Promise<number[][]> {
     const client = await this.getClient()
     const response = await client.embed({
       model: this.model,
       texts,
-      inputType: 'search_document',
+      inputType,
       embeddingTypes: ['float'],
     })
     return (response.embeddings?.float as number[][]) || []

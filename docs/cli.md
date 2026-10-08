@@ -1,5 +1,11 @@
 # CLI Reference
 
+## Where the index lives
+
+Every command uses one index on disk, so `duct index ./docs` followed by `duct search "..."` works across runs. It's stored in `$DUCT_HOME`, or `~/.duct` if that isn't set; pass `--persist <dir>` to use another folder. Unchanged files are skipped when you index again.
+
+`duct serve` keeps uploaded files in `~/Duct Library` (change it with `--library <dir>`).
+
 ## `duct index`
 
 Index files, directories, or URLs for search.
@@ -102,7 +108,7 @@ duct watch ./inbox --ocr --embed openai --persist .duct-data
 | `--persist` | Persistent index directory |
 | `--embed` | Embedding provider (`openai`, `gemini`, `cohere`, `voyage`, `mistral`, `jina`, `ollama`, `openai-compatible`) |
 
-File changes are picked up via `fs.watch` with recursive mode. Stop with Ctrl+C.
+Existing files are indexed first. New, changed, renamed and deleted files are picked up via `fs.watch` (recursive), and watched folders are remembered in the index so `duct serve` and the desktop app resume them. Stop with Ctrl+C.
 
 ---
 
@@ -174,6 +180,19 @@ duct serve --search-mode hybrid --alpha 0.3 --llm ollama
 | `--search-mode` | Search mode: `bm25`, `vector`, or `hybrid` |
 | `--alpha` | Hybrid search alpha (default: 0.5) |
 | `--llm` | Default LLM provider for Ask tab |
+| `--host` | Interface to listen on (default: `127.0.0.1`). Any other value requires `--auth-token` |
+| `--watch-root` | Directory the API may watch, including subfolders. Repeatable. Without it, `POST /api/watch` is disabled |
+| `--allowed-host` | Extra hostname accepted in the `Host` header, e.g. `duct.example.com`. Repeatable |
+
+### Security
+
+By default the server only listens on `127.0.0.1` and only accepts requests addressed to `localhost`, `127.0.0.1` or `::1`. To share it on a network, set a token:
+
+```bash
+duct serve --host 0.0.0.0 --auth-token "$(openssl rand -hex 24)" --watch-root /srv/shared-docs
+```
+
+Browsers are asked for the token once and then get an HttpOnly login cookie. When `serve` is running, URLs that resolve to private, loopback or link-local addresses are never fetched.
 
 ### Rate Limiting
 

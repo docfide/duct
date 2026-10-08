@@ -3,15 +3,31 @@
 import { Command } from 'commander'
 import chalk from 'chalk'
 import ora from 'ora'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { Duct } from './index.js'
+import type { DuctConfig } from './types.js'
 import { createServer } from './server.js'
+import { VERSION } from './version.js'
+
+/** --embed <provider> picks a provider, --no-embed turns embeddings off, neither auto-detects from API keys. */
+function embedOption(value: string | boolean | undefined): DuctConfig['embed'] {
+  if (value === false) return false
+  if (typeof value === 'string') return { provider: value as Exclude<DuctConfig['embed'], false | undefined>['provider'] }
+  return undefined
+}
+
+/** Where the CLI keeps its index unless --persist is given: $DUCT_HOME, else ~/.duct. */
+function dataDir(persist?: string): string {
+  return persist || process.env['DUCT_HOME'] || join(homedir(), '.duct')
+}
 
 const program = new Command()
 
 program
   .name('duct')
   .description('Document intelligence pipeline — extract, chunk, embed, search, ask')
-  .version('0.1.0')
+  .version(VERSION)
 
 program
   .command('index')
@@ -20,17 +36,15 @@ program
   .option('-s, --strategy <strategy>', 'Chunking strategy: sliding-window or by-heading')
   .option('--chunk-size <size>', 'Chunk size in characters', (v) => parseInt(v))
   .option('--chunk-overlap <overlap>', 'Chunk overlap in characters', (v) => parseInt(v))
-  .option('--embed <provider>', 'Embedding provider: openai or gemini')
+  .option('--embed <provider>', 'Embedding provider: openai, gemini, cohere, voyage, mistral, jina, ollama, openai-compatible')
   .option('--no-embed', 'Skip embeddings, use keyword search only')
   .option('--ocr', 'Attempt OCR for scanned PDFs and image files')
-  .option('--persist <path>', 'Directory for persistent index storage')
+  .option('--persist <path>', 'Index directory (default: $DUCT_HOME or ~/.duct)')
   .option('--search-mode <mode>', 'Search mode: bm25, vector, or hybrid')
   .option('--alpha <n>', 'Hybrid search alpha (0=BM25, 1=vector)', (v) => parseFloat(v), 0.5)
   .action(async (paths: string[], options) => {
     try {
-      const embed = options.embed
-        ? { provider: options.embed as 'openai' | 'gemini' }
-        : options.embed === false ? undefined : undefined
+      const embed = embedOption(options.embed)
       const duct = new Duct({
         chunk: {
           strategy: options.strategy as 'sliding-window' | 'by-heading' | undefined,
@@ -39,7 +53,7 @@ program
         },
         embed,
         ocr: options.ocr ?? false,
-        persistPath: options.persist,
+        persistPath: dataDir(options.persist),
         search: {
           mode: options.searchMode as 'bm25' | 'vector' | 'hybrid' | undefined,
           alpha: options.alpha,
@@ -66,10 +80,10 @@ program
   .option('-k, --top-k <count>', 'Number of results', (v) => parseInt(v), 10)
   .option('-i, --index <path>', 'Index files in this path before searching')
   .option('-s, --strategy <strategy>', 'Chunking strategy (with --index)')
-  .option('--embed <provider>', 'Embedding provider: openai or gemini')
+  .option('--embed <provider>', 'Embedding provider: openai, gemini, cohere, voyage, mistral, jina, ollama, openai-compatible')
   .option('--no-embed', 'Skip embeddings')
   .option('--ocr', 'Attempt OCR for scanned PDFs and image files')
-  .option('--persist <path>', 'Directory for persistent index storage')
+  .option('--persist <path>', 'Index directory (default: $DUCT_HOME or ~/.duct)')
   .option('--search-mode <mode>', 'Search mode: bm25, vector, or hybrid')
   .option('--alpha <n>', 'Hybrid search alpha', (v) => parseFloat(v), 0.5)
   .option('--rerank', 'Enable re-ranking')
@@ -77,14 +91,12 @@ program
   .option('--json', 'Output as JSON')
   .action(async (query: string, options) => {
     try {
-      const embed = options.embed
-        ? { provider: options.embed as 'openai' | 'gemini' }
-        : options.embed === false ? undefined : undefined
+      const embed = embedOption(options.embed)
       const duct = new Duct({
         chunk: { strategy: options.strategy as 'sliding-window' | 'by-heading' | undefined },
         embed,
         ocr: options.ocr ?? false,
-        persistPath: options.persist,
+        persistPath: dataDir(options.persist),
         search: {
           mode: options.searchMode as 'bm25' | 'vector' | 'hybrid' | undefined,
           alpha: options.alpha,
@@ -143,7 +155,7 @@ program
   .argument('<question>', 'Your question')
   .option('-k, --top-k <count>', 'Number of sources', (v) => parseInt(v), 5)
   .option('-i, --index <path>', 'Index files in this path before asking')
-  .option('--persist <path>', 'Directory for persistent index storage')
+  .option('--persist <path>', 'Index directory (default: $DUCT_HOME or ~/.duct)')
   .option('--llm <provider>', 'LLM provider: ollama, openai, or gemini')
   .option('--model <name>', 'LLM model name')
   .option('--base-url <url>', 'LLM base URL (for Ollama or OpenAI-compatible)')
@@ -154,7 +166,7 @@ program
     try {
       const duct = new Duct({
         ocr: false,
-        persistPath: options.persist,
+        persistPath: dataDir(options.persist),
         search: { hyde: options.hyde ?? false },
         llm: options.llm ? { provider: options.llm as 'ollama' | 'openai' | 'gemini', model: options.model, baseUrl: options.baseUrl } : undefined,
       })
@@ -207,15 +219,15 @@ program
   .argument('<directories...>', 'Directories to watch')
   .option('-s, --strategy <strategy>', 'Chunking strategy')
   .option('--ocr', 'Enable OCR')
-  .option('--persist <path>', 'Persistent index directory')
-  .option('--embed <provider>', 'Embedding provider')
+  .option('--persist <path>', 'Index directory (default: $DUCT_HOME or ~/.duct)')
+  .option('--embed <provider>', 'Embedding provider: openai, gemini, cohere, voyage, mistral, jina, ollama, openai-compatible')
   .action(async (dirs: string[], options) => {
     try {
       const duct = new Duct({
         chunk: { strategy: options.strategy as 'sliding-window' | 'by-heading' | undefined },
         ocr: options.ocr ?? false,
-        persistPath: options.persist,
-        embed: options.embed ? { provider: options.embed as 'openai' | 'gemini' } : undefined,
+        persistPath: dataDir(options.persist),
+        embed: embedOption(options.embed),
       })
 
       console.log(`  ${chalk.green('✓')} Watching ${chalk.bold(String(dirs.length))} director(ies) for changes...`)
@@ -250,7 +262,7 @@ program
   .description('Extract structured data from documents')
   .argument('<fields...>', 'Fields in format: name:type:description (e.g. "invoice_date:date:Invoice issue date")')
   .option('-i, --index <path>', 'Index path containing documents')
-  .option('--persist <path>', 'Persistent index directory')
+  .option('--persist <path>', 'Index directory (default: $DUCT_HOME or ~/.duct)')
   .option('--llm <provider>', 'LLM provider for extraction')
   .option('--model <name>', 'LLM model name')
   .option('--json', 'Output as JSON')
@@ -262,7 +274,7 @@ program
       }).map(f => ({ ...f, type: (f.type || 'string') as 'string' | 'number' | 'date' | 'boolean' }))
 
       const duct = new Duct({
-        persistPath: options.persist,
+        persistPath: dataDir(options.persist),
         llm: options.llm ? { provider: options.llm as 'ollama' | 'openai' | 'gemini', model: options.model } : undefined,
       })
 
@@ -299,10 +311,10 @@ program
   .command('diff')
   .description('Show changes between document versions')
   .argument('<path>', 'Document path to diff')
-  .option('--persist <path>', 'Persistent index directory')
+  .option('--persist <path>', 'Index directory (default: $DUCT_HOME or ~/.duct)')
   .action(async (path: string, options) => {
     try {
-      const duct = new Duct({ persistPath: options.persist })
+      const duct = new Duct({ persistPath: dataDir(options.persist) })
       const d = await duct.diff(path)
       if (!d) {
         console.log(`  ${chalk.yellow('No version history found.')} ${chalk.dim('Re-index the document to create versions.')}`)
@@ -333,33 +345,59 @@ program
   .description('Start the web server with full UI')
   .option('-p, --port <port>', 'Port to listen on', (v) => parseInt(v), 3456)
   .option('-s, --strategy <strategy>', 'Chunking strategy: sliding-window or by-heading')
-  .option('--embed <provider>', 'Embedding provider: openai or gemini')
+  .option('--embed <provider>', 'Embedding provider: openai, gemini, cohere, voyage, mistral, jina, ollama, openai-compatible')
   .option('--no-embed', 'Skip embeddings, use keyword search only')
   .option('--ocr', 'Attempt OCR for scanned PDFs and image files')
-  .option('--persist <path>', 'Directory for persistent index storage')
+  .option('--persist <path>', 'Index directory (default: $DUCT_HOME or ~/.duct)')
   .option('--auth-token <token>', 'Bearer token required for API requests (env: DUCT_AUTH_TOKEN)')
   .option('--upload-limit <mb>', 'Max upload file size in MB', (v) => parseInt(v), 50)
   .option('--search-mode <mode>', 'Search mode: bm25, vector, or hybrid')
   .option('--alpha <n>', 'Hybrid search alpha', (v) => parseFloat(v), 0.5)
   .option('--llm <provider>', 'Default LLM provider: ollama, openai, gemini')
+  .option('--host <host>', 'Interface to listen on. Anything other than localhost requires --auth-token', '127.0.0.1')
+  .option('--watch-root <dir>', 'Allow the API to watch this directory and its subfolders (repeatable)', (v: string, prev: string[]) => [...prev, v], [] as string[])
+  .option('--library <dir>', 'Folder where uploaded files are kept (default: ~/Duct Library)')
+  .option('--allowed-host <name>', 'Extra hostname accepted in the Host header, e.g. duct.example.com (repeatable)', (v: string, prev: string[]) => [...prev, v], [] as string[])
   .action(async (options) => {
     try {
-      const embed = options.embed
-        ? { provider: options.embed as 'openai' | 'gemini' }
-        : options.embed === false ? undefined : undefined
+      const token = options.authToken || process.env['DUCT_AUTH_TOKEN']
+      const loopback = ['127.0.0.1', 'localhost', '::1'].includes(options.host)
+      if (!loopback && !token) {
+        console.error(`  ${chalk.red('✗')} ${chalk.red(`Refusing to listen on ${options.host} without authentication.`)}`)
+        console.error(`    ${chalk.dim('Set --auth-token <token> or DUCT_AUTH_TOKEN, or keep the default --host 127.0.0.1.')}`)
+        process.exit(1)
+      }
+      const embed = embedOption(options.embed)
       const duct = new Duct({
         chunk: { strategy: options.strategy as 'sliding-window' | 'by-heading' | undefined },
         embed,
         ocr: options.ocr ?? false,
-        persistPath: options.persist,
+        persistPath: dataDir(options.persist),
+        blockPrivateUrls: true,
         search: { mode: options.searchMode as 'bm25' | 'vector' | 'hybrid' | undefined, alpha: options.alpha, rerank: true },
         llm: options.llm ? { provider: options.llm as 'ollama' | 'openai' | 'gemini' } : undefined,
       })
-      const token = options.authToken || process.env['DUCT_AUTH_TOKEN']
-      const server = createServer(duct, { authToken: token, uploadLimitMb: options.uploadLimit })
-      server.listen(options.port, () => {
-        console.log(`\n  ${chalk.green('✓')} ${chalk.bold('Duct server running at')} ${chalk.cyan(`http://localhost:${options.port}`)}`)
+      // On loopback only local names are accepted; when exposed, the token protects the API and any Host is allowed
+      // unless --allowed-host narrows it.
+      const allowedHosts = loopback
+        ? ['localhost', '127.0.0.1', '::1', ...options.allowedHost]
+        : options.allowedHost.length > 0 ? ['localhost', '127.0.0.1', '::1', ...options.allowedHost] : '*' as const
+      const server = createServer(duct, {
+        authToken: token,
+        uploadLimitMb: options.uploadLimit,
+        watchRoots: options.watchRoot,
+        allowedHosts,
+        libraryDir: options.library,
+      })
+      server.listen(options.port, options.host, () => {
+        const shownHost = loopback ? 'localhost' : options.host
+        console.log(`\n  ${chalk.green('✓')} ${chalk.bold('Duct server running at')} ${chalk.cyan(`http://${shownHost}:${options.port}`)}`)
         if (token) console.log(`    ${chalk.dim('Auth:')} token required`)
+        if (options.watchRoot.length > 0) console.log(`    ${chalk.dim('Watch roots:')} ${options.watchRoot.join(', ')}`)
+        // Resume folders watched earlier (via `duct watch` or the API), catching up on changes made meanwhile.
+        duct.restoreSources().then(dirs => {
+          if (dirs.length > 0) console.log(`    ${chalk.dim('Watching:')} ${dirs.join(', ')}`)
+        }).catch(err => console.error(`  ${chalk.red('✗')} Could not resume watched folders: ${(err as Error).message}`))
         console.log(`    ${chalk.dim('Upload limit:')} ${options.uploadLimit} MB`)
         console.log(`    ${chalk.dim('Embedding:')} ${duct['embedder'] ? chalk.green('enabled') : chalk.dim('disabled (keyword search only)')}`)
         const llmName = duct['llmProvider'] ? duct['llmProvider']!.name : 'none'

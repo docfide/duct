@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { extname } from 'node:path'
 import type { ExtractedDocument, DocumentFormat, Extractor } from '../types.js'
 import { IMAGE_EXTS, ocrPdf, isImageFile } from '../ocr/index.js'
@@ -36,9 +36,36 @@ export function detectFormat(path: string): DocumentFormat {
   }
 }
 
+interface PdfTextItem { str?: string; hasEOL?: boolean; transform?: number[]; width?: number }
+
+/**
+ * Rebuilds a page's text from pdf.js items: a change in baseline starts a new line (so headings and
+ * paragraphs survive), and a space is only added where there is a visible gap between items.
+ */
+function pageText(items: PdfTextItem[]): string {
+  let text = ''
+  let lastY: number | undefined
+  let lastEndX: number | undefined
+  for (const item of items) {
+    if (item.str === undefined) continue
+    const [, , c = 0, d = 0, x, y] = item.transform ?? []
+    const fontSize = Math.hypot(c, d) || 10
+    const newLine = lastY !== undefined && y !== undefined && Math.abs(y - lastY) > fontSize * 0.5
+    if (text && !text.endsWith('\n')) {
+      if (newLine) text += '\n'
+      else if (lastEndX !== undefined && x !== undefined && x - lastEndX > fontSize * 0.15 && !text.endsWith(' ') && !item.str.startsWith(' ')) text += ' '
+    }
+    text += item.str
+    if (item.hasEOL) text += '\n'
+    if (y !== undefined) lastY = y
+    if (x !== undefined && item.width !== undefined) lastEndX = x + item.width
+  }
+  return text.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim()
+}
+
 async function extractPdf(path: string): Promise<ExtractedDocument> {
   await ensureDOMMatrix()
-  const { getDocument } = await import('pdfjs-dist')
+  const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs')
   const buffer = readFileSync(path)
   const data: Uint8Array = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)
   const pdf = await getDocument({ data }).promise
@@ -46,8 +73,7 @@ async function extractPdf(path: string): Promise<ExtractedDocument> {
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i)
     const content = await page.getTextContent()
-    const text = content.items.map((item: any) => item.str).join(' ')
-    textParts.push(text)
+    textParts.push(pageText(content.items as PdfTextItem[]))
   }
   return {
     path,
@@ -171,16 +197,20 @@ const extractors: Record<DocumentFormat, Extractor> = {
 export async function extract(path: string, options?: { ocr?: boolean }): Promise<ExtractedDocument> {
   const format = detectFormat(path)
 
+  // OCR is slow, so it only runs when enabled; otherwise image-only files are flagged for OCR instead.
   if (format === 'image') {
-    return await extractImage(path)
+    if (options?.ocr) return await extractImage(path)
+    return { path, format: 'image', content: '', metadata: { size: statSync(path).size, needsOcr: true } }
   }
 
   const doc = await extractors[format].extract(path)
 
-  if (format === 'pdf' && options?.ocr) {
+  if (format === 'pdf') {
     const text = doc.content.trim()
     const pages = (doc.metadata.pages as number) || 1
-    if (text.length < 50 && pages > 1) {
+    // Under ~25 characters per page means the PDF is mostly scanned images.
+    if (text.length < 25 * pages) {
+      if (!options?.ocr) return { ...doc, metadata: { ...doc.metadata, needsOcr: true } }
       const ocrText = await ocrPdf(path)
       if (ocrText && ocrText.length > text.length) {
         return { ...doc, content: ocrText, metadata: { ...doc.metadata, ocr: true } }

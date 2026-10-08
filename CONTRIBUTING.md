@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Node.js 18+
+- Node.js 22.13+ (Duct uses the built-in `node:sqlite` module)
 - npm
 
 ## Setup

@@ -1,6 +1,8 @@
 # REST API Reference
 
-All endpoints are prefixed with `/api`. When auth is configured (`--auth-token` or `DUCT_AUTH_TOKEN`), include `Authorization: Bearer <token>` in all requests.
+All endpoints are prefixed with `/api`. When auth is configured (`--auth-token` or `DUCT_AUTH_TOKEN`), include `Authorization: Bearer <token>` in all requests. Browsers can instead `POST /api/login` with `{"token": "..."}` to receive an HttpOnly cookie.
+
+Requests must use a `Host` of `localhost`, `127.0.0.1` or `::1` unless the server was started with `--host`/`--allowed-host`. Cross-origin writes (a non-GET request whose `Origin` differs from `Host`) are rejected with `403`.
 
 Rate limit: 120 requests per minute.
 
@@ -338,7 +340,7 @@ Content-Type: application/json
 }
 ```
 
-New and modified files are automatically indexed.
+New and modified files are automatically indexed. Directories must be inside a root given with `duct serve --watch-root <dir>`; otherwise the request is rejected with `403`.
 
 ---
 

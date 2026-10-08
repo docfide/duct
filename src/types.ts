@@ -14,6 +14,13 @@ export interface DocumentInfo {
   size: number
   indexedAt: number
   metadata: Record<string, unknown>
+  /** Name to show users (the original filename for uploads). */
+  displayName?: string
+  /** How the document entered the index: 'path', 'url', 'watch' or 'library'. */
+  source?: string
+  /** 'no-text' means extraction found no text (often a scan that needs OCR). */
+  status?: 'indexed' | 'no-text' | 'failed'
+  error?: string
 }
 
 export interface Chunk {
@@ -30,6 +37,15 @@ export interface IndexResult {
   documents: number
   chunks: number
   time: number
+  /** Files that could not be extracted. */
+  failed?: number
+}
+
+export interface IndexOptions {
+  /** Recorded on the document; defaults to 'url' for URLs and 'path' otherwise. */
+  source?: string
+  /** Name shown to users; defaults to the file name. */
+  displayName?: string
 }
 
 export interface SearchResult {
@@ -43,7 +59,8 @@ export interface DuctConfig {
     size?: number
     overlap?: number
   }
-  embed?: {
+  /** Embedding settings; `false` disables embeddings even when API keys are present. */
+  embed?: false | {
     provider?: 'openai' | 'gemini' | 'cohere' | 'voyage' | 'mistral' | 'jina' | 'ollama' | 'openai-compatible'
     model?: string
     baseUrl?: string
@@ -51,6 +68,8 @@ export interface DuctConfig {
   }
   ocr?: boolean
   persistPath?: string
+  /** Refuse to fetch URLs that resolve to loopback, private or link-local addresses. Enabled by `duct serve`. */
+  blockPrivateUrls?: boolean
   llm?: {
     provider?: 'ollama' | 'openai' | 'gemini'
     model?: string
@@ -89,6 +108,8 @@ export interface RuntimeConfig {
 
 export interface EmbeddingProvider {
   embed(texts: string[]): Promise<number[][]>
+  /** Embeds a search query, for models that encode queries differently from documents. Defaults to embed(). */
+  embedQuery?(text: string): Promise<number[]>
   readonly dimensions: number
 }
 

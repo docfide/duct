@@ -229,10 +229,11 @@ describe('Duct integration', () => {
     await duct1.index(join(fixturesDir, 'sample.md'))
 
     const duct2 = new Duct({ persistPath: tmpDir })
-    expect(duct2.stats().documents).toBe(0)
+    // The saved index is available immediately, before any search.
+    expect(duct2.stats().documents).toBe(2)
+    expect(duct2.getDocuments()).toHaveLength(2)
     const results = await duct2.search('termination', 5)
     expect(results.length).toBeGreaterThan(0)
-    expect(duct2.stats().documents).toBe(2)
 
     rmSync(tmpDir, { recursive: true, force: true })
   })
@@ -245,5 +246,28 @@ describe('Duct integration', () => {
     const top = results[0]
     expect(top.chunk.content.toLowerCase()).toContain('termination')
     expect(top.score).toBeGreaterThan(0)
+  })
+})
+
+describe('HybridSearcher', () => {
+  it('uses only the embedder it is given', async () => {
+    const { HybridSearcher } = await import('../src/search/hybrid.js')
+    const bm25 = new BM25Searcher()
+    const store = new MemoryVectorStore()
+    const chunks = [
+      { id: 'k', documentPath: '/k.txt', documentFormat: 'txt' as const, content: 'keyword match here', index: 0, metadata: {} },
+      { id: 'v', documentPath: '/v.txt', documentFormat: 'txt' as const, content: 'semantic neighbour', index: 0, metadata: {} },
+    ]
+    await bm25.add(chunks)
+    await store.add(chunks, [[0, 1], [1, 0]])
+    const keywordOnly = new HybridSearcher(bm25, store, 0.5)
+    expect((await keywordOnly.search('keyword', 5)).map(r => r.chunk.id)).toEqual(['k'])
+
+    let calls = 0
+    const embedder = { dimensions: 2, embed: async (texts: string[]) => { calls++; return texts.map(() => [1, 0]) } }
+    const hybrid = new HybridSearcher(bm25, store, 0.9, embedder)
+    const ids = (await hybrid.search('keyword', 5)).map(r => r.chunk.id)
+    expect(calls).toBe(1)
+    expect(ids).toContain('v')
   })
 })
