@@ -11,11 +11,15 @@ import type { Duct } from './index.js'
 import { isUrl } from './extract/web.js'
 import { addToLibrary, defaultLibraryDir } from './library.js'
 import { VERSION } from './version.js'
+import { viewerHtml } from './viewer.js'
+import { islandHtml } from './island.js'
 
 // Mascot art ships with the package; the dotLottie player and its wasm are served
 // locally (never from a CDN) so the UI works offline.
 const mascotDir = fileURLToPath(new URL('../assets/mascot', import.meta.url))
 const lottiePlayerDir = dirname(createRequire(import.meta.url).resolve('@lottiefiles/dotlottie-web'))
+// pdf.js (legacy build, for wider browser support) powers the /viewer page; served locally like the mascot.
+const pdfjsDir = dirname(createRequire(import.meta.url).resolve('pdfjs-dist/package.json'))
 
 const VALID_EXTS = new Set(['.pdf', '.docx', '.md', '.markdown', '.html', '.htm', '.txt', '.csv', '.json', '.log', '.xml', '.xlsx', '.pptx', '.png', '.jpg', '.jpeg', '.tiff', '.tif', '.bmp', '.gif', '.webp'])
 
@@ -34,6 +38,7 @@ const CSP = [
   "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
+  "font-src 'self' data:",
   "connect-src 'self'",
   "worker-src 'self' blob:",
   "object-src 'none'",
@@ -470,6 +475,17 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
   })
 
   app.use('/mascot', express.static(mascotDir, { maxAge: '1d' }))
+  for (const [route, dir] of [['build', 'legacy/build'], ['web', 'legacy/web'], ['cmaps', 'cmaps'], ['standard_fonts', 'standard_fonts'], ['wasm', 'wasm']]) {
+    app.use(`/vendor/pdfjs/${route}`, express.static(join(pdfjsDir, dir), { maxAge: '1d', index: false }))
+  }
+  app.get('/viewer', (_req, res) => {
+    res.type('html').send(viewerHtml)
+  })
+  // The desktop app's notch companion (see electron/island.cjs).
+  app.get('/island', (_req, res) => {
+    res.type('html').send(islandHtml)
+  })
+
   app.get('/vendor/dotlottie/index.js', (_req, res) => res.sendFile(join(lottiePlayerDir, 'index.js')))
   app.get('/vendor/dotlottie/dotlottie-player.wasm', (_req, res) => res.sendFile(join(lottiePlayerDir, 'dotlottie-player.wasm')))
 
@@ -1180,16 +1196,32 @@ body.member .admin-only { display: none !important; }
     if (card) viewResult(card)
   })
 
+  // The words the search actually matched (from the snippet markers), so stemmed matches are highlighted too.
+  function highlightTerms(r) {
+    const marked = [...(r.snippet || '').matchAll(/\u0002([^\u0003]+)\u0003/g)].map(m => m[1].toLowerCase())
+    const phrases = [...lastQuery.matchAll(/"([^"]+)"/g)].map(m => m[1].toLowerCase())
+    const words = lastQuery.replace(/"[^"]*"/g, ' ').toLowerCase().split(/\\s+/).filter(w => w.length > 1)
+    return [...new Set([...phrases, ...marked, ...words])].slice(0, 12)
+  }
+
+  function viewerUrl(path, page, terms) {
+    return '/viewer?path=' + encodeURIComponent(path) + '&page=' + (page || 1) + '&terms=' + encodeURIComponent(JSON.stringify(terms))
+  }
+
   async function openResult(r) {
     if (!r) return
     const path = r.chunk.documentPath
     const page = r.chunk.page
     if (/^https?:/i.test(path)) { window.open(path, '_blank', 'noopener'); return }
     if (window.electronAPI && window.electronAPI.openDocument) {
-      if (!(await window.electronAPI.openDocument(path, page))) toast("Couldn't open " + fileName(path), true)
+      if (!(await window.electronAPI.openDocument(path, page, highlightTerms(r)))) toast("Couldn't open " + fileName(path), true)
       return
     }
-    window.open('/api/file/' + encodeURIComponent(fileName(path)) + '?path=' + encodeURIComponent(path) + (page ? '#page=' + page : ''), '_blank', 'noopener')
+    if (/\.pdf$/i.test(path)) {
+      window.open(viewerUrl(path, page, highlightTerms(r)), '_blank', 'noopener')
+      return
+    }
+    window.open('/api/file/' + encodeURIComponent(fileName(path)) + '?path=' + encodeURIComponent(path), '_blank', 'noopener')
   }
 
   function viewResult(el) {

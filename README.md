@@ -40,7 +40,8 @@ No API keys required. No configuration files. Works offline.
 | **Schema Extraction** | Extract structured fields from documents via LLM |
 | **Diff Tracking** | Line-level changes between document versions |
 | **Export API** | Search results in JSON or CSV |
-| **Web UI** | Tabbed interface for search, ask, upload, and settings |
+| **Web UI** | Search with page numbers and highlighted snippets; PDFs open at the page with matches highlighted |
+| **Desktop island** | The mascot lives in the MacBook notch: indexing progress, quick search (⌘⇧Space), drop files to add them |
 | **URL Indexing** | Index web pages by URL |
 | **Table Extraction** | Detects pipe and whitespace-separated tables |
 | **OCR** | Tesseract.js + sharp for scanned PDFs and images |

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 88 88">
+  <!-- Coloured tray icon (Windows/Linux) while Duct watches folders: sleeping head with a lime "z". -->
+  <circle cx="17" cy="26" r="11" fill="#e9d8b4"/>
+  <circle cx="65" cy="26" r="11" fill="#e9d8b4"/>
+  <ellipse cx="41" cy="52" rx="37" ry="30" fill="#e9d8b4"/>
+  <ellipse cx="41" cy="48" rx="29" ry="11" fill="#b08a5c"/>
+  <ellipse cx="41" cy="66" rx="15" ry="11" fill="#f0efe8"/>
+  <ellipse cx="41" cy="60" rx="4.5" ry="3.5" fill="#0c0c0b"/>
+  <path d="M20 47 Q27 55 34 47" fill="none" stroke="#0c0c0b" stroke-width="4.5" stroke-linecap="round"/>
+  <path d="M48 47 Q55 55 62 47" fill="none" stroke="#0c0c0b" stroke-width="4.5" stroke-linecap="round"/>
+  <path d="M71 3 H85 L71 18 H85" fill="none" stroke="#a3e635" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"/>
+</svg>

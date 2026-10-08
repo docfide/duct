@@ -1,7 +1,7 @@
-const { app, BrowserWindow, Menu, Tray, dialog, nativeImage, shell, Notification, ipcMain } = require('electron')
+const { app, BrowserWindow, Menu, Tray, dialog, nativeImage, shell, Notification, ipcMain, globalShortcut } = require('electron')
+const { createIsland } = require('./island.cjs')
 const path = require('path')
 const fs = require('fs')
-const { pathToFileURL } = require('url')
 
 let mainWindow = null
 let tray = null
@@ -9,6 +9,52 @@ let duct = null
 let server = null
 let serverUrl = ''
 let library = null
+let island = null
+
+const SEARCH_SHORTCUT = 'CommandOrControl+Shift+Space'
+
+// Desktop-only preferences (the index's own settings live in its database).
+function prefsPath() { return path.join(app.getPath('userData'), 'desktop-settings.json') }
+function readPrefs() {
+  try { return JSON.parse(fs.readFileSync(prefsPath(), 'utf-8')) } catch { return {} }
+}
+function writePrefs(prefs) {
+  try { fs.writeFileSync(prefsPath(), JSON.stringify(prefs, null, 2)) } catch (err) { console.error('Could not save preferences:', err) }
+}
+// The island is on by default on macOS, where it lives in the notch or menu bar; elsewhere it is opt-in.
+function islandEnabled() {
+  const prefs = readPrefs()
+  return typeof prefs.island === 'boolean' ? prefs.island : process.platform === 'darwin'
+}
+
+function startIsland() {
+  if (island || !serverUrl) return
+  island = createIsland({
+    serverUrl,
+    onShowMain: () => { mainWindow?.show(); mainWindow?.focus() },
+    onAddFiles: async files => {
+      const result = await addFilesToLibrary(files)
+      notify(`Added ${result.added} file(s) to your Duct Library` + (result.duplicates ? `, skipped ${result.duplicates} already indexed` : ''))
+      return result
+    },
+  })
+}
+
+function setIslandEnabled(on) {
+  writePrefs({ ...readPrefs(), island: on })
+  if (on) startIsland()
+  else if (island) { island.destroy(); island = null }
+  createAppMenu()
+  updateTrayMenu()
+}
+
+// The global shortcut opens the island's quick search, or the main window when the island is off.
+function openQuickSearch() {
+  if (island) { island.openSearch(); return }
+  mainWindow?.show()
+  mainWindow?.focus()
+  mainWindow?.webContents.executeJavaScript("document.getElementById('searchInput')?.focus()").catch(() => {})
+}
 
 // One running copy only: a second launch focuses the existing window instead of opening the same index twice.
 // Overrides for tests and portable installs.
@@ -201,6 +247,9 @@ function createAppMenu() {
     {
       label: 'View',
       submenu: [
+        { label: process.platform === 'darwin' ? 'Show Duct in the Menu Bar Notch' : 'Show Duct at the Top of the Screen', type: 'checkbox', checked: islandEnabled(), click: item => setIslandEnabled(item.checked) },
+        { label: 'Quick Search', accelerator: SEARCH_SHORTCUT, registerAccelerator: false, click: openQuickSearch },
+        { type: 'separator' },
         { label: 'Reload', accelerator: 'Cmd+R', role: 'reload' },
         { label: 'Toggle DevTools', accelerator: 'Cmd+Alt+I', role: 'toggleDevTools' },
         { type: 'separator' },
@@ -239,19 +288,56 @@ function createAppMenu() {
   Menu.setApplicationMenu(menu)
 }
 
+function trayImage(resting) {
+  // Template images (macOS) are recoloured for light/dark menu bars; Electron loads the @2x file automatically.
+  const name = process.platform === 'darwin'
+    ? (resting ? 'trayRestingTemplate.png' : 'trayTemplate.png')
+    : (resting ? 'trayResting.png' : 'tray.png')
+  const iconPath = path.join(__dirname, 'icons', name)
+  return fs.existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : nativeImage.createEmpty()
+}
+
+let trayResting = null
+let trayTooltip = ''
+
+// The mascot dozes in the tray while folders are watched and wakes up while it is indexing.
+function updateTray() {
+  if (!tray || !duct) return
+  const watched = duct.listSources().length
+  const activity = duct.activity()
+  const resting = watched > 0 && !activity.indexing
+  if (resting !== trayResting) {
+    tray.setImage(trayImage(resting))
+    trayResting = resting
+  }
+  const tooltip = activity.indexing
+    ? `Duct: indexing ${activity.done} of ${activity.total}`
+    : watched > 0 ? `Duct: watching ${watched} folder${watched === 1 ? '' : 's'}` : 'Duct'
+  if (tooltip !== trayTooltip) {
+    tray.setToolTip(tooltip)
+    trayTooltip = tooltip
+  }
+}
+
+function updateTrayMenu() {
+  if (!tray) return
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'Show Duct', click: () => { mainWindow?.show(); mainWindow?.focus() } },
+    { label: 'Quick Search', click: openQuickSearch },
+    { label: process.platform === 'darwin' ? 'Show in the Notch' : 'Show at the Top of the Screen', type: 'checkbox', checked: islandEnabled(), click: item => setIslandEnabled(item.checked) },
+    { type: 'separator' },
+    { label: 'Quit', click: () => app.quit() },
+  ]))
+}
+
 function createTray() {
   try {
-    // trayTemplate.png is a macOS template image (recoloured for light/dark menu bars);
-    // Electron picks up the @2x variant next to each file automatically.
-    const iconName = process.platform === 'darwin' ? 'trayTemplate.png' : 'tray.png'
-    const iconPath = path.join(__dirname, 'icons', iconName)
-    tray = new Tray(fs.existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : nativeImage.createEmpty())
+    tray = new Tray(trayImage(false))
     tray.setToolTip('Duct')
-    tray.setContextMenu(Menu.buildFromTemplate([
-      { label: 'Show Duct', click: () => { mainWindow?.show(); mainWindow?.focus() } },
-      { label: 'Quit', click: () => app.quit() },
-    ]))
+    updateTrayMenu()
     tray.on('double-click', () => { mainWindow?.show(); mainWindow?.focus() })
+    updateTray()
+    setInterval(updateTray, 2000).unref()
   } catch {}
 }
 
@@ -280,31 +366,36 @@ ipcMain.handle('duct:watchDirectory', async () => {
 })
 
 // Only documents in the index can be opened or revealed; the page can't name arbitrary paths.
+// PDFs open in Duct's viewer at the page, with the matched words highlighted; other files use their default app.
+async function openDocument(filePath, page, terms) {
+  const doc = indexedFile(filePath)
+  if (!doc) return false
+  if (path.extname(doc.path).toLowerCase() === '.pdf') {
+    const safeTerms = Array.isArray(terms) ? terms.filter(t => typeof t === 'string').slice(0, 12) : []
+    const pageNumber = Number.isInteger(page) && page > 0 ? page : 1
+    const viewer = new BrowserWindow({
+      width: 1000,
+      height: 1100,
+      title: doc.displayName || path.basename(doc.path),
+      backgroundColor: '#0C0C0B',
+      icon: path.join(__dirname, 'icon.png'),
+      webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+    })
+    viewer.webContents.on('will-navigate', (event, url) => { if (!url.startsWith(serverUrl)) event.preventDefault() })
+    viewer.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+    await viewer.loadURL(`${serverUrl}/viewer?path=${encodeURIComponent(doc.path)}&page=${pageNumber}&terms=${encodeURIComponent(JSON.stringify(safeTerms))}`)
+    return true
+  }
+  return (await shell.openPath(doc.path)) === ''
+}
+
 function indexedFile(filePath) {
   const doc = typeof filePath === 'string' ? duct.getDocument(filePath) : undefined
   if (!doc || doc.source === 'url' || !fs.existsSync(doc.path)) return null
   return doc
 }
 
-ipcMain.handle('duct:openDocument', async (_event, filePath, page) => {
-  const doc = indexedFile(filePath)
-  if (!doc) return false
-  if (path.extname(doc.path).toLowerCase() === '.pdf') {
-    // Chromium's built-in PDF viewer jumps to #page=N.
-    const viewer = new BrowserWindow({
-      width: 1000,
-      height: 1100,
-      title: doc.displayName || path.basename(doc.path),
-      backgroundColor: '#0C0C0B',
-      webPreferences: { plugins: true, contextIsolation: true, nodeIntegration: false, sandbox: true },
-    })
-    const pageNumber = Number.isInteger(page) && page > 0 ? page : 1
-    await viewer.loadURL(`${pathToFileURL(doc.path).href}#page=${pageNumber}`)
-    return true
-  }
-  const error = await shell.openPath(doc.path)
-  return error === ''
-})
+ipcMain.handle('duct:openDocument', (_event, filePath, page, terms) => openDocument(filePath, page, terms))
 
 ipcMain.handle('duct:revealDocument', (_event, filePath) => {
   const doc = indexedFile(filePath)
@@ -328,6 +419,8 @@ app.whenReady().then(async () => {
   createAppMenu()
   createWindow()
   createTray()
+  if (islandEnabled()) startIsland()
+  if (!globalShortcut.register(SEARCH_SHORTCUT, openQuickSearch)) console.error(`Could not register ${SEARCH_SHORTCUT}; it may be used by another app.`)
 
   // Catch up on watched folders (files added, changed or deleted while Duct was closed), then keep watching.
   duct.restoreSources(refreshPage).then(refreshPage).catch(err => console.error('Could not restore watched folders:', err))
@@ -347,7 +440,10 @@ app.on('activate', () => {
 })
 
 // The index is kept between launches; quitting only stops watchers and closes the database.
+app.on('will-quit', () => globalShortcut.unregisterAll())
+
 app.on('before-quit', () => {
+  if (island) { island.destroy(); island = null }
   if (tray) tray.destroy()
   if (server) server.close()
   if (duct) {

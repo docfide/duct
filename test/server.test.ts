@@ -46,18 +46,36 @@ describe('server mascot assets', () => {
   })
 })
 
-describe('web UI page', () => {
-  it('has inline scripts that parse', async () => {
-    const vm = await import('node:vm')
-    const server = createServer(new Duct()).listen(0, '127.0.0.1')
+describe('pages', () => {
+  let server: import('node:http').Server
+  let base: string
+  beforeAll(async () => {
+    server = createServer(new Duct()).listen(0, '127.0.0.1')
     await new Promise(resolve => server.once('listening', resolve))
-    const page = await (await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/`)).text()
-    server.close()
-    const scripts = [...page.matchAll(/<script( type="module")?>([\s\S]*?)<\/script>/g)]
-    expect(scripts.length).toBe(2)
-    for (const [, isModule, code] of scripts) {
-      // Module code may use top-level await; wrapping it in an async function checks the syntax the same way.
-      expect(() => new vm.Script(isModule ? `(async () => {\n${code}\n})` : code), isModule ? 'module script' : 'page script').not.toThrow()
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+  })
+  afterAll(() => server.close())
+
+  // The pages are template literals in TypeScript; a stray backslash or backtick only shows up in the browser.
+  for (const [path, expected] of [['/', 2], ['/viewer', 1], ['/island', 1]] as const) {
+    it(`${path} has inline scripts that parse`, async () => {
+      const vm = await import('node:vm')
+      const page = await (await fetch(base + path)).text()
+      const scripts = [...page.matchAll(/<script( type="module")?>([\s\S]*?)<\/script>/g)]
+      expect(scripts.length).toBe(expected)
+      for (const [, isModule, code] of scripts) {
+        // Module code may use top-level await; wrapping it in an async function checks the syntax the same way.
+        expect(() => new vm.Script(isModule ? `(async () => {\n${code}\n})` : code), `${path} ${isModule ? 'module' : 'page'} script`).not.toThrow()
+      }
+    })
+  }
+
+  it('serves pdf.js for the viewer locally', async () => {
+    for (const file of ['build/pdf.mjs', 'build/pdf.worker.mjs', 'web/pdf_viewer.mjs', 'web/pdf_viewer.css', 'standard_fonts/FoxitSans.pfb']) {
+      expect((await fetch(`${base}/vendor/pdfjs/${file}`)).status, file).toBe(200)
     }
+    expect((await fetch(`${base}/vendor/pdfjs/wasm/openjpeg.wasm`)).headers.get('content-type')).toBe('application/wasm')
+    const traversal = await (await fetch(`${base}/vendor/pdfjs/build/%2e%2e/%2e%2e/package.json`)).text()
+    expect(traversal).not.toContain('"pdfjs-dist"')
   })
 })

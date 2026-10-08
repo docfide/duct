@@ -15,10 +15,10 @@ mkdirSync(icons, { recursive: true })
 
 const transparent = { r: 0, g: 0, b: 0, alpha: 0 }
 
-function render(svg, size) {
+function render(svg, size, height = size) {
   return sharp(join(mascot, svg), { density: 600 })
     .trim()
-    .resize(size, size, { fit: 'contain', background: transparent })
+    .resize(size, height, { fit: 'contain', background: transparent })
     .png()
 }
 
@@ -26,6 +26,12 @@ function render(svg, size) {
 // Electron mark it as a template image so macOS recolours it for light/dark menu bars.
 await render('tray-template.svg', 16).toFile(join(icons, 'trayTemplate.png'))
 await render('tray-template.svg', 32).toFile(join(icons, 'trayTemplate@2x.png'))
+
+// While folders are watched the mascot sleeps in the tray. The macOS version is wider (22x16) to fit "z z".
+await render('tray-resting-template.svg', 22, 16).toFile(join(icons, 'trayRestingTemplate.png'))
+await render('tray-resting-template.svg', 44, 32).toFile(join(icons, 'trayRestingTemplate@2x.png'))
+await render('tray-resting.svg', 16).toFile(join(icons, 'trayResting.png'))
+await render('tray-resting.svg', 32).toFile(join(icons, 'trayResting@2x.png'))
 
 // Windows/Linux tray: the coloured head.
 await render('view-three-quarter.svg', 16).toFile(join(icons, 'tray.png'))
