@@ -532,6 +532,11 @@ function renderHome() {
   const banner = $('#homeAttention')
   banner.hidden = attention.length === 0
   banner.innerHTML = attention.length ? '<span>' + plural(attention.length, 'file') + ' need' + (attention.length === 1 ? 's' : '') + ' attention</span><button class="btn btn-sm" data-action="show-attention">Review</button>' : ''
+  // Searches to try, drawn from these documents; worked out again only when the library changes.
+  if (ready.length && !a.indexing) {
+    if (discoveryFor !== ready.length) { discoveryFor = ready.length; loadDiscovery(true).then(d => renderTry('#homeTry', d)) }
+    else renderTry('#homeTry', discovery)
+  } else renderTry('#homeTry', null)
   const recent = ready.slice().sort((x, y) => y.indexedAt - x.indexedAt).slice(0, 8)
   $('#recent').innerHTML = recent.length ? '<h2>Recently added</h2>' + recent.map(d =>
     '<button class="recent-item" data-open-doc="' + esc(d.path) + '">' + badge(d.format) + '<span class="name">' + esc(d.displayName || fileName(d.path)) + '</span><span class="when">' + timeAgo(d.indexedAt) + '</span></button>').join('') : ''
@@ -1029,6 +1034,7 @@ function showWelcome() {
   $('#app').hidden = true
   $('#welcomeStart').hidden = false
   $('#welcomeProgress').hidden = true
+  $('#welcomeReady').hidden = true
   $('[data-action="watch-folder"]', $('#welcome')).hidden = !state.canWatch || !feature('watchedFolders')
   renderMascots()
 }
@@ -1057,9 +1063,67 @@ function setProgress(done, total, current) {
   $('#welcomeCurrent').textContent = current || ' '
 }
 
+// ---------- the first minute: what Duct found, and a first search ----------
+
+let discovery = null
+let discoveryFor = -1   // the document count the suggestions were made for
+let discoverAt = 0
+async function loadDiscovery(force = false) {
+  if (!force && discovery && Date.now() - discoverAt < 2500) return discovery
+  discoverAt = Date.now()
+  try { discovery = await json('/api/discover') } catch {}
+  return discovery
+}
+
+/** "38 invoices, 12 contracts and 4 CVs" */
+function foundText(d) {
+  if (!d || !d.kinds.length) return ''
+  const parts = d.kinds.slice(0, 4).map(k => fmt(k.count) + ' ' + (k.count === 1 ? k.one : k.label))
+  return parts.length > 1 ? parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1] : parts[0]
+}
+
+function renderTry(target, d) {
+  const box = $(target)
+  if (!box) return
+  box.innerHTML = d && d.suggestions.length ? '<span class="try-label">Try</span>' + d.suggestions.map(q => '<button class="try-chip" data-action="search-for" data-q="' + esc(q) + '">' + esc(q) + '</button>').join('') : ''
+}
+
+async function updateFoundSoFar() {
+  if ($('#welcome').hidden || $('#welcomeProgress').hidden) return
+  const d = await loadDiscovery()
+  const text = foundText(d)
+  $('#welcomeFound').textContent = text ? 'Found so far: ' + text : ''
+}
+
+async function showReady() {
+  const d = await loadDiscovery(true)
+  $('#welcomeStart').hidden = true
+  $('#welcomeProgress').hidden = true
+  $('#welcomeReady').hidden = false
+  const n = d ? d.documents : readyDocs().length
+  const found = foundText(d)
+  $('#welcomeReadyFound').textContent = 'Duct read ' + plural(n, 'document') + (found ? ' and found ' + found + '.' : '.') + ' All of it stayed on this computer.'
+  renderTry('#welcomeTry', d)
+  $('#welcome [data-mascot]').dataset.mascot = 'done'
+  renderMascots()
+  $('#welcomeQ').focus()
+}
+
+$('#welcomeSearch').addEventListener('submit', e => {
+  e.preventDefault()
+  const q = $('#welcomeQ').value.trim()
+  if (!q) return
+  rememberWelcome()
+  showApp()
+  $('#q').value = q
+  state.query = q
+  runSearch()
+})
+
 function finishWelcomeIfReady() {
-  if ($('#welcome').hidden || state.activity.indexing) return
-  if (readyDocs().length || attentionDocs().length) {
+  if ($('#welcome').hidden || state.activity.indexing || !$('#welcomeReady').hidden) return
+  if (readyDocs().length) showReady()
+  else if (attentionDocs().length) {
     $('#welcome [data-mascot]').dataset.mascot = 'done'
     renderMascots()
     setTimeout(() => { rememberWelcome(); showApp() }, 900)
@@ -1447,7 +1511,7 @@ async function poll() {
   try {
     state.activity = await json('/api/activity')
     const busy = state.activity.indexing || state.activity.embedding
-    if (busy && !$('#welcome').hidden) setProgress(state.activity.done, state.activity.total, state.activity.current)
+    if (busy && !$('#welcome').hidden) { setProgress(state.activity.done, state.activity.total, state.activity.current); updateFoundSoFar() }
     if (state.wasBusy && !busy) await refreshAll()   // a run finished: new documents, counts and statuses
     state.wasBusy = busy
     renderStatus()
@@ -1480,7 +1544,10 @@ const ACTIONS = {
   'skip-welcome': () => { rememberWelcome(); showApp() },
   'finish-welcome': () => { rememberWelcome(); showApp() },
   'show-attention': () => { state.docFilter = 'attention'; setView('documents') },
-  'search-for': el => { $('#q').value = el.dataset.q; state.query = el.dataset.q; runSearch() },
+  'search-for': el => {
+    if (!$('#welcome').hidden) { rememberWelcome(); showApp() }
+    $('#q').value = el.dataset.q; state.query = el.dataset.q; runSearch()
+  },
   'clear-ledger': async () => { try { await json('/api/ledger', { method: 'DELETE' }) } catch (err) { toast(err.message, true) }; renderLedger() },
   'clear-filters': () => { state.group = null; state.source = null; state.tags = []; state.date = null; renderSidebar(); runSearch() },
   'ask-instead': () => { const q = state.query; setMode('ask'); ask(q) },

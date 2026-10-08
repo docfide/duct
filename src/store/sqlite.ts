@@ -632,6 +632,17 @@ export class SqliteStore {
     return [...merged.values()].sort((a, b) => b.score - a.score).slice(0, limit)
   }
 
+  // ---------- a first look at the library ----------
+
+  /** Each readable document's name, format and opening text, newest first (for `Duct.discover`). */
+  openings(limit: number): { name: string; format: string; text: string }[] {
+    return this.db.prepare(`
+      SELECT d.display_name AS name, d.format AS format, substr(c.content, 1, 2500) AS text
+      FROM documents d JOIN chunks c ON c.document_id = d.id AND c.idx = (SELECT min(idx) FROM chunks WHERE document_id = d.id)
+      WHERE d.status = 'indexed' ORDER BY d.indexed_at DESC LIMIT ?
+    `).all(limit) as { name: string; format: string; text: string }[]
+  }
+
   // ---------- when a search finds nothing ----------
 
   /** How much of the library is searchable, and what isn't (for an empty search). */

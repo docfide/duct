@@ -356,3 +356,16 @@ dialog::backdrop { background: rgba(0,0,0,.55); }
 .ledger-entry code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ledger-foot { margin-top: 14px; }
 .offline-note { position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 50; background: var(--s2); color: var(--text); border: 1px solid var(--border2); border-radius: 999px; padding: 6px 14px; font-size: 12.5px; }
+
+/* The first minute */
+.found-so-far { color: var(--lime); font-size: 14px; min-height: 1.5em; margin: 6px 0 14px; }
+.welcome-search { text-align: left; max-width: 520px; margin: 18px auto 12px; }
+.welcome-search label { display: block; font-size: 14px; color: var(--body); margin-bottom: 8px; text-align: center; }
+.welcome-search-row { display: flex; gap: 8px; }
+.welcome-search-row input { flex: 1; min-width: 0; background: var(--bg); color: var(--text); border: 1px solid var(--border2); border-radius: var(--r); padding: 10px 12px; font: inherit; font-size: 15px; outline: none; }
+.welcome-search-row input:focus { border-color: var(--lime); }
+.try { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 6px; margin: 10px 0 16px; }
+.try:empty { display: none; }
+.try-label { font-size: 12px; color: var(--muted); margin-right: 2px; }
+.try-chip { font: inherit; font-size: 13px; color: var(--body); background: var(--s2); border: 1px solid var(--border2); border-radius: 999px; padding: 4px 12px; cursor: pointer; }
+.try-chip:hover { border-color: var(--lime); color: var(--text); }

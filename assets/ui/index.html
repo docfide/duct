@@ -33,8 +33,22 @@
         <p class="lead" id="welcomeProgressText">Getting started</p>
         <div class="progress" role="progressbar" aria-label="Indexing progress"><div class="progress-bar" id="welcomeBar"></div></div>
         <p class="hint" id="welcomeCurrent">&nbsp;</p>
+        <p class="found-so-far" id="welcomeFound" aria-live="polite"></p>
         <button class="btn btn-primary btn-lg" data-action="finish-welcome">Start searching</button>
         <p class="hint">You can search while Duct keeps reading in the background.</p>
+      </div>
+      <div id="welcomeReady" hidden>
+        <h1>Ready.</h1>
+        <p class="lead" id="welcomeReadyFound"></p>
+        <form id="welcomeSearch" class="welcome-search" role="search">
+          <label for="welcomeQ">Think of a document you couldn’t find last week. Search for it.</label>
+          <div class="welcome-search-row">
+            <input id="welcomeQ" name="q" type="search" autocomplete="off" placeholder="A name, a phrase, an amount…">
+            <button class="btn btn-primary" type="submit">Search</button>
+          </div>
+        </form>
+        <div class="try" id="welcomeTry"></div>
+        <button class="link" data-action="finish-welcome">Go to Duct</button>
       </div>
     </div>
   </section>
@@ -105,6 +119,7 @@
             <div class="mascot-slot mascot-lg" data-mascot="idle" aria-hidden="true"></div>
             <h1 id="homeTitle"></h1>
             <p class="lead" id="homeSub"></p>
+            <div class="try" id="homeTry"></div>
             <div class="home-attention" id="homeAttention" hidden></div>
             <div class="recent" id="recent"></div>
           </div>

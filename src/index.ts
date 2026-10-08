@@ -17,6 +17,8 @@ import { HybridSearcher, reciprocalRankFusion } from './search/hybrid.js'
 import { SimpleReranker, NoopReranker } from './search/reranker.js'
 import { createLLMProvider, OpenAILLM, GeminiLLM } from './qa/provider.js'
 import { createEmbedder } from './embed/factory.js'
+import { recurringNames, summarizeKinds, triesFor } from './discover.js'
+import type { Discovery } from './discover.js'
 import type { EmbedProvider } from './embed/factory.js'
 import type { SearchHelp,
   DuctConfig, Chunk, EmbeddingProvider, IndexResult, IndexOptions, IndexActivity, IndexFailure, SearchResult, SearchScope,
@@ -716,6 +718,25 @@ export class Duct {
   }
 
   /**
+   * A first look at the library: how many invoices, contracts, CVs… (from names and opening text, on this
+   * computer), and a few searches that find something in it. Looks at the newest 5,000 documents.
+   */
+  async discover(): Promise<Discovery> {
+    const docs = this.store.openings(5000)
+    const kinds = summarizeKinds(docs)
+    // Alternate a search for the kind of document with a name from the person's own files.
+    const tries = triesFor(kinds)
+    const names = recurringNames(docs.map(d => d.text))
+    const candidates = [...new Set(Array.from({ length: Math.max(tries.length, names.length) }, (_, i) => [tries[i], names[i]]).flat().filter((q): q is string => !!q))]
+    const suggestions: string[] = []
+    for (const q of candidates) {
+      if (suggestions.length >= 4) break
+      if ((await this.search(q, 1)).length > 0) suggestions.push(q)
+    }
+    return { documents: this.store.coverage().documents, kinds: kinds.slice(0, 6), suggestions }
+  }
+
+  /**
    * For a search that found nothing: what was searched, what couldn't be (scans without text, locked or
    * unreadable files, files still being read), whether the filters hid results, and a spelling suggestion.
    */
@@ -1185,3 +1206,4 @@ export { FeatureDisabledError, FEATURE_NAMES, FEATURE_LABELS, FORMAT_KINDS, defa
 export type { Features, FeaturesPatch, FeatureName } from './features.js'
 export type { AuditEntry, StoredApiKey } from './store/sqlite.js'
 export type { SearchResult, SearchHelp, MatchReason, SearchScope } from './types.js'
+export type { Discovery, DocumentKind } from './discover.js'

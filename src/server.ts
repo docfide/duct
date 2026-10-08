@@ -601,6 +601,11 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     }
   })
 
+  // A first look at the library: kinds of documents and searches to try (first run and the home screen).
+  app.get('/api/discover', async (_req, res) => {
+    try { res.json(await duct.discover()) } catch (err) { res.status(500).json({ error: (err as Error).message }) }
+  })
+
   app.post('/api/ask', needs('ask'), async (req, res) => {
     const { question, topK = 5, agentic } = req.body
     if (!question) { res.status(400).json({ error: 'Question is required' }); return }

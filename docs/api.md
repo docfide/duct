@@ -488,3 +488,18 @@ GET /api/ledger?days=7
 ```
 
 Categories: `tensflare`, `ai`, `cloud`, `signin`, `web`. Paths are kept only for Tensflare's own endpoints, since other paths can name files. Requests to this computer itself aren't recorded. `DELETE /api/ledger` clears it.
+
+
+## `GET /api/discover`
+
+A first look at the library, worked out on this computer from each document's name and opening text (the newest 5,000 documents).
+
+```json
+{
+  "documents": 193,
+  "kinds": [{ "id": "invoice", "label": "invoices", "one": "invoice", "count": 60 }, { "id": "contract", "label": "contracts", "one": "contract", "count": 25 }],
+  "suggestions": ["amount due", "Okafor", "payment terms", "Lagos"]
+}
+```
+
+Kinds: `invoice`, `receipt`, `statement`, `cv`, `contract`, `proposal`, `minutes`, `policy`, `letter`, `report`, and by format `slides`, `sheets`, `email`, `scans`. A document counts once. Every suggestion finds at least one result.
