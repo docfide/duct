@@ -7,7 +7,7 @@ export function reciprocalRankFusion(
   alpha: number,
 ): SearchResult[] {
   const seen = new Set<string>()
-  const fused = new Map<string, { chunk: SearchResult['chunk']; score: number }>()
+  const fused = new Map<string, SearchResult>()
 
   const maxRank = 60
 
@@ -19,9 +19,12 @@ export function reciprocalRankFusion(
       if (seen.has(key)) {
         const existing = fused.get(key)!
         existing.score += rrfScore
+        // Found both ways: keep the keyword snippet and say it also matched by meaning.
+        existing.snippet ??= r.snippet
+        existing.why = { words: [...(existing.why?.words ?? []), ...(r.why?.words ?? [])], ...(existing.why?.fileName || r.why?.fileName ? { fileName: true } : {}), ...(existing.why?.meaning || r.why?.meaning ? { meaning: true } : {}) }
       } else {
         seen.add(key)
-        fused.set(key, { chunk: r.chunk, score: rrfScore })
+        fused.set(key, { chunk: r.chunk, score: rrfScore, ...(r.snippet !== undefined ? { snippet: r.snippet } : {}), ...(r.why ? { why: r.why } : {}) })
       }
     })
   }
@@ -30,7 +33,7 @@ export function reciprocalRankFusion(
   addSet(vectorResults, alpha)
 
   const sorted = [...fused.values()].sort((a, b) => b.score - a.score)
-  return sorted.slice(0, topK).map(s => ({ chunk: s.chunk, score: s.score }))
+  return sorted.slice(0, topK)
 }
 
 export class HybridSearcher implements Searcher {

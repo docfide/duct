@@ -575,10 +575,12 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     const topK = Math.min(100, parseInt(req.query.topK as string) || 10)
     const filter = parseMetadata(req.query.filter as string)
     try {
-      const results = await duct.search(q, topK, filter, scopeFrom(req.query))
+      const scope = scopeFrom(req.query)
+      const results = await duct.search(q, topK, filter, scope)
       telemetry?.record('searches')
       audit(res, 'search', undefined, auditQueries ? q : undefined)
-      res.json({ results })
+      // Never a dead end: an empty search says why, and what to try.
+      res.json(results.length > 0 ? { results } : { results, help: await duct.searchHelp(q, filter, scope) })
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })
     }

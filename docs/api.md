@@ -88,11 +88,35 @@ This searches for "policy" among documents where `tenant_id === "acme"` and `cat
         "heading": "Term and Termination",
         "index": 3,
         "metadata": { "tenant_id": "acme", "category": "legal" }
-      }
+      },
+      "why": { "words": ["Termination", "terminate"], "fileName": false }
     }
   ]
 }
 ```
+
+`why` says why a result matched: `words` are the matched words as written in the passage (which can be another form of what was typed), `fileName` is true when the file name contains every searched word, and `meaning` when search by meaning found it.
+
+When nothing matches, the response also has `help`, so an empty search is never a dead end:
+
+```json
+{
+  "results": [],
+  "help": {
+    "documents": 1420, "needsOcr": 41, "failed": 3, "passwordProtected": 2,
+    "indexing": null, "outsideFilters": 12, "didYouMean": "confidentiality clause"
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `documents` | Documents searched |
+| `needsOcr` | Scans and images with no text yet |
+| `failed`, `passwordProtected` | Files that couldn't be read, and how many of those are locked with a password |
+| `indexing` | `{ done, total }` while Duct is still reading files, else `null` |
+| `outsideFilters` | Results the same search finds without the filters (up to 100) |
+| `didYouMean` | The search with misspelt words replaced by the spelling used in the documents |
 
 ---
 

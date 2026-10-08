@@ -325,3 +325,13 @@ dialog::backdrop { background: rgba(0,0,0,.55); }
 .stack-form input { background: var(--bg); color: var(--text); border: 1px solid var(--border2); border-radius: var(--r); padding: 8px 10px; font: inherit; font-size: 13px; outline: none; }
 .stack-form input:focus { border-color: var(--lime); }
 .stack-form .btn { justify-self: start; }
+
+/* Why this result, and the empty-search help */
+.why-btn { font: inherit; font-family: var(--sans, inherit); font-size: 12px; color: var(--subtle); background: none; border: 0; padding: 0 4px; margin-left: auto; cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
+.why-btn:hover, .why-btn[aria-expanded="true"] { color: var(--lime); }
+.why { font-size: 12px; color: var(--muted); margin-top: 4px; padding: 6px 8px; border-left: 2px solid var(--lime); background: color-mix(in srgb, var(--lime) 6%, transparent); border-radius: 0 var(--r) var(--r) 0; }
+.link-btn { font: inherit; color: var(--lime); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+#resultsEmptyText { max-width: 520px; margin: 0 auto; }
+#resultsEmptyText p { margin: 8px 0; }
+.help-lead { font-size: 16px; color: var(--text); }
+.help-coverage { color: var(--muted); }

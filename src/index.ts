@@ -18,7 +18,7 @@ import { SimpleReranker, NoopReranker } from './search/reranker.js'
 import { createLLMProvider, OpenAILLM, GeminiLLM } from './qa/provider.js'
 import { createEmbedder } from './embed/factory.js'
 import type { EmbedProvider } from './embed/factory.js'
-import type {
+import type { SearchHelp,
   DuctConfig, Chunk, EmbeddingProvider, IndexResult, IndexOptions, IndexActivity, IndexFailure, SearchResult, SearchScope,
   DocumentInfo, DocumentFormat, RuntimeConfig, Reranker, LLMProvider,
   QAResult, SchemaField, ExtractionResult, DocDiff, ExtractedDocument,
@@ -715,6 +715,23 @@ export class Duct {
     return results.slice(0, topK)
   }
 
+  /**
+   * For a search that found nothing: what was searched, what couldn't be (scans without text, locked or
+   * unreadable files, files still being read), whether the filters hid results, and a spelling suggestion.
+   */
+  async searchHelp(query: string, filter?: Record<string, unknown>, scope?: SearchScope): Promise<SearchHelp> {
+    const coverage = this.store.coverage()
+    const filtered = (filter && Object.keys(filter).length > 0) || (scope && Object.keys(scope).length > 0)
+    const outsideFilters = filtered ? (await this.search(query, 100)).length : 0
+    const didYouMean = this.store.suggestSpelling(query)
+    return {
+      ...coverage,
+      indexing: this.progress.active > 0 ? { done: this.progress.done, total: this.progress.total } : null,
+      outsideFilters,
+      ...(didYouMean ? { didYouMean } : {}),
+    }
+  }
+
   async ask(query: string, topK = 5): Promise<QAResult> {
     this.requireFeature('ask')
     const start = Date.now()
@@ -1167,3 +1184,4 @@ export { HybridSearcher, reciprocalRankFusion, extractUrl, isUrl, extractTablesF
 export { FeatureDisabledError, FEATURE_NAMES, FEATURE_LABELS, FORMAT_KINDS, defaultFeatures } from './features.js'
 export type { Features, FeaturesPatch, FeatureName } from './features.js'
 export type { AuditEntry, StoredApiKey } from './store/sqlite.js'
+export type { SearchResult, SearchHelp, MatchReason, SearchScope } from './types.js'

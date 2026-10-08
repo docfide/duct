@@ -187,6 +187,28 @@ function filterClause(filter: Record<string, unknown> | undefined, scope?: Searc
   return { sql, params }
 }
 
+/** The matched words in a snippet (between \u0002 and \u0003), in order, without repeats. */
+export function markedWords(snippet: string | undefined): string[] {
+  if (!snippet) return []
+  const out = new Set<string>()
+  for (const m of snippet.matchAll(/\u0002([^\u0003]*)\u0003/g)) if (m[1].trim()) out.add(m[1].trim())
+  return [...out].slice(0, 8)
+}
+
+/** Edit distance counting a swap of two neighbouring letters as one edit ("recieve" → "receive"). */
+export function osaDistance(a: string, b: string): number {
+  const d: number[][] = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)])
+  for (let j = 1; j <= b.length; j++) d[0][j] = j
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost)
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1)
+    }
+  }
+  return d[a.length][b.length]
+}
+
 /** An excerpt around the first match, with every match wrapped in \u0002 … \u0003 (same markers as FTS5's snippet()). */
 export function substringSnippet(content: string, needles: string[], radius = 80): string {
   const first = Math.min(...needles.map(n => content.indexOf(n)).filter(i => i >= 0))
@@ -568,7 +590,7 @@ export class SqliteStore {
         ORDER BY bm25(chunks_fts, 1.0, 2.0)
         LIMIT ?
       `).all(fts, ...where.params, limit) as unknown as ChunkRow[]
-      for (const r of rows) merged.set(r.uid, { chunk: this.toChunk(r), score: r.score ?? 0, snippet: r.snippet })
+      for (const r of rows) merged.set(r.uid, { chunk: this.toChunk(r), score: r.score ?? 0, snippet: r.snippet, why: { words: markedWords(r.snippet) } })
     }
 
     // File names: a document whose name contains every query word is a strong match (people search by name).
@@ -583,8 +605,8 @@ export class SqliteStore {
       const best = Math.max(0, ...[...merged.values()].map(r => r.score))
       for (const r of rows) {
         const existing = merged.get(r.uid)
-        if (existing) existing.score += best + 1
-        else merged.set(r.uid, { chunk: this.toChunk(r), score: best + 1, snippet: r.content.slice(0, 200) })
+        if (existing) { existing.score += best + 1; existing.why = { ...existing.why!, fileName: true } }
+        else merged.set(r.uid, { chunk: this.toChunk(r), score: best + 1, snippet: r.content.slice(0, 200), why: { words: [], fileName: true } })
       }
     }
 
@@ -601,12 +623,62 @@ export class SqliteStore {
         const hits = segments.reduce((n, s) => n + r.content.split(s).length - 1, 0)
         const score = hits / Math.sqrt(Math.max(1, r.content.length / 500))
         const existing = merged.get(r.uid)
-        if (existing) existing.score += score
-        else merged.set(r.uid, { chunk: this.toChunk(r), score, snippet: substringSnippet(r.content, segments) })
+        const found = segments.filter(s => r.content.includes(s))
+        if (existing) { existing.score += score; existing.why = { ...existing.why!, words: [...new Set([...existing.why!.words, ...found])] } }
+        else merged.set(r.uid, { chunk: this.toChunk(r), score, snippet: substringSnippet(r.content, segments), why: { words: found } })
       }
     }
 
     return [...merged.values()].sort((a, b) => b.score - a.score).slice(0, limit)
+  }
+
+  // ---------- when a search finds nothing ----------
+
+  /** How much of the library is searchable, and what isn't (for an empty search). */
+  coverage(): { documents: number; needsOcr: number; failed: number; passwordProtected: number } {
+    const rows = this.db.prepare('SELECT status, count(*) AS n FROM documents GROUP BY status').all() as { status: string; n: number }[]
+    const n = (status: string) => rows.find(r => r.status === status)?.n ?? 0
+    const locked = this.db.prepare("SELECT count(*) AS n FROM documents WHERE status = 'failed' AND (lower(error) LIKE '%password%' OR lower(error) LIKE '%encrypt%')").get() as { n: number }
+    return { documents: n('indexed'), needsOcr: n('no-text'), failed: n('failed'), passwordProtected: locked.n }
+  }
+
+  /**
+   * "Did you mean": for words that match nothing, the closest word that is in the documents. The index holds
+   * Porter stems ("termin" for "termination"), so each typed word is compared with stems of about its length,
+   * and the suggestion is the stem's most common spelling in the text.
+   */
+  suggestSpelling(query: string): string | undefined {
+    const words = [...new Set((query.normalize('NFKC').toLowerCase().match(/\p{L}{4,}/gu) || []))].slice(0, 6)
+    if (words.length === 0) return undefined
+    this.db.exec('CREATE VIRTUAL TABLE IF NOT EXISTS temp.chunks_vocab USING fts5vocab(main, chunks_fts, row)')
+    const hits = this.db.prepare('SELECT 1 FROM chunks_fts WHERE chunks_fts MATCH ? LIMIT 1')
+    const vocab = this.db.prepare('SELECT term, doc FROM temp.chunks_vocab WHERE term >= ? AND term < ?')
+    const sample = this.db.prepare(`SELECT snippet(chunks_fts, 0, char(2), char(3), '', 4) AS s FROM chunks_fts WHERE chunks_fts MATCH ? LIMIT 20`)
+    let changed = false
+    let out = query
+    for (const word of words) {
+      if (hits.get(`"${word}"`)) continue
+      const first = word[0]
+      const next = String.fromCodePoint(first.codePointAt(0)! + 1)
+      let best: { term: string; d: number; doc: number } | undefined
+      for (const { term, doc } of vocab.all(first, next) as { term: string; doc: number }[]) {
+        if (term.length < Math.max(4, Math.floor(word.length * 0.6)) || term.length > word.length + 2 || /\d/.test(term)) continue
+        // A stem is usually a prefix of the word: compare it with that much of the typed word.
+        const d = osaDistance(term.length < word.length ? word.slice(0, term.length) : word, term)
+        const limit = word.length >= 8 ? 2 : 1
+        if (d === 0 && term.length === word.length) continue
+        if (d <= limit && (!best || d < best.d || (d === best.d && doc > best.doc))) best = { term, d, doc }
+      }
+      if (!best) continue
+      // The stem's most common spelling in the documents ("termin" → "termination").
+      const counts = new Map<string, number>()
+      for (const { s } of sample.all(`"${best.term}"`) as { s: string }[]) for (const w of markedWords(s)) counts.set(w.toLowerCase(), (counts.get(w.toLowerCase()) ?? 0) + 1)
+      const spelling = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? best.term
+      if (spelling === word) continue
+      out = out.replace(new RegExp(`(?<![\\p{L}])${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}])`, 'iu'), spelling)
+      changed = true
+    }
+    return changed ? out : undefined
   }
 
   // ---------- vectors ----------
@@ -667,7 +739,7 @@ export class SqliteStore {
       if (under && e.chunk.documentPath !== scope!.under && !e.chunk.documentPath.startsWith(under)) continue
       let dot = 0
       for (let i = 0; i < query.length; i++) dot += query[i] * e.vector[i]
-      results.push({ chunk: e.chunk, score: dot / (qn * e.norm) })
+      results.push({ chunk: e.chunk, score: dot / (qn * e.norm), why: { words: [], meaning: true } })
     }
     return results.sort((a, b) => b.score - a.score).slice(0, limit)
   }

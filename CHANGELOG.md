@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- No dead ends: a search that finds nothing says what Duct searched, what it couldn't look inside (scans with no text yet, password-protected and unreadable files, files still being read), how many results the filters hid, and "Did you mean" using the spelling in your documents. `GET /api/search` returns this as `help`.
+- "Why this result?": each result can show the words that matched as written in the passage (including other forms, such as "termination" for "terminate"), a file-name match, or a match by meaning (`why` in the API).
+
+### Fixed
+- With search by meaning on, results lost their highlighted excerpt.
+
 ## [1.0.0-alpha.1] - 2026-10-08
 
 Duct 1.0 turns the search library into a product family: the desktop app, a team server you can run in your own cloud, the developer API with its clients, and Tensflare accounts for paid plans (hosted AI, sync, connectors, team sign-in). This alpha is for testers; 1.0.0 follows once payments, identity providers, Docker images and Windows and Linux builds are verified.

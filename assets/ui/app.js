@@ -577,7 +577,54 @@ async function runSearch() {
   try { data = await json('/api/search?' + params) } catch (err) { if (seq === searchSeq) toast('Search failed: ' + err.message, true); return }
   if (seq !== searchSeq) return
   state.results = data.results || []
+  state.help = data.help || null
   renderResults()
+}
+
+/** "Why this result": the words that matched as written in the passage, the file name, or meaning. */
+function whyText(r) {
+  const why = r.why
+  if (!why) return ''
+  const typed = state.query.toLowerCase().replace(/"/g, '').split(/\s+/).filter(Boolean)
+  const parts = []
+  if (why.words && why.words.length) {
+    parts.push('Matched ' + why.words.slice(0, 5).map(w => {
+      const other = !typed.includes(w.toLowerCase())
+      return '“' + esc(w) + '”' + (other && typed.length === 1 ? ' (a form of “' + esc(typed[0]) + '”)' : '')
+    }).join(', '))
+  }
+  if (why.fileName) parts.push('the file name contains your words')
+  if (why.meaning) parts.push(why.words && why.words.length ? 'close in meaning too' : 'close in meaning, though the words differ')
+  return parts.join(' · ')
+}
+
+/** Never a dead end: say what was searched, what couldn't be, and what to try. */
+function renderSearchHelp() {
+  const h = state.help
+  const filtered = !!(state.group || state.source || state.tags.length || state.date)
+  const lines = []
+  if (h && h.didYouMean) lines.push('<p class="help-lead">Did you mean <button class="link-btn" data-action="search-for" data-q="' + esc(h.didYouMean) + '">' + esc(h.didYouMean) + '</button>?</p>')
+  if (h && h.outsideFilters > 0) lines.push('<p>' + (h.outsideFilters >= 100 ? '100+ results' : esc(plural(h.outsideFilters, 'result'))) + ' outside your filters. <button class="link-btn" data-action="clear-filters">Search everything</button></p>')
+  if (h) {
+    const notes = []
+    notes.push('Duct searched ' + esc(plural(h.documents, 'document')) + '.')
+    if (h.indexing) notes.push('It’s still reading files (' + fmt(h.indexing.done) + ' of ' + fmt(h.indexing.total) + '), so some aren’t searchable yet.')
+    const unread = h.needsOcr + h.failed
+    if (unread > 0) {
+      const bits = []
+      if (h.needsOcr) bits.push(plural(h.needsOcr, 'scan') + ' with no text yet')
+      if (h.passwordProtected) bits.push(h.passwordProtected + ' locked with a password')
+      if (h.failed - h.passwordProtected > 0) bits.push((h.failed - h.passwordProtected) + ' that couldn’t be read')
+      notes.push('It couldn’t look inside ' + esc(bits.join(', ')) + '. <button class="link-btn" data-action="show-attention">See which</button>')
+    }
+    lines.push('<p class="help-coverage">' + notes.join(' ') + '</p>')
+  }
+  const tips = ['Try fewer words, or a word you’d expect in the document.']
+  if (/"/.test(state.query)) tips.push('Quoted “exact phrases” must match word for word.')
+  if (feature('ask') && !(h && h.didYouMean)) tips.push('<button class="link-btn" data-action="ask-instead">Ask it as a question</button> instead.')
+  lines.push('<p class="hint">' + tips.join(' ') + '</p>')
+  $('#resultsEmptyText').innerHTML = lines.join('')
+  if (!h && filtered) $('#resultsEmptyText').insertAdjacentHTML('afterbegin', '<p>Nothing matched within the current filters. <button class="link-btn" data-action="clear-filters">Search everything</button></p>')
 }
 
 function terms(result) {
@@ -604,17 +651,17 @@ function renderResults() {
       (c.page ? '<span class="where">' + esc(pageRef(c)) + '</span>' : '') +
       (c.heading ? '<span class="section">› ' + esc(c.heading) + '</span>' : '') + '</div>' +
       '<div class="folder">' + esc(folder) + '</div>' +
+      (r.why ? '<div class="why" hidden>' + whyText(r) + '</div>' : '') +
       '<div class="snippet">' + (r.snippet ? markSnippet(r.snippet) : highlight(c.content.slice(0, 260), terms(r))) + '</div>' +
       '<div class="result-actions"><button class="btn btn-sm btn-primary" data-act="open">' + (link ? 'Open link' : c.page ? 'Open at ' + esc(pageRef(c)) : 'Open') + '</button>' +
       '<button class="btn btn-sm" data-act="copy-passage" title="Copy the passage with its source">Copy</button>' +
       (feature('export') ? '<button class="btn btn-sm" data-act="collect" title="Collect this passage to export later">Collect</button>' : '') +
-      (desktop && desktop.revealDocument && !link ? '<button class="btn btn-sm" data-act="reveal">Show in folder</button>' : '') + '</div></div></li>'
+      (desktop && desktop.revealDocument && !link ? '<button class="btn btn-sm" data-act="reveal">Show in folder</button>' : '') +
+      (r.why ? '<button class="why-btn" data-act="why" aria-expanded="false">Why this result?</button>' : '') + '</div></div></li>'
   }).join('')
   const empty = $('#resultsEmpty')
   empty.hidden = results.length > 0
-  if (!results.length) {
-    $('#resultsEmptyText').textContent = state.group || state.source ? 'Nothing matched within the current filter. Try removing it, or use fewer words.' : 'Try different or fewer words. Quoted "exact phrases" must match word for word.'
-  }
+  if (!results.length) renderSearchHelp()
   select(results.length ? 0 : -1, false)
   renderMascots()
 }
@@ -637,6 +684,12 @@ $('#results').addEventListener('click', e => {
   if (act && act.dataset.act === 'reveal') return desktop.revealDocument(r.chunk.documentPath)
   if (act && act.dataset.act === 'copy-passage') return copyText('“' + r.chunk.content.trim() + '”\n— ' + sourceLine(r.chunk), 'Passage copied with its source')
   if (act && act.dataset.act === 'collect') return collect(r)
+  if (act && act.dataset.act === 'why') {
+    const box = item.querySelector('.why')
+    box.hidden = !box.hidden
+    act.setAttribute('aria-expanded', String(!box.hidden))
+    return
+  }
   select(Number(item.dataset.i), false)
   if (window.innerWidth <= 1180) renderPreview(r)
 })
@@ -1372,6 +1425,9 @@ const ACTIONS = {
   'skip-welcome': () => { rememberWelcome(); showApp() },
   'finish-welcome': () => { rememberWelcome(); showApp() },
   'show-attention': () => { state.docFilter = 'attention'; setView('documents') },
+  'search-for': el => { $('#q').value = el.dataset.q; state.query = el.dataset.q; runSearch() },
+  'clear-filters': () => { state.group = null; state.source = null; state.tags = []; state.date = null; renderSidebar(); runSearch() },
+  'ask-instead': () => { const q = state.query; setMode('ask'); ask(q) },
   'close-preview': () => closePreview(),
   'toggle-sidebar': () => $('#sidebar').classList.toggle('open'),
   'export': () => exportResults('csv'),

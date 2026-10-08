@@ -103,6 +103,36 @@ export interface SearchResult {
   score: number
   /** Short excerpt around the match; matched words are wrapped in \u0002 … \u0003. */
   snippet?: string
+  /** Why it matched ("Why this result"). */
+  why?: MatchReason
+}
+
+/** Why a result matched. */
+export interface MatchReason {
+  /** Words in the passage that matched, as written there. They can differ from what was typed ("termination" for "terminate", "1,200" for "1200"). */
+  words: string[]
+  /** Every searched word is in the file name. */
+  fileName?: boolean
+  /** Found by meaning (search by meaning), not only by its words. */
+  meaning?: boolean
+}
+
+/** What Duct can say when a search finds nothing, so it is never a dead end. */
+export interface SearchHelp {
+  /** Documents that were searched. */
+  documents: number
+  /** Scans and images with no text yet: they need OCR before their words can be found. */
+  needsOcr: number
+  /** Files that couldn't be read at all. */
+  failed: number
+  /** Of those, files locked with a password. */
+  passwordProtected: number
+  /** Duct is still reading files, so some aren't searchable yet. */
+  indexing: { done: number; total: number } | null
+  /** Results the same search finds without the current filters (up to 100). */
+  outsideFilters: number
+  /** The search with misspelt words replaced by words that are in the documents. */
+  didYouMean?: string
 }
 
 export interface DuctConfig {
