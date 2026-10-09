@@ -42,3 +42,16 @@ jobs:
         with:
           name: dist
           path: dist/
+
+  accessibility:
+    # Every main screen against WCAG 2.2 A and AA with axe-core, in Chromium (scripts/a11y-electron.cjs).
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run a11y

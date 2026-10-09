@@ -263,9 +263,15 @@ function renderFeatureList(prefs, shortcut) {
   let html = FEATURE_GROUPS.map(g => '<h3>' + esc(g.title) + '</h3>' + g.items.map(([name, label, help]) => check('data-feature="' + name + '"', feature(name), label, help, !admin)).join('')).join('')
   html += '<h3>File types Duct reads</h3><p class="hint">Switched-off types are skipped when indexing and hidden from search. Turning one back on rescans watched folders.</p>'
   html += Object.keys(KIND_LABELS).map(kind => check('data-format-kind="' + kind + '"', kindOn(kind), KIND_LABELS[kind], '', !admin)).join('')
+  // Single-key shortcuts can be turned off (WCAG 2.1.4): speech input can type "/" by accident.
+  html += '<h3>Keyboard</h3>' + check('data-local="slashKey"', slashKeyOn(), 'Press / to search', 'Typing / anywhere outside a text box jumps to the search box. ⌘K or Ctrl+K always works.', false)
   if (prefs) html += '<h3>This computer</h3>' + DESKTOP_PREFS.map(([name, label, help]) => check('data-pref="' + name + '"', prefs[name] !== false, label, help, false) + (name === 'shortcut' ? shortcutRow(shortcut) : '')).join('')
   $('#featureList').innerHTML = html
   $('#featuresHint').textContent = admin ? 'Turn off anything you don’t use. Switched-off features disappear from Duct and its API.' : 'Only an admin can change these.'
+}
+
+function slashKeyOn() {
+  try { return localStorage.getItem('duct.slashKey') !== 'off' } catch { return true }
 }
 
 const DAY = 86400000
@@ -424,6 +430,9 @@ async function renderMascots() {
       canvas.height = slot.clientHeight * 2
       slot.appendChild(canvas)
       slot.player = new DotLottie({ canvas, src: '/mascot/mascot.lottie', animationId: POSES[pose], autoplay: !reduceMotion, loop: true })
+      // Movement stops by itself within 5 seconds (WCAG 2.2.2): it finishes the loop it's in and rests.
+      const player = slot.player
+      setTimeout(() => { try { player.setLoop(false) } catch {} }, 5000)
       slot.dataset.pose = pose
       slot.player.addEventListener('load', () => {
         if (reduceMotion) slot.player.setFrame(Math.floor(slot.player.totalFrames / 2))
@@ -1047,7 +1056,7 @@ $('#q').addEventListener('keydown', e => {
 
 document.addEventListener('keydown', e => {
   const typing = e.target.closest && e.target.closest('input, textarea, select, [contenteditable]')
-  if ((e.key === '/' && !typing) || ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k')) { e.preventDefault(); focusSearch() }
+  if ((e.key === '/' && !typing && slashKeyOn()) || ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k')) { e.preventDefault(); focusSearch() }
 })
 
 function focusSearch() {
@@ -1078,7 +1087,7 @@ function renderDocuments() {
     (docs.length === 1 ? 'Duct couldn’t read this file.' : 'Duct couldn’t read these ' + fmt(docs.length) + ' files.') + '</strong> ' +
     'Under each one is why, and what usually fixes it. Everything else is searchable meanwhile.</p></div>' : ''
   const statusOf = d => d.status === 'failed' ? '<span class="status bad">Couldn’t read</span>' : d.status === 'no-text' ? '<span class="status warn">No text (scan?)</span>' : '<span class="status ok">Indexed</span>'
-  $('#docTable').innerHTML = attentionNote + '<div class="doc-row head" role="row"><span></span><span>Name</span><span class="folder-col">Folder</span><span>Status</span><span></span></div>' +
+  $('#docTable').innerHTML = attentionNote + '<div class="doc-row head" role="row"><span role="columnheader"><span class="sr-only">Type</span></span><span role="columnheader">Name</span><span class="folder-col" role="columnheader">Folder</span><span role="columnheader">Status</span><span role="columnheader"><span class="sr-only">Actions</span></span></div>' +
     docs.slice(0, 2000).map(d => {
       const link = isLink(d.path)
       const actions = []
@@ -1087,12 +1096,12 @@ function renderDocuments() {
       if (d.status === 'no-text' && !link && isAdmin() && feature('ocrOnDemand')) actions.push('<button class="btn btn-sm" data-doc-act="ocr">Read with OCR</button>')
       if (desktop && desktop.revealDocument && !link) actions.push('<button class="btn btn-sm" data-doc-act="reveal">Show</button>')
       if (isAdmin()) actions.push('<button class="btn btn-sm btn-danger" data-doc-act="remove" title="Remove from Duct">✕</button>')
-      return '<div class="doc-row" role="row" data-path="' + esc(d.path) + '">' + badge(d.format) +
-        '<span class="name-cell"><span class="name" title="' + esc((d.displayName || fileName(d.path)) + '\n' + d.path) + '">' + esc(d.displayName || fileName(d.path)) + '</span>' +
+      return '<div class="doc-row" role="row" data-path="' + esc(d.path) + '"><span role="cell">' + badge(d.format) + '</span>' +
+        '<span class="name-cell" role="cell"><span class="name" title="' + esc((d.displayName || fileName(d.path)) + '\n' + d.path) + '">' + esc(d.displayName || fileName(d.path)) + '</span>' +
         ((d.tags || []).length ? '<span class="tags">' + d.tags.map(t => '<span class="tag">' + esc(t) + '</span>').join('') + '</span>' : '') + '</span>' +
-        '<span class="folder">' + esc(link ? d.path : d.source === 'library' ? 'Duct Library' : folderOf(d.path)) + '</span>' +
-        statusOf(d) + '<span class="row-actions">' + actions.join('') + '</span>' +
-        (d.status === 'failed' && d.error ? '<span class="err" title="' + esc(d.error) + '">' + esc(fileProblem(d.error)) + '</span>' : '') + '</div>'
+        '<span class="folder" role="cell">' + esc(link ? d.path : d.source === 'library' ? 'Duct Library' : folderOf(d.path)) + '</span>' +
+        '<span role="cell">' + statusOf(d) + '</span><span class="row-actions" role="cell">' + actions.join('') + '</span>' +
+        (d.status === 'failed' && d.error ? '<span class="err" role="cell" title="' + esc(d.error) + '">' + esc(fileProblem(d.error)) + '</span>' : '') + '</div>'
     }).join('')
   if (attention) renderMascots()
 }
@@ -1781,6 +1790,7 @@ $('#settings').addEventListener('change', async e => {
     } catch (err) { el.checked = !el.checked; toast('Couldn’t save that. ' + err.message, true) }
     return
   }
+  if (el.dataset.local === 'slashKey') { try { localStorage.setItem('duct.slashKey', el.checked ? 'on' : 'off') } catch {} return }
   if (el.dataset.pref) {
     const ok = await desktop.setPref(el.dataset.pref, el.checked).catch(() => false)
     if (!ok) { el.checked = !el.checked; toast('Couldn’t save that. Try again?', true); return }

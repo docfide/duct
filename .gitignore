@@ -7,3 +7,4 @@ ANNOUNCEMENT.md
 *.DS_Store
 social-preview.html
 release/
+a11y-report.json

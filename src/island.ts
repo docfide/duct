@@ -10,7 +10,7 @@ export const islandHtml = `<!DOCTYPE html>
 <style>
 :root {
   --black: #000000; --s1: #111110; --s2: #181816; --border: #252522; --border2: #333330;
-  --muted: #6b6b67; --subtle: #9a9a95; --body: #C8C7C0; --text: #F0EFE8; --lime: #A3E635;
+  --muted: #888883; --subtle: #9a9a95; --body: #C8C7C0; --text: #F0EFE8; --lime: #A3E635;
   --mono: 'SF Mono','Fira Code','Cascadia Code','Consolas',monospace;
   --sans: -apple-system,BlinkMacSystemFont,'Inter',sans-serif;
   --ease: cubic-bezier(.2, .9, .25, 1.1);
