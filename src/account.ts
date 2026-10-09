@@ -75,7 +75,7 @@ export interface AccountOptions {
   storage: AccountStorage
   /** https://accounts.tensflare.com (sign-in, tokens, keys). */
   accountsUrl?: string
-  /** https://api.tensflare.com (profile and entitlements). */
+  /** Where the account API lives (profile, entitlements, hosted AI, sync, notebook links): https://accounts.tensflare.com. */
   apiUrl?: string
   /** Opens the sign-in page in the system browser. */
   openUrl?: (url: string) => void | Promise<void>
@@ -124,7 +124,7 @@ export class TensflareAccount {
 
   constructor(opts: AccountOptions) {
     this.accountsUrl = (opts.accountsUrl ?? process.env['DUCT_ACCOUNTS_URL'] ?? 'https://accounts.tensflare.com').replace(/\/+$/, '')
-    this.apiUrl = (opts.apiUrl ?? process.env['DUCT_API_URL'] ?? 'https://api.tensflare.com').replace(/\/+$/, '')
+    this.apiUrl = (opts.apiUrl ?? process.env['DUCT_API_URL'] ?? 'https://accounts.tensflare.com').replace(/\/+$/, '')
     this.storage = opts.storage
     this.openUrl = opts.openUrl
     this.fetchImpl = opts.fetch ?? fetch
