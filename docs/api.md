@@ -377,6 +377,24 @@ Exports passages picked by hand (the app's **Collect**), in the order given. Onl
 { "format": "docx", "title": "Termination clauses", "items": [{ "path": "/docs/msa.pdf", "page": 4, "text": "Either party may…" }] }
 ```
 
+## Notebooks
+
+Named collections of quotes picked from documents, each kept with its document, page and your own comment. The app's **Workspace** (`/workspace?left=<path>&right=<path>`) shows two documents side by side and adds the selected text to a notebook. Notebooks belong to the index: on a shared server everyone sees them, like tags.
+
+| Route | |
+|-------|---|
+| `GET /api/notebooks` | Every notebook with its note count, most recently changed first |
+| `POST /api/notebooks` | `{ "name" }` → `201 { notebook }` |
+| `PATCH /api/notebooks/:id` | `{ "name" }` renames |
+| `DELETE /api/notebooks/:id` | Deletes the notebook and its notes |
+| `GET /api/notebooks/:id/notes` | `{ notebook, notes }` in order |
+| `POST /api/notebooks/:id/notes` | `{ "path", "quote", "page"?, "comment"? }`: adds to the end. `path` must be an indexed document; `quote` is kept as written (up to 20,000 characters) |
+| `PUT /api/notebooks/:id/order` | `{ "ids": [...] }` sets the order of the notes |
+| `PATCH /api/notes/:id` | `{ "comment" }` |
+| `DELETE /api/notes/:id` | |
+| `GET /api/notebooks/:id/export?format=docx` | The notebook as `docx` (default), `md`, `csv` or `json`: each quote with its source, then your comment. Needs the `export` feature |
+| `GET /api/document-text?path=…` | A document as `{ name, format, pageLabel, sections: [{ title, text, page? }] }`: the text the workspace shows for formats the browser can't draw itself |
+
 ## `GET /api/tags` / `PUT /api/documents/tags`
 
 `GET` lists every tag with its document count. `PUT { "path", "tags": [...] }` replaces a document's tags (members may tag). Tags are kept when a document is re-indexed. Documents in `/api/documents` carry `tags` and `modifiedAt`.

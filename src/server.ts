@@ -7,12 +7,13 @@ import { randomBytes } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { Duct } from './index.js'
+import type { Duct, Note } from './index.js'
 import type { DocumentFormat, SearchResult, SearchScope } from './types.js'
 import { isUrl } from './extract/web.js'
 import { addToLibrary, defaultLibraryDir } from './library.js'
 import { VERSION } from './version.js'
 import { viewerHtml } from './viewer.js'
+import { workspaceHtml } from './workspace.js'
 import { ACCEPT_ATTRIBUTE, FORMATS, SUPPORTED_SUMMARY, isSupportedFile, pageLabel } from './formats.js'
 import { islandHtml } from './island.js'
 import { EXPORT_TYPES, exportFileName, isExportFormat, renderExport } from './export.js'
@@ -843,6 +844,125 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     }
   })
 
+  // ---------- notebooks ----------
+  // Named collections of quotes picked from documents, with the reader's comments. Like tags, they belong to the
+  // index and are shared by everyone using the server.
+
+  const noteExport = (n: Note): ExportItem => ({
+    name: n.docName,
+    path: n.path,
+    ...(n.page ? { location: `${pageLabel(n.format as DocumentFormat)} ${n.page}` } : {}),
+    text: n.quote,
+    ...(n.comment.trim() ? { note: n.comment } : {}),
+    tags: duct.getDocument(n.path)?.tags ?? [],
+  })
+
+  // On a shared server, a note quoting a document someone may not see is left out for them, like the document
+  // itself (permission-aware team search): they don't see it, count it, export it, change it or delete it.
+  const visibleNotes = (notes: Note[], res: express.Response): Note[] => {
+    const hidden = duct.hiddenFrom(res.locals.viewer)
+    return hidden.size ? notes.filter(n => !hidden.has(n.path)) : notes
+  }
+  const noteHidden = (id: string, res: express.Response): boolean => {
+    const path = duct.notePath(id)
+    return path !== undefined && !duct.canView(path, res.locals.viewer)
+  }
+
+  app.get('/api/notebooks', (_req, res) => {
+    const notebooks = duct.listNotebooks()
+    if (!res.locals.viewer) { res.json({ notebooks }); return }
+    res.json({ notebooks: notebooks.map(b => ({ ...b, notes: visibleNotes(duct.listNotes(b.id), res).length })) })
+  })
+
+  app.post('/api/notebooks', (req, res) => {
+    const notebook = duct.createNotebook(req.body?.name)
+    audit(res, 'notes', undefined, `created notebook "${notebook.name}"`)
+    res.status(201).json({ notebook })
+  })
+
+  app.patch('/api/notebooks/:id', (req, res) => {
+    if (!duct.renameNotebook(req.params.id, req.body?.name)) { res.status(404).json({ error: 'Notebook not found' }); return }
+    audit(res, 'notes', undefined, 'renamed a notebook')
+    res.json({ ok: true })
+  })
+
+  app.delete('/api/notebooks/:id', (req, res) => {
+    const all = duct.listNotes(req.params.id)
+    if (visibleNotes(all, res).length !== all.length) { res.status(403).json({ error: 'This notebook has notes from documents you can’t open, so only someone who can see them all can delete it.' }); return }
+    if (!duct.deleteNotebook(req.params.id)) { res.status(404).json({ error: 'Notebook not found' }); return }
+    audit(res, 'notes', undefined, 'deleted a notebook')
+    res.json({ ok: true })
+  })
+
+  app.get('/api/notebooks/:id/notes', (req, res) => {
+    const notebook = duct.listNotebooks().find(b => b.id === req.params.id)
+    if (!notebook) { res.status(404).json({ error: 'Notebook not found' }); return }
+    const notes = visibleNotes(duct.listNotes(notebook.id), res)
+    res.json({ notebook: { ...notebook, notes: notes.length }, notes })
+  })
+
+  app.post('/api/notebooks/:id/notes', (req, res) => {
+    const { path, quote, page, comment } = req.body ?? {}
+    if (typeof path !== 'string' || typeof quote !== 'string') { res.status(400).json({ error: 'Send { "path": "…", "quote": "…", "page"?: 1, "comment"?: "…" }' }); return }
+    try {
+      const note = duct.addNote(req.params.id, { path, quote, page, comment })
+      audit(res, 'notes', path, 'added a note')
+      res.status(201).json({ note })
+    } catch (err) {
+      sendError(res, err, /not found/i.test((err as Error).message) ? 404 : 400)
+    }
+  })
+
+  app.put('/api/notebooks/:id/order', (req, res) => {
+    const ids = req.body?.ids
+    if (!Array.isArray(ids) || !ids.every(i => typeof i === 'string')) { res.status(400).json({ error: 'Send { "ids": ["…"] }' }); return }
+    duct.reorderNotes(req.params.id, ids)
+    res.json({ ok: true })
+  })
+
+  app.patch('/api/notes/:id', (req, res) => {
+    if (typeof req.body?.comment !== 'string') { res.status(400).json({ error: 'Send { "comment": "…" }' }); return }
+    if (noteHidden(req.params.id, res)) { res.status(404).json({ error: 'Note not found' }); return }
+    if (!duct.updateNote(req.params.id, req.body.comment)) { res.status(404).json({ error: 'Note not found' }); return }
+    res.json({ ok: true })
+  })
+
+  app.delete('/api/notes/:id', (req, res) => {
+    if (noteHidden(req.params.id, res)) { res.status(404).json({ error: 'Note not found' }); return }
+    if (!duct.deleteNote(req.params.id)) { res.status(404).json({ error: 'Note not found' }); return }
+    audit(res, 'notes', undefined, 'deleted a note')
+    res.json({ ok: true })
+  })
+
+  // The notebook as csv, md, json or docx: each quote with its source, then the reader's comment.
+  app.get('/api/notebooks/:id/export', needs('export'), async (req, res) => {
+    const notebook = duct.listNotebooks().find(b => b.id === req.params.id)
+    if (!notebook) { res.status(404).json({ error: 'Notebook not found' }); return }
+    const notes = visibleNotes(duct.listNotes(notebook.id), res)
+    if (!notes.length) { res.status(400).json({ error: 'This notebook has no notes yet' }); return }
+    try {
+      audit(res, 'export', undefined, `notebook, ${notes.length} notes`)
+      await sendExport(res, notes.map(noteExport), (req.query.format as string) || 'docx', notebook.name)
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message })
+    }
+  })
+
+  // A document as text in sections, for the side-by-side workspace (formats the browser can't draw itself).
+  app.get('/api/document-text', async (req, res) => {
+    const path = typeof req.query.path === 'string' ? req.query.path : ''
+    const doc = path ? duct.getDocument(path) : undefined
+    if (!doc) { res.status(404).json({ error: 'Document not found' }); return }
+    try {
+      telemetry?.record('opens')
+      audit(res, 'open', doc.path)
+      res.setHeader('Cache-Control', 'no-store')
+      res.json({ name: doc.displayName, format: doc.format, pageLabel: pageLabel(doc.format), sections: (await duct.readableText(doc.path)) ?? [] })
+    } catch (err) {
+      sendError(res, err, 500)
+    }
+  })
+
   // ---------- export ----------
 
   const nameOf = (path: string) => duct.getDocument(path)?.displayName ?? path.split(/[\\/]/).pop() ?? path
@@ -975,6 +1095,10 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
   app.get('/viewer', (_req, res) => {
     res.setHeader('Content-Security-Policy', INLINE_SCRIPT_CSP)
     res.type('html').send(viewerHtml)
+  })
+  app.get('/workspace', (_req, res) => {
+    res.setHeader('Content-Security-Policy', INLINE_SCRIPT_CSP)
+    res.type('html').send(workspaceHtml)
   })
   // The desktop app's notch companion (see electron/island.cjs).
   app.get('/island', (_req, res) => {

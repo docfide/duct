@@ -47,6 +47,22 @@ export interface NewDocument {
 
 export interface AuditEntry { id: number; at: number; actor: string; role: string | null; action: string; target: string | null; detail: string | null }
 
+export interface Notebook { id: string; name: string; createdAt: number; updatedAt: number; notes: number }
+export interface Note {
+  id: string
+  notebookId: string
+  position: number
+  /** The document's path in the index. Kept even if the document is later removed. */
+  path: string
+  docName: string
+  format: string
+  page: number | null
+  quote: string
+  comment: string
+  createdAt: number
+  updatedAt: number
+}
+
 export interface StoredApiKey {
   id: string
   name: string
@@ -322,6 +338,26 @@ export class SqliteStore {
         detail TEXT
       );
       CREATE INDEX IF NOT EXISTS audit_at ON audit(at);
+      CREATE TABLE IF NOT EXISTS notebooks (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS notes (
+        id TEXT PRIMARY KEY,
+        notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL,
+        path TEXT NOT NULL,
+        doc_name TEXT NOT NULL,
+        format TEXT NOT NULL,
+        page INTEGER,
+        quote TEXT NOT NULL,
+        comment TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS notes_notebook ON notes(notebook_id, position);
       CREATE TABLE IF NOT EXISTS api_keys (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -471,6 +507,11 @@ export class SqliteStore {
     return row?.content
   }
 
+  /** A document's indexed passages in order. */
+  chunksOf(path: string): { heading: string; page: number | null; content: string }[] {
+    return this.db.prepare('SELECT c.heading, c.page, c.content FROM chunks c JOIN documents d ON d.id = c.document_id WHERE d.path = ? ORDER BY c.idx').all(path) as unknown as { heading: string; page: number | null; content: string }[]
+  }
+
   /** One page of documents, newest first, and the total. */
   pageDocuments(limit: number, offset: number): { documents: StoredDocument[]; total: number } {
     const rows = this.db.prepare('SELECT * FROM documents ORDER BY indexed_at DESC, id DESC LIMIT ? OFFSET ?').all(limit, offset) as unknown as DocumentRow[]
@@ -559,6 +600,76 @@ export class SqliteStore {
   addApiKey(key: { id: string; name: string; keyHash: string; scopes: string[]; collections: string[] | null }): void {
     this.db.prepare('INSERT INTO api_keys (id, name, key_hash, scopes, collections, created_at) VALUES (?, ?, ?, ?, ?, ?)')
       .run(key.id, key.name, key.keyHash, key.scopes.join(' '), key.collections ? JSON.stringify(key.collections) : null, Date.now())
+  }
+
+  // ---------- notebooks ----------
+
+  listNotebooks(): Notebook[] {
+    return (this.db.prepare(`
+      SELECT b.id, b.name, b.created_at AS createdAt, b.updated_at AS updatedAt, count(n.id) AS notes
+      FROM notebooks b LEFT JOIN notes n ON n.notebook_id = b.id
+      GROUP BY b.id ORDER BY b.updated_at DESC
+    `).all() as unknown as Notebook[])
+  }
+
+  getNotebook(id: string): Notebook | undefined {
+    return this.listNotebooks().find(b => b.id === id)
+  }
+
+  createNotebook(id: string, name: string): Notebook {
+    const now = Date.now()
+    this.db.prepare('INSERT INTO notebooks (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)').run(id, name, now, now)
+    return { id, name, createdAt: now, updatedAt: now, notes: 0 }
+  }
+
+  renameNotebook(id: string, name: string): boolean {
+    return this.db.prepare('UPDATE notebooks SET name = ?, updated_at = ? WHERE id = ?').run(name, Date.now(), id).changes > 0
+  }
+
+  deleteNotebook(id: string): boolean {
+    return this.db.prepare('DELETE FROM notebooks WHERE id = ?').run(id).changes > 0
+  }
+
+  listNotes(notebookId: string): Note[] {
+    return this.db.prepare(`
+      SELECT id, notebook_id AS notebookId, position, path, doc_name AS docName, format, page, quote, comment, created_at AS createdAt, updated_at AS updatedAt
+      FROM notes WHERE notebook_id = ? ORDER BY position, created_at
+    `).all(notebookId) as unknown as Note[]
+  }
+
+  addNote(n: Omit<Note, 'position' | 'createdAt' | 'updatedAt'>): Note {
+    const now = Date.now()
+    const { next } = this.db.prepare('SELECT coalesce(max(position), -1) + 1 AS next FROM notes WHERE notebook_id = ?').get(n.notebookId) as { next: number }
+    this.db.prepare('INSERT INTO notes (id, notebook_id, position, path, doc_name, format, page, quote, comment, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(n.id, n.notebookId, next, n.path, n.docName, n.format, n.page, n.quote, n.comment, now, now)
+    this.db.prepare('UPDATE notebooks SET updated_at = ? WHERE id = ?').run(now, n.notebookId)
+    return { ...n, position: next, createdAt: now, updatedAt: now }
+  }
+
+  updateNoteComment(id: string, comment: string): boolean {
+    const now = Date.now()
+    const { changes } = this.db.prepare('UPDATE notes SET comment = ?, updated_at = ? WHERE id = ?').run(comment, now, id)
+    if (changes) this.db.prepare('UPDATE notebooks SET updated_at = ? WHERE id = (SELECT notebook_id FROM notes WHERE id = ?)').run(now, id)
+    return changes > 0
+  }
+
+  deleteNote(id: string): boolean {
+    return this.db.prepare('DELETE FROM notes WHERE id = ?').run(id).changes > 0
+  }
+
+  /** The path of the document a note quotes. */
+  notePath(id: string): string | undefined {
+    return (this.db.prepare('SELECT path FROM notes WHERE id = ?').get(id) as { path: string } | undefined)?.path
+  }
+
+  /** Sets the order of a notebook's notes to `ids` (ids not in the notebook are ignored; notes left out go last). */
+  reorderNotes(notebookId: string, ids: string[]): void {
+    this.transaction(() => {
+      const update = this.db.prepare('UPDATE notes SET position = ? WHERE id = ? AND notebook_id = ?')
+      const have = new Set(this.listNotes(notebookId).map(n => n.id))
+      const order = [...ids.filter(i => have.has(i)), ...[...have].filter(i => !ids.includes(i))]
+      order.forEach((id, i) => update.run(i, id, notebookId))
+    })
   }
 
   listApiKeys(): StoredApiKey[] {

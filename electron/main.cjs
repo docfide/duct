@@ -544,6 +544,30 @@ function indexedFile(filePath) {
 
 ipcMain.handle('duct:openDocument', (_event, filePath, page, terms) => openDocument(filePath, page, terms))
 
+// The workspace: two documents side by side with a notebook. Any indexed document can be shown, not only PDFs.
+function openWorkspace(left, right, page, terms) {
+  const known = p => (typeof p === 'string' && duct.getDocument(p) ? duct.getDocument(p).path : '')
+  const query = new URLSearchParams()
+  if (known(left)) query.set('left', known(left))
+  if (known(right)) query.set('right', known(right))
+  if (Number.isInteger(page) && page > 0) query.set('lpage', String(page))
+  if (Array.isArray(terms)) query.set('lterms', JSON.stringify(terms.filter(t => typeof t === 'string').slice(0, 12)))
+  const win = new BrowserWindow({
+    width: 1500,
+    height: 950,
+    title: 'Duct Workspace',
+    backgroundColor: '#0C0C0B',
+    icon: path.join(__dirname, 'icon.png'),
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+  })
+  win.webContents.on('will-navigate', (event, url) => { if (!url.startsWith(serverUrl)) event.preventDefault() })
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  win.loadURL(`${serverUrl}/workspace?${query}`)
+  return true
+}
+
+ipcMain.handle('duct:openWorkspace', (_event, left, right, page, terms) => openWorkspace(left, right, page, terms))
+
 ipcMain.handle('duct:revealDocument', (_event, filePath) => {
   const doc = indexedFile(filePath)
   if (!doc) return false

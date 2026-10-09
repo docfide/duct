@@ -11,6 +11,8 @@ export interface ExportItem {
   text: string
   score?: number
   tags?: string[]
+  /** The reader's own comment on the passage (notebooks). */
+  note?: string
 }
 
 export type ExportFormat = 'csv' | 'md' | 'json' | 'docx'
@@ -39,8 +41,9 @@ function cell(value: unknown): string {
 }
 
 export function toCsv(items: ExportItem[]): string {
-  const rows = [['document', 'location', 'section', 'passage', 'path', 'tags', 'score']]
-  for (const i of items) rows.push([i.name, i.location ?? '', i.heading ?? '', i.text, i.path, (i.tags ?? []).join('; '), i.score === undefined ? '' : String(Math.round(i.score * 1000) / 1000)])
+  const withNotes = items.some(i => i.note)
+  const rows = [['document', 'location', 'section', 'passage', ...(withNotes ? ['note'] : []), 'path', 'tags', 'score']]
+  for (const i of items) rows.push([i.name, i.location ?? '', i.heading ?? '', i.text, ...(withNotes ? [i.note ?? ''] : []), i.path, (i.tags ?? []).join('; '), i.score === undefined ? '' : String(Math.round(i.score * 1000) / 1000)])
   // A byte-order mark so Excel reads UTF-8 (accents, currency signs) correctly.
   return '\ufeff' + rows.map(r => r.map(cell).join(',')).join('\r\n') + '\r\n'
 }
@@ -49,6 +52,7 @@ export function toMarkdown(items: ExportItem[], title: string): string {
   const out = [`# ${title}`, '']
   for (const i of items) {
     out.push(...i.text.trim().split(/\r?\n/).map(line => `> ${line}`), '', `— **${sourceLine(i)}**`, '')
+    if (i.note?.trim()) out.push(...i.note.trim().split(/\r?\n/).map(line => line ? `${line}  ` : ''), '')
   }
   return out.join('\n')
 }
@@ -76,7 +80,13 @@ export async function toDocx(items: ExportItem[], title: string): Promise<Buffer
   ]
   for (const i of items) {
     for (const line of i.text.trim().split(/\r?\n/)) body.push(paragraph(run(line), '<w:ind w:left="567"/><w:spacing w:after="60"/>'))
-    body.push(paragraph(run(sourceLine(i), '<w:i/><w:color w:val="555555"/><w:sz w:val="18"/>') + (i.tags?.length ? run(`  ·  ${i.tags.join(', ')}`, '<w:color w:val="888888"/><w:sz w:val="18"/>') : ''), '<w:ind w:left="567"/><w:spacing w:after="320"/>'))
+    const hasNote = !!i.note?.trim()
+    body.push(paragraph(run(sourceLine(i), '<w:i/><w:color w:val="555555"/><w:sz w:val="18"/>') + (i.tags?.length ? run(`  ·  ${i.tags.join(', ')}`, '<w:color w:val="888888"/><w:sz w:val="18"/>') : ''), `<w:ind w:left="567"/><w:spacing w:after="${hasNote ? 120 : 320}"/>`))
+    // The reader's own words sit under the source, at the margin, so quote and comment stay apart.
+    if (hasNote) {
+      for (const line of i.note!.trim().split(/\r?\n/)) body.push(paragraph(run(line), '<w:spacing w:after="60"/>'))
+      body.push(paragraph('', '<w:spacing w:after="260"/>'))
+    }
   }
   zip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/></Types>')
   zip.file('_rels/.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/></Relationships>')

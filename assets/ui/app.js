@@ -661,6 +661,7 @@ function renderResults() {
       (r.why ? '<div class="why" hidden>' + whyText(r) + '</div>' : '') +
       '<div class="snippet">' + (r.snippet ? markSnippet(r.snippet) : highlight(c.content.slice(0, 260), terms(r))) + '</div>' +
       '<div class="result-actions"><button class="btn btn-sm btn-primary" data-act="open">' + (link ? 'Open link' : c.page ? 'Open at ' + esc(pageRef(c)) : 'Open') + '</button>' +
+      (link ? '' : '<button class="btn btn-sm" data-act="workspace" title="Open beside another document, with notes">Side by side</button>') +
       '<button class="btn btn-sm" data-act="copy-passage" title="Copy the passage with its source">Copy</button>' +
       (feature('export') ? '<button class="btn btn-sm" data-act="collect" title="Collect this passage to export later">Collect</button>' : '') +
       (desktop && desktop.revealDocument && !link ? '<button class="btn btn-sm" data-act="reveal">Show in folder</button>' : '') +
@@ -688,6 +689,7 @@ $('#results').addEventListener('click', e => {
   const r = state.results[Number(item.dataset.i)]
   const act = e.target.closest('[data-act]')
   if (act && act.dataset.act === 'open') return openResult(r)
+  if (act && act.dataset.act === 'workspace') return openWorkspace(r.chunk.documentPath, '', r.chunk.page, terms(r))
   if (act && act.dataset.act === 'reveal') return desktop.revealDocument(r.chunk.documentPath)
   if (act && act.dataset.act === 'copy-passage') return copyText('“' + r.chunk.content.trim() + '”\n— ' + sourceLine(r.chunk), 'Passage copied with its source')
   if (act && act.dataset.act === 'collect') return collect(r)
@@ -720,6 +722,7 @@ function renderPreview(r) {
     '<div class="actions"><button class="btn btn-primary" data-act="open">' + (link ? 'Open link' : c.page ? 'Open at ' + esc(pageRef(c)) : 'Open') + '</button>' +
     (desktop && desktop.revealDocument && !link ? '<button class="btn" data-act="reveal">Show in folder</button>' : '') +
     (c.metadata && typeof c.metadata.webUrl === 'string' && /^https:\/\//.test(c.metadata.webUrl) ? '<a class="btn" href="' + esc(c.metadata.webUrl) + '" target="_blank" rel="noopener">Open in ' + (c.metadata.connector === 'gdrive' ? 'Google Drive' : 'Microsoft 365') + '</a>' : '') +
+    (link ? '' : '<button class="btn" data-act="workspace" title="Open beside another document, with notes">Side by side</button>') +
     '<button class="btn" data-act="copy-passage">Copy passage</button>' +
     (feature('export') ? '<button class="btn" data-act="collect">Collect</button>' : '') + '</div>' +
     '<p class="passage-label">Matching passage</p><div class="passage">' + highlight(c.content, terms(r)) + '</div>' +
@@ -740,6 +743,7 @@ $('#preview').addEventListener('click', async e => {
   const r = state.results[Number($('#preview').dataset.i)]
   if (!r) return
   if (act.dataset.act === 'open') openResult(r)
+  if (act.dataset.act === 'workspace') openWorkspace(r.chunk.documentPath, '', r.chunk.page, terms(r))
   if (act.dataset.act === 'reveal') desktop.revealDocument(r.chunk.documentPath)
   if (act.dataset.act === 'copy') copyText(r.chunk.documentPath, 'Path copied')
   if (act.dataset.act === 'copy-passage') copyText('“' + r.chunk.content.trim() + '”\n— ' + sourceLine(r.chunk), 'Passage copied with its source')
@@ -776,6 +780,20 @@ document.addEventListener('keydown', async e => {
 })
 
 // ---------- opening documents ----------
+
+/** Opens the workspace: documents side by side with a notebook for notes. */
+async function openWorkspace(left, right, page, highlightTerms = []) {
+  if (desktop && desktop.openWorkspace) {
+    if (!(await desktop.openWorkspace(left, right, page, highlightTerms))) toast("Couldn't open the workspace", true)
+    return
+  }
+  const q = new URLSearchParams()
+  if (left) q.set('left', left)
+  if (right) q.set('right', right)
+  if (left && page) q.set('lpage', String(page))
+  if (left && highlightTerms.length) q.set('lterms', JSON.stringify(highlightTerms))
+  window.open('/workspace?' + q, '_blank', 'noopener')
+}
 
 async function openDocument(path, page, highlightTerms = []) {
   if (isLink(path)) { window.open(path, '_blank', 'noopener'); return }
@@ -895,6 +913,7 @@ function renderDocuments() {
       const link = isLink(d.path)
       const actions = []
       if (d.status !== 'failed') actions.push('<button class="btn btn-sm" data-doc-act="open">Open</button>')
+      if (d.status !== 'failed' && !link) actions.push('<button class="btn btn-sm" data-doc-act="workspace" title="Open beside another document, with notes">Side by side</button>')
       if (d.status === 'no-text' && !link && isAdmin() && feature('ocrOnDemand')) actions.push('<button class="btn btn-sm" data-doc-act="ocr">Read with OCR</button>')
       if (desktop && desktop.revealDocument && !link) actions.push('<button class="btn btn-sm" data-doc-act="reveal">Show</button>')
       if (isAdmin()) actions.push('<button class="btn btn-sm btn-danger" data-doc-act="remove" title="Remove from Duct">✕</button>')
@@ -916,6 +935,7 @@ $('#docTable').addEventListener('click', async e => {
   const path = row.dataset.path
   const doc = state.docs.find(d => d.path === path)
   if (act.dataset.docAct === 'open') openDocument(path)
+  if (act.dataset.docAct === 'workspace') openWorkspace(path)
   if (act.dataset.docAct === 'reveal') desktop.revealDocument(path)
   if (act.dataset.docAct === 'ocr') {
     act.disabled = true
@@ -1449,7 +1469,7 @@ $('#s3Form').addEventListener('submit', async e => {
 
 // ---------- audit log (shared servers, admins) ----------
 
-const AUDIT_LABELS = { signin: 'Signed in', search: 'Searched', ask: 'Asked', open: 'Opened', upload: 'Added', delete: 'Removed', ocr: 'Read with OCR', export: 'Exported', tags: 'Tagged', settings: 'Changed settings', features: 'Changed features', 'clear-index': 'Cleared the index', watch: 'Watched a folder', unwatch: 'Stopped watching', 'connector-add': 'Connected a source', 'connector-remove': 'Disconnected a source' }
+const AUDIT_LABELS = { signin: 'Signed in', search: 'Searched', ask: 'Asked', open: 'Opened', upload: 'Added', delete: 'Removed', ocr: 'Read with OCR', export: 'Exported', notes: 'Edited notes', tags: 'Tagged', settings: 'Changed settings', features: 'Changed features', 'clear-index': 'Cleared the index', watch: 'Watched a folder', unwatch: 'Stopped watching', 'connector-add': 'Connected a source', 'connector-remove': 'Disconnected a source' }
 async function renderAudit() {
   const box = $('#auditList')
   let a

@@ -1,0 +1,163 @@
+import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import type { Server } from 'node:http'
+import type { AddressInfo } from 'node:net'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { Duct } from '../src/index.js'
+import { createServer } from '../src/server.js'
+
+describe('notebooks', () => {
+  let dir: string
+  let duct: Duct
+  let server: Server
+  let base: string
+  let doc: string
+  let deck: string
+
+  const call = async (method: string, path: string, body?: unknown) => {
+    const res = await fetch(base + path, { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) })
+    return { status: res.status, res, json: res.headers.get('content-type')?.includes('json') ? await res.json() : undefined }
+  }
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'duct-notebooks-'))
+    doc = join(dir, 'lease.md')
+    writeFileSync(doc, '# Lease\n\nThe tenant may terminate this lease with 60 days written notice.\n\nRent is due on the first of the month.')
+    deck = join(dir, 'terms.html')
+    writeFileSync(deck, '<html><body><h1>Terms</h1><p>Either party may terminate for convenience.</p></body></html>')
+    duct = new Duct()
+    await duct.index([doc, deck])
+    server = createServer(duct, { libraryDir: join(dir, 'library') }).listen(0, '127.0.0.1')
+    await new Promise(resolve => server.once('listening', resolve))
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+  })
+
+  afterAll(() => {
+    server.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('creates, renames and lists notebooks', async () => {
+    const made = await call('POST', '/api/notebooks', { name: '  Acme   lease review ' })
+    expect(made.status).toBe(201)
+    expect(made.json.notebook.name).toBe('Acme lease review')
+    expect((await call('PATCH', `/api/notebooks/${made.json.notebook.id}`, { name: 'Acme' })).status).toBe(200)
+    const list = await call('GET', '/api/notebooks')
+    expect(list.json.notebooks.map((b: { name: string }) => b.name)).toContain('Acme')
+    expect((await call('PATCH', '/api/notebooks/nope', { name: 'x' })).status).toBe(404)
+  })
+
+  it('adds notes from two documents, comments on them and reorders them', async () => {
+    const { json: { notebook } } = await call('POST', '/api/notebooks', { name: 'Termination' })
+    const a = await call('POST', `/api/notebooks/${notebook.id}/notes`, { path: doc, quote: 'terminate this lease with 60 days written notice' })
+    const b = await call('POST', `/api/notebooks/${notebook.id}/notes`, { path: deck, quote: 'Either party may terminate for convenience.', page: 2 })
+    expect(a.status).toBe(201)
+    expect(a.json.note.docName).toBe('lease.md')
+    expect(a.json.note.page).toBeNull()
+    expect(b.json.note.page).toBe(2)
+
+    expect((await call('PATCH', `/api/notes/${a.json.note.id}`, { comment: 'Notice period is 60 days' })).status).toBe(200)
+    await call('PUT', `/api/notebooks/${notebook.id}/order`, { ids: [b.json.note.id, a.json.note.id] })
+
+    const { json } = await call('GET', `/api/notebooks/${notebook.id}/notes`)
+    expect(json.notes.map((n: { id: string }) => n.id)).toEqual([b.json.note.id, a.json.note.id])
+    expect(json.notes[1].comment).toBe('Notice period is 60 days')
+    expect(json.notebook.notes).toBe(2)
+
+    await call('DELETE', `/api/notes/${b.json.note.id}`)
+    expect((await call('GET', `/api/notebooks/${notebook.id}/notes`)).json.notes).toHaveLength(1)
+  })
+
+  it('refuses notes for unknown documents, empty quotes and unknown notebooks', async () => {
+    const { json: { notebook } } = await call('POST', '/api/notebooks', { name: 'Refusals' })
+    expect((await call('POST', `/api/notebooks/${notebook.id}/notes`, { path: '/etc/passwd', quote: 'root' })).status).toBe(404)
+    expect((await call('POST', `/api/notebooks/${notebook.id}/notes`, { path: doc, quote: '   ' })).status).toBe(400)
+    expect((await call('POST', '/api/notebooks/nope/notes', { path: doc, quote: 'x' })).status).toBe(404)
+  })
+
+  it('exports a notebook with sources and comments', async () => {
+    const { json: { notebook } } = await call('POST', '/api/notebooks', { name: 'Export me' })
+    expect((await call('GET', `/api/notebooks/${notebook.id}/export?format=md`)).status).toBe(400)  // nothing in it yet
+    const note = (await call('POST', `/api/notebooks/${notebook.id}/notes`, { path: doc, quote: 'Rent is due on the first of the month.' })).json.note
+    await call('PATCH', `/api/notes/${note.id}`, { comment: 'Check against schedule 2' })
+
+    const md = await (await fetch(`${base}/api/notebooks/${notebook.id}/export?format=md`)).text()
+    expect(md).toContain('# Export me')
+    expect(md).toContain('> Rent is due on the first of the month.')
+    expect(md).toContain('lease.md')
+    expect(md).toContain('Check against schedule 2')
+
+    const csv = await (await fetch(`${base}/api/notebooks/${notebook.id}/export?format=csv`)).text()
+    expect(csv).toContain('"note"')
+    expect(csv).toContain('Check against schedule 2')
+
+    const docx = await fetch(`${base}/api/notebooks/${notebook.id}/export?format=docx`)
+    expect(docx.status).toBe(200)
+    const zip = await (await import('jszip')).default.loadAsync(await docx.arrayBuffer())
+    const xml = await zip.file('word/document.xml')!.async('string')
+    expect(xml).toContain('Check against schedule 2')
+    expect(xml).toContain('Rent is due on the first of the month.')
+  })
+
+  it('deleting a notebook deletes its notes', async () => {
+    const { json: { notebook } } = await call('POST', '/api/notebooks', { name: 'Temporary' })
+    const note = (await call('POST', `/api/notebooks/${notebook.id}/notes`, { path: doc, quote: 'Lease' })).json.note
+    expect((await call('DELETE', `/api/notebooks/${notebook.id}`)).status).toBe(200)
+    expect((await call('DELETE', `/api/notes/${note.id}`)).status).toBe(404)
+    expect((await call('GET', `/api/notebooks/${notebook.id}/notes`)).status).toBe(404)
+  })
+
+  it('serves a document as text sections for the workspace', async () => {
+    const { status, json } = await call('GET', `/api/document-text?path=${encodeURIComponent(doc)}`)
+    expect(status).toBe(200)
+    expect(json.format).toBe('md')
+    expect(json.sections.map((s: { text: string }) => s.text).join('\n')).toContain('60 days written notice')
+    expect((await call('GET', '/api/document-text?path=/etc/passwd')).status).toBe(404)
+  })
+})
+
+describe('notebooks on a shared server: notes follow who may see the document they quote', () => {
+  it('leaves out, doesn\'t count, export, change or delete notes from documents a person can\'t see', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'duct-notebooks-acl-'))
+    const open = join(dir, 'handbook.txt')
+    const secret = join(dir, 'salaries.txt')
+    writeFileSync(open, 'Payroll is paid on the 25th.')
+    writeFileSync(secret, 'The payroll budget for 2027 rises by eight percent.')
+    const duct = new Duct({ embed: false })
+    await duct.index([open, secret])
+    duct.setDocumentAccess(secret, ['user:boss@okafor.ng'])
+    const server = createServer(duct, { libraryDir: join(dir, 'library'), authToken: 'admin-t', memberTokens: ['member-t'], allowedHosts: '*' }).listen(0, '127.0.0.1')
+    await new Promise(resolve => server.once('listening', resolve))
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    const as = (t: string) => async (method: string, path: string, body?: unknown) => {
+      const res = await fetch(base + path, { method, headers: { Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) })
+      return { status: res.status, json: res.headers.get('content-type')?.includes('json') ? await res.json() : undefined, text: res.headers.get('content-type')?.includes('json') ? '' : await res.text() }
+    }
+    const admin = as('admin-t')
+    const member = as('member-t')
+    try {
+      const nb = (await admin('POST', '/api/notebooks', { name: 'Payroll' })).json.notebook.id
+      await admin('POST', `/api/notebooks/${nb}/notes`, { path: open, quote: 'Payroll is paid on the 25th.' })
+      const hiddenNote = (await admin('POST', `/api/notebooks/${nb}/notes`, { path: secret, quote: 'rises by eight percent' })).json.note.id
+      expect((await member('POST', `/api/notebooks/${nb}/notes`, { path: secret, quote: 'x' })).status).toBe(404)
+
+      expect((await admin('GET', `/api/notebooks/${nb}/notes`)).json.notes).toHaveLength(2)
+      const seen = await member('GET', `/api/notebooks/${nb}/notes`)
+      expect(seen.json.notes.map((n: { quote: string }) => n.quote)).toEqual(['Payroll is paid on the 25th.'])
+      expect(seen.json.notebook.notes).toBe(1)
+      expect((await member('GET', '/api/notebooks')).json.notebooks[0].notes).toBe(1)
+      const exported = await member('GET', `/api/notebooks/${nb}/export?format=md`)
+      expect(exported.text).toContain('paid on the 25th')
+      expect(exported.text).not.toContain('eight percent')
+
+      expect((await member('PATCH', `/api/notes/${hiddenNote}`, { comment: 'x' })).status).toBe(404)
+      expect((await member('DELETE', `/api/notes/${hiddenNote}`)).status).toBe(404)
+      expect((await member('DELETE', `/api/notebooks/${nb}`)).status).toBe(403)
+      expect((await admin('GET', `/api/notebooks/${nb}/notes`)).json.notes).toHaveLength(2)
+    } finally {
+      server.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})

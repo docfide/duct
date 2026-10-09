@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, watch } from 'node:fs'
 import type { FSWatcher } from 'node:fs'
 import { readdir } from 'node:fs/promises'
@@ -6,12 +6,12 @@ import { basename, extname, join, resolve } from 'node:path'
 import { detectFormat, extract, UnsupportedFileError } from './extract/index.js'
 import { FeatureDisabledError, defaultFeatures, enabledFormats, formatAllowed, mergeFeatures } from './features.js'
 import type { Features, FeaturesPatch } from './features.js'
-import { PACKAGE_EXTENSIONS, SUPPORTED_EXTENSIONS, isIgnoredDirectory, isSupportedFile } from './formats.js'
+import { PACKAGE_EXTENSIONS, SUPPORTED_EXTENSIONS, isIgnoredDirectory, isSupportedFile, pageLabel } from './formats.js'
 import { chunk } from './chunk/index.js'
 import { extractUrl, isUrl } from './extract/web.js'
 import { extractTablesFromContent } from './extract/table.js'
 import { SqliteStore } from './store/sqlite.js'
-import type { AuditEntry, StoredApiKey, StoredDocument } from './store/sqlite.js'
+import type { AuditEntry, Note, Notebook, StoredApiKey, StoredDocument } from './store/sqlite.js'
 import { terminateOcr } from './ocr/index.js'
 import { HybridSearcher, reciprocalRankFusion } from './search/hybrid.js'
 import { SimpleReranker, NoopReranker } from './search/reranker.js'
@@ -137,6 +137,10 @@ export interface TextInput {
 type IndexOutcome = { status: 'indexed' | 'no-text' | 'skipped' | 'failed'; chunks: number; error?: string }
 
 const MAX_REPORTED_FAILURES = 50
+
+function cleanName(name: unknown, fallback: string): string {
+  return String(name ?? '').normalize('NFC').replace(/\s+/g, ' ').trim().slice(0, 120) || fallback
+}
 
 export class Duct {
   private embedder: EmbeddingProvider | null = null
@@ -272,6 +276,77 @@ export class Duct {
   /** The stored text of a document (kept for text added with indexText() and for version comparison). */
   documentText(path: string): string | undefined {
     return this.store.latestContent(path)
+  }
+
+  // ---------- notebooks ----------
+
+  listNotebooks(): Notebook[] {
+    return this.store.listNotebooks()
+  }
+
+  createNotebook(name: string): Notebook {
+    return this.store.createNotebook(randomUUID(), cleanName(name, 'Untitled notebook'))
+  }
+
+  renameNotebook(id: string, name: string): boolean {
+    return this.store.renameNotebook(id, cleanName(name, 'Untitled notebook'))
+  }
+
+  deleteNotebook(id: string): boolean {
+    return this.store.deleteNotebook(id)
+  }
+
+  listNotes(notebookId: string): Note[] {
+    return this.store.listNotes(notebookId)
+  }
+
+  /** Adds a quote from an indexed document to a notebook, at the end. The quote is kept as written, up to 20,000 characters. */
+  addNote(notebookId: string, input: { path: string; quote: string; page?: number; comment?: string }): Note {
+    const doc = this.findDocument(input.path)
+    if (!doc) throw new Error('Document not found')
+    if (!this.store.getNotebook(notebookId)) throw new Error('Notebook not found')
+    const quote = String(input.quote ?? '').trim().slice(0, 20_000)
+    if (!quote) throw new Error('Nothing selected')
+    return this.store.addNote({
+      id: randomUUID(), notebookId, path: doc.path, docName: doc.displayName ?? basename(doc.path), format: doc.format,
+      page: Number.isInteger(input.page) && (input.page as number) > 0 ? (input.page as number) : null,
+      quote, comment: String(input.comment ?? '').slice(0, 5000),
+    })
+  }
+
+  updateNote(id: string, comment: string): boolean {
+    return this.store.updateNoteComment(id, String(comment).slice(0, 5000))
+  }
+
+  deleteNote(id: string): boolean {
+    return this.store.deleteNote(id)
+  }
+
+  /** The path of the document a note quotes, or undefined if there's no such note. */
+  notePath(id: string): string | undefined {
+    return this.store.notePath(id)
+  }
+
+  reorderNotes(notebookId: string, ids: string[]): void {
+    this.store.reorderNotes(notebookId, ids)
+  }
+
+  /** The text of a document for reading and selecting, in sections (a page, slide, sheet or chapter each). Re-reads the file; falls back to the indexed passages. */
+  async readableText(path: string): Promise<{ title: string; text: string; page?: number }[] | undefined> {
+    const doc = this.findDocument(path)
+    if (!doc) return undefined
+    if (doc.source !== 'url' && !isUrl(doc.path)) {
+      try {
+        const ex = await this.extractPath(doc.path)
+        if (ex.pages?.length) return ex.pages.map((text, i) => ({ title: `${pageLabel(doc.format)} ${i + 1}`, text, page: i + 1 }))
+        if (ex.sections?.length) return ex.sections.map(s => ({ title: s.title, text: s.text }))
+        if (ex.content.trim()) return [{ title: '', text: ex.content }]
+      } catch { /* fall through to the indexed passages */ }
+    }
+    const stored = this.store.latestContent(doc.path)
+    if (stored) return [{ title: '', text: stored }]
+    const chunks = this.store.chunksOf(doc.path)
+    return chunks.length ? chunks.map(c => ({ title: c.heading, text: c.content, ...(c.page ? { page: c.page } : {}) })) : []
   }
 
   /** One page of documents, newest first. */
@@ -1247,7 +1322,7 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
 export { HybridSearcher, reciprocalRankFusion, extractUrl, isUrl, extractTablesFromContent }
 export { FeatureDisabledError, FEATURE_NAMES, FEATURE_LABELS, FORMAT_KINDS, defaultFeatures } from './features.js'
 export type { Features, FeaturesPatch, FeatureName } from './features.js'
-export type { AuditEntry, StoredApiKey } from './store/sqlite.js'
+export type { AuditEntry, Note, Notebook, StoredApiKey } from './store/sqlite.js'
 export type { SearchResult, SearchHelp, MatchReason, SearchScope } from './types.js'
 export type { Discovery, DocumentKind } from './discover.js'
 export type { Deadline, DeadlineKind, Radar } from './deadlines.js'

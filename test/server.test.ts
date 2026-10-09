@@ -59,7 +59,7 @@ describe('pages', () => {
   afterAll(() => server.close())
 
   // The pages are template literals in TypeScript; a stray backslash or backtick only shows up in the browser.
-  for (const [path, expected] of [['/', 0], ['/viewer', 1], ['/island', 1]] as const) {
+  for (const [path, expected] of [['/', 0], ['/viewer', 1], ['/workspace', 1], ['/island', 1]] as const) {
     it(`${path} has inline scripts that parse`, async () => {
       const vm = await import('node:vm')
       const page = await (await fetch(base + path)).text()
