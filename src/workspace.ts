@@ -63,6 +63,7 @@ main { flex: 1; min-height: 0; display: flex; }
 .pane-head .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; border-color: transparent; font-weight: 600; }
 .pane-head .name:hover { border-color: var(--border2); }
 .pane-head input.page { width: 42px; text-align: right; padding: 2px 5px; }
+.pane-head input.find { width: 130px; min-width: 70px; padding: 2px 6px; }
 .pane-head .pages { color: var(--subtle); }
 .pane-body { flex: 1; min-height: 0; position: relative; background: #2a2a28; }
 .scroller { position: absolute; inset: 0; overflow: auto; }
@@ -257,12 +258,19 @@ main { flex: 1; min-height: 0; display: flex; }
       this.zoomOut = h('button', { class: 'ghost', title: 'Zoom out', text: '−', hidden: true, onclick: () => this.zoom(1 / 1.2) })
       this.zoomIn = h('button', { class: 'ghost', title: 'Zoom in', text: '+', hidden: true, onclick: () => this.zoom(1.2) })
       this.modeBtn = h('button', { class: 'ghost', hidden: true, onclick: () => this.toggleMode() })
+      // Find in a PDF: starts with the words searched for; every match on every page, one after another.
+      this.findInput = h('input', { class: 'find', type: 'search', placeholder: 'Find', 'aria-label': 'Find in this document', hidden: true,
+        onkeydown: e => { if (e.key === 'Enter') { e.preventDefault(); this.find(true, e.shiftKey) } },
+        oninput: () => this.find(false, false) })
+      this.prevMatch = h('button', { class: 'ghost', title: 'Previous match (Shift+Enter)', 'aria-label': 'Previous match', text: '◀', hidden: true, onclick: () => this.find(true, true) })
+      this.matchCount = h('span', { class: 'pages', role: 'status', 'aria-live': 'polite', hidden: true })
+      this.nextMatch = h('button', { class: 'ghost', title: 'Next match (Enter)', 'aria-label': 'Next match', text: '▶', hidden: true, onclick: () => this.find(true, false) })
       this.closeBtn = h('button', { class: 'ghost', title: 'Close this document', 'aria-label': 'Close this document', text: '✕', hidden: true, onclick: () => closePane(this) })
       // The desktop app can open the file in the app it belongs to (Word, Pages, Preview…).
       this.appBtn = h('button', { class: 'ghost', title: 'Open in its usual app', text: 'Open in app', hidden: true, onclick: () => window.ductWorkspace.openInApp(this.path) })
       this.body = h('div', { class: 'pane-body' })
       this.el = h('section', { class: 'pane', 'aria-label': side + ' document' },
-        h('div', { class: 'pane-head' }, this.nameBtn, this.pageInput, this.pageCount, this.zoomOut, this.zoomIn, this.modeBtn, this.appBtn, this.closeBtn),
+        h('div', { class: 'pane-head' }, this.nameBtn, this.pageInput, this.pageCount, this.zoomOut, this.zoomIn, this.findInput, this.prevMatch, this.matchCount, this.nextMatch, this.modeBtn, this.appBtn, this.closeBtn),
         this.body)
       this.togglePicker(true)
     }
@@ -272,6 +280,8 @@ main { flex: 1; min-height: 0; display: flex; }
       this.resizer?.disconnect()
       this.body.replaceChildren()
       this.pageInput.hidden = this.pageCount.hidden = this.zoomIn.hidden = this.zoomOut.hidden = this.modeBtn.hidden = true
+      this.findInput.hidden = this.prevMatch.hidden = this.nextMatch.hidden = this.matchCount.hidden = true
+      this.findBus = null
     }
 
     clear() {
@@ -362,13 +372,19 @@ main { flex: 1; min-height: 0; display: flex; }
       const viewer = new PDFViewer({ container: scroller, viewer: scroller.firstChild, eventBus, linkService, findController })
       linkService.setViewer(viewer)
       eventBus.on('pagechanging', e => { this.pageInput.value = e.pageNumber })
+      eventBus.on('updatefindmatchescount', ({ matchesCount }) => this.showMatches(matchesCount))
+      eventBus.on('updatefindcontrolstate', ({ matchesCount }) => { if (matchesCount) this.showMatches(matchesCount) })
       eventBus.on('pagesinit', () => {
         viewer.currentScaleValue = 'page-width'
         viewer.currentPageNumber = Math.min(this.page, viewer.pagesCount)
         this.pageCount.textContent = '/ ' + viewer.pagesCount
         this.pageInput.value = viewer.currentPageNumber
         this.pageInput.hidden = this.pageCount.hidden = this.zoomIn.hidden = this.zoomOut.hidden = false
-        if (this.terms.length) eventBus.dispatch('find', { source: null, type: '', query: this.terms, caseSensitive: false, entireWord: false, highlightAll: true, findPrevious: false, matchDiacritics: false })
+        this.findBus = eventBus
+        this.findInput.hidden = false
+        this.findInput.value = this.terms.join(' ')
+        // Searching starts from the current page, so the first highlight is the match on the result's page.
+        if (this.terms.length) this.find(false, false)
       })
       this.resizer = new ResizeObserver(() => { if (this.fit && viewer.pagesCount) viewer.currentScaleValue = 'page-width' })
       this.resizer.observe(scroller)
@@ -379,6 +395,20 @@ main { flex: 1; min-height: 0; display: flex; }
       this.pdf = { doc, viewer }
       viewer.setDocument(doc)
       linkService.setDocument(doc, null)
+    }
+
+    /** Finds the words in the find box (or the searched-for terms) in the PDF: again = the next or previous match. */
+    find(again, previous) {
+      if (!this.findBus) return
+      const typed = this.findInput.value.trim()
+      const query = typed === this.terms.join(' ') && this.terms.length ? this.terms : typed
+      const any = Array.isArray(query) ? query.length > 0 : !!query
+      this.prevMatch.hidden = this.nextMatch.hidden = this.matchCount.hidden = !any
+      this.findBus.dispatch('find', { source: null, type: again ? 'again' : '', query, caseSensitive: false, entireWord: false, highlightAll: true, findPrevious: !!previous, matchDiacritics: false })
+    }
+
+    showMatches(m) {
+      this.matchCount.textContent = m.total ? m.current + ' of ' + m.total : 'No matches'
     }
 
     renderImage(doc) {
