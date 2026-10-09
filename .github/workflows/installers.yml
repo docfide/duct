@@ -34,6 +34,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - run: node scripts/check-runtime-deps.mjs
       - run: npx electron-builder ${{ matrix.args }} --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
