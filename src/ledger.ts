@@ -12,7 +12,7 @@ import { join } from 'node:path'
 export type LedgerCategory = 'tensflare' | 'ai' | 'cloud' | 'signin' | 'web'
 
 export const LEDGER_CATEGORY_LABELS: Record<LedgerCategory, string> = {
-  tensflare: 'Tensflare (account, usage counts, feedback, hosted AI)',
+  tensflare: 'Tensflare (account, usage counts, feedback, hosted AI, notebook links)',
   ai: 'AI provider you chose',
   cloud: 'Cloud sources you connected',
   signin: 'Sign-in providers',

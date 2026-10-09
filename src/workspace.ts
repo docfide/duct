@@ -514,6 +514,8 @@ main { flex: 1; min-height: 0; display: flex; }
   let notes = []
   let sharingOn = false   // a server where people sign in: notebooks can be shared with them
   let publicLinksOn = false  // and links anyone can open are allowed there
+  let hostedLinksOn = false  // the desktop app: links hosted by Tensflare
+  let signedIn = false
   let me = null           // the signed-in person's email
   let seenAt = 0          // the open notebook's updatedAt when its notes were last loaded
 
@@ -527,6 +529,8 @@ main { flex: 1; min-height: 0; display: flex; }
     notebooks = data.notebooks
     sharingOn = !!data.sharing
     publicLinksOn = !!data.publicLinks
+    hostedLinksOn = !!data.hostedLinks
+    signedIn = !!data.signedIn
     me = data.me
     const wanted = params.get('notebook') || store.get('duct.notebook')
     nb = notebooks.some(b => b.id === wanted) ? wanted : (notebooks.find(b => !sharedWithMe(b))?.id || notebooks[0]?.id || '')
@@ -775,6 +779,7 @@ main { flex: 1; min-height: 0; display: flex; }
     } else if (sharingOn && sharedWithMe(b)) {
       panel.append(h('p', { class: 'hint', text: b.owner + ' shared this notebook with you. Only they can change who can see it.' }), h('div', { class: 'actions' }, h('button', { text: 'Copy link', onclick: copyLink })), h('hr', { class: 'sep' }))
     }
+    if (hostedLinksOn && b.role === 'owner') drawHostedLink(panel, b)
     panel.append(h('h3', { text: 'Send as a page' }),
       h('p', { class: 'hint', text: 'A single file anyone can open in a browser, even on a phone, without Duct. It holds the quotes, document names, pages and comments: never the documents themselves or where they’re kept.' }),
       h('div', { class: 'actions' }, h('button', { text: 'Save the page', onclick: () => exportAs('html') })))
@@ -799,6 +804,40 @@ main { flex: 1; min-height: 0; display: flex; }
         h('div', { class: 'actions' }, h('button', { text: 'Create a public link', onclick: () => setPublic(true) })))
     }
     panel.append(h('hr', { class: 'sep' }))
+  }
+
+  /** The desktop app: a link anyone can open, hosted by Tensflare for 7, 30 or 90 days. Says plainly what's uploaded. */
+  function drawHostedLink(panel, b) {
+    panel.append(h('h3', { text: 'Link anyone can open' }))
+    if (b.hostedLink) {
+      const until = new Date(b.hostedLink.expiresAt).toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' })
+      const field = h('input', { value: b.hostedLink.url, readonly: true, 'aria-label': 'Link', onfocus: e => e.target.select() })
+      panel.append(h('div', { class: 'add' }, field, h('button', { text: 'Copy', onclick: async () => {
+        try { await navigator.clipboard.writeText(b.hostedLink.url); toast('Link copied') } catch { field.select() }
+      } })),
+      h('p', { class: 'hint', text: 'Works until ' + until + ', then Tensflare deletes it. Changes you make here aren’t in the link until you make a new one.' }),
+      h('div', { class: 'actions' },
+        h('button', { text: 'New link', title: 'Upload the notebook as it is now; the old link stops working', onclick: () => setHosted(true) }),
+        h('button', { text: 'Take down', onclick: () => setHosted(false) })))
+    } else {
+      const days = h('select', { 'aria-label': 'How long the link works' }, h('option', { value: '7', text: 'for 7 days' }), h('option', { value: '30', text: 'for 30 days' }), h('option', { value: '90', text: 'for 90 days' }))
+      days.value = '30'
+      panel.append(h('p', { class: 'hint', text: 'Uploads this notebook to Tensflare so anyone with the link can read it, on any device. Only the quotes, document names, pages and your comments go: never the documents, where they’re kept, or anything else on this computer. It’s deleted when the link expires or you take it down.' }))
+      if (!signedIn) panel.append(h('p', { class: 'hint', text: 'You’ll need to sign in with a Tensflare account first, in Settings › Account. It’s free.' }))
+      panel.append(h('div', { class: 'actions' }, days, h('button', { text: 'Upload and make a link', onclick: () => setHosted(true, days.value) })))
+    }
+    panel.append(h('hr', { class: 'sep' }))
+  }
+
+  async function setHosted(on, days) {
+    const b = current()
+    try {
+      const url = '/api/notebooks/' + encodeURIComponent(nb) + '/hosted-link'
+      const res = await (await api(url, on ? json('POST', { days: Number(days || 30) }) : { method: 'DELETE' })).json()
+      b.hostedLink = res.hostedLink
+      drawShare()
+      toast(on ? 'Link ready. Anyone with it can read this notebook.' : 'Link taken down. Tensflare has deleted what was on it.')
+    } catch (err) { toast(err.message, true) }
   }
 
   async function setPublic(on) {

@@ -303,6 +303,11 @@ export class Duct {
     return token
   }
 
+  /** Records (or with null forgets) a notebook's link hosted by Tensflare. */
+  setNotebookHostedLink(id: string, hosted: Notebook['hosted']): void {
+    if (!this.store.setHostedLink(id, hosted)) throw new Error('Notebook not found')
+  }
+
   /** The notebook a public link opens (counting the view), or undefined if the link was turned off. */
   openPublicNotebook(token: string): Notebook | undefined {
     return /^[\w-]{16,64}$/.test(token) ? this.store.openPublicNotebook(token) : undefined

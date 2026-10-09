@@ -882,13 +882,13 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
   /** What the caller may do with each notebook they may know about, with the sharing list for owners only. */
   const notebookView = (nb: Notebook, role: NotebookRole, res: express.Response) => {
     // The public link's secret and its view count are the owner's to see.
-    const { publicToken, publicViews, ...rest } = nb
+    const { publicToken, publicViews, hosted, ...rest } = nb
     return {
       ...rest,
       notes: res.locals.viewer ? visibleNotes(duct.listNotes(nb.id), res).length : nb.notes,
       role,
       sharing: role === 'owner' ? nb.sharing : [],
-      ...(role === 'owner' ? { publicLink: publicToken ? `/n/${publicToken}` : null, publicViews } : {}),
+      ...(role === 'owner' ? { publicLink: publicToken ? `/n/${publicToken}` : null, publicViews, hostedLink: hosted && hosted.expiresAt > Date.now() ? { url: hosted.url, expiresAt: hosted.expiresAt } : null } : {}),
     }
   }
   /** Public links need a server people sign in to (so there's an owner who chose to publish) and the switch on. */
@@ -921,7 +921,8 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
       return role ? [notebookView(nb, role, res)] : []
     })
     // `sharing`: whether notebooks can be shared with people here (a server with sign-in).
-    res.json({ notebooks, sharing: !!oidc, publicLinks: publicLinksOn(), me: emailOf(res) ?? null })
+    // hostedLinks: whether this install can publish links hosted by Tensflare (it has an account to sign in with).
+    res.json({ notebooks, sharing: !!oidc, publicLinks: publicLinksOn(), hostedLinks: !!account && !oidc, signedIn: !!account?.status().signedIn, me: emailOf(res) ?? null })
   })
 
   app.post('/api/notebooks', (req, res) => {
@@ -969,6 +970,39 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     audit(res, 'notes', undefined, 'made a public link to a notebook')
     res.status(201).json({ publicLink: `/n/${token}`, publicViews: 0 })
   })
+  // A link hosted by Tensflare, for the desktop app where this server can't be reached by others. Sends the
+  // notebook's name, quotes, document names, pages and comments (the notes this person can see; never paths or
+  // who added them) to the account service. { days: 7 | 30 | 90 }. A new link replaces the old one.
+  app.post('/api/notebooks/:id/hosted-link', async (req, res) => {
+    if (!account || oidc) { res.status(400).json({ error: oidc ? 'On a team server, use a public link instead.' : 'Links hosted by Tensflare need the Duct app.' }); return }
+    if (!account.status().signedIn) { res.status(409).json({ error: 'Sign in with your Tensflare account first (Settings › Account). It’s free.', code: 'signin' }); return }
+    const found = notebookFor(req.params.id, res, 'owner')
+    if (!found) return
+    const days = [7, 30, 90].includes(Number(req.body?.days)) ? Number(req.body.days) : 30
+    const notes = visibleNotes(duct.listNotes(found.nb.id), res)
+    if (!notes.length) { res.status(400).json({ error: 'This notebook has no notes yet' }); return }
+    const shared = sharedFrom(found.nb.name, notes, f => pageLabel(f as DocumentFormat))
+    try {
+      const made = await account.publishNotebook({ name: shared.name, notes: shared.notes.map(({ author: _a, format: _f, ...n }) => n) }, days)
+      if (found.nb.hosted) await account.removeNotebookLink(found.nb.hosted.id).catch(() => {})
+      const hosted = { id: made.id, url: made.url, expiresAt: Date.parse(made.expiresAt) || Date.now() + days * 86_400_000 }
+      duct.setNotebookHostedLink(found.nb.id, hosted)
+      audit(res, 'notes', undefined, `published a notebook link for ${days} days`)
+      res.status(201).json({ hostedLink: { url: hosted.url, expiresAt: hosted.expiresAt } })
+    } catch (err) {
+      sendError(res, err, (err as { status?: number }).status ?? 502)
+    }
+  })
+  app.delete('/api/notebooks/:id/hosted-link', async (req, res) => {
+    const found = notebookFor(req.params.id, res, 'owner')
+    if (!found) return
+    if (found.nb.hosted && account) {
+      try { await account.removeNotebookLink(found.nb.hosted.id) } catch (err) { sendError(res, err, 502); return }
+    }
+    duct.setNotebookHostedLink(found.nb.id, null)
+    res.json({ hostedLink: null })
+  })
+
   app.delete('/api/notebooks/:id/public-link', (req, res) => {
     if (!notebookFor(req.params.id, res, 'owner')) return
     duct.setNotebookPublic(req.params.id, false)

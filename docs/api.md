@@ -389,6 +389,7 @@ Without sign-in (the desktop app, a token-only server) notebooks belong to every
 | `POST /api/notebooks` | `{ "name" }` → `201 { notebook }`, owned by the signed-in person |
 | `PUT /api/notebooks/:id/sharing` | Owner only, on a server with sign-in. `{ "sharing": [{ "to": "ada@okafor.ng" \| "okafor.ng" \| "anyone", "can": "view" \| "edit" }] }` replaces the list |
 | `POST /api/notebooks/:id/public-link` | Owner only, on a server with sign-in and the `publicLinks` feature on: `201 { publicLink: "/n/<token>", publicViews: 0 }`. A new link replaces the old one. `DELETE` turns it off |
+| `POST /api/notebooks/:id/hosted-link` | The desktop app, signed in with a Tensflare account: `{ days: 7 \| 30 \| 90 }` → `201 { hostedLink: { url, expiresAt } }`. Uploads the notebook's quotes, document names, pages and comments (no paths or authors). `409 { code: "signin" }` when not signed in. `DELETE` takes it down |
 | `GET /n/:token` | The notebook's public page, no sign-in: the notes its owner can see, without who added them; `noindex`; 404 once the link is off |
 | `POST /api/notebooks/import` | `{ "content": "<text of a shared .html page or a JSON export>" }` → `201 { notebook }`. Notes are matched by document name to documents the caller can open; others keep their name and quote |
 | `PATCH /api/notebooks/:id` | `{ "name" }` renames |

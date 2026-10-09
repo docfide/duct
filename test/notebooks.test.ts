@@ -392,3 +392,57 @@ describe('a notebook as a page to send', () => {
     }
   })
 })
+
+describe('links hosted by Tensflare, from the desktop app', () => {
+  it('uploads only quotes, names, pages and comments, replaces old links, and takes them down', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'duct-hosted-'))
+    const lease = join(dir, 'lease.md')
+    writeFileSync(lease, 'The tenant may terminate this lease with 60 days written notice.')
+    const duct = new Duct({ embed: false })
+    await duct.index(lease)
+    let signedIn = false
+    const published: unknown[] = []
+    const removed: string[] = []
+    const account = {
+      status: () => ({ signedIn, plan: 'free', entitlements: [], limits: {} }),
+      publishNotebook: async (notebook: unknown, days: number) => { published.push({ notebook, days }); const id = `link${published.length}`.padEnd(22, 'x'); return { id, url: `https://accounts.tensflare.com/n/${id}`, expiresAt: '2026-11-08T00:00:00.000Z' } },
+      removeNotebookLink: async (id: string) => { removed.push(id) },
+    } as never
+    const server = createServer(duct, { libraryDir: join(dir, 'library'), account }).listen(0, '127.0.0.1')
+    await new Promise(resolve => server.once('listening', resolve))
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    const call = async (method: string, path: string, body?: unknown) => {
+      const res = await fetch(base + path, { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) })
+      return { status: res.status, json: await res.json() }
+    }
+    try {
+      const nb = duct.createNotebook('For Bola')
+      duct.addNote(nb.id, { path: lease, quote: '60 days written notice', page: 2, comment: 'Check this', author: 'ada@okafor.ng' })
+      expect((await call('GET', '/api/notebooks')).json).toMatchObject({ hostedLinks: true, signedIn: false })
+
+      const refused = await call('POST', `/api/notebooks/${nb.id}/hosted-link`, { days: 7 })
+      expect(refused.status).toBe(409)
+      expect(refused.json.code).toBe('signin')
+      expect(published).toHaveLength(0)
+
+      signedIn = true
+      const made = await call('POST', `/api/notebooks/${nb.id}/hosted-link`, { days: 7 })
+      expect(made.status).toBe(201)
+      expect(made.json.hostedLink.url).toMatch(/^https:\/\/accounts\.tensflare\.com\/n\//)
+      expect(published[0]).toEqual({ days: 7, notebook: { name: 'For Bola', notes: [{ quote: '60 days written notice', doc: 'lease.md', page: 2, pageLabel: 'p.', comment: 'Check this' }] } })
+      expect(JSON.stringify(published)).not.toContain(dir)            // no paths
+      expect(JSON.stringify(published)).not.toContain('ada@okafor.ng') // no authors
+
+      await call('POST', `/api/notebooks/${nb.id}/hosted-link`, { days: 30 })
+      expect(removed).toEqual(['link1'.padEnd(22, 'x')])              // the new link replaced the old one
+      expect((await call('GET', '/api/notebooks')).json.notebooks[0].hostedLink.url).toContain('link2')
+
+      expect((await call('DELETE', `/api/notebooks/${nb.id}/hosted-link`)).status).toBe(200)
+      expect(removed).toHaveLength(2)
+      expect((await call('GET', '/api/notebooks')).json.notebooks[0].hostedLink).toBeNull()
+    } finally {
+      server.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})

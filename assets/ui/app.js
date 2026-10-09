@@ -1621,7 +1621,7 @@ async function renderTelemetry() {
 // ---------- privacy ledger ----------
 
 const LEDGER_WHAT = {
-  tensflare: 'Sign-in checks, the anonymous usage count if it’s on, feedback you chose to send, and hosted AI questions. Never your files.',
+  tensflare: 'Sign-in checks, the anonymous usage count if it’s on, feedback you chose to send, hosted AI questions, and notebooks you chose to share as a link. Never your files.',
   ai: 'The question and the passages needed to answer it, or text to index for search by meaning: only because you chose this provider.',
   cloud: 'Requests to read the sources you connected. Files come in; nothing of yours goes out.',
   signin: 'Signing in to a service you connected.',

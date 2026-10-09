@@ -299,6 +299,26 @@ export class TensflareAccount {
     return res.json() as Promise<BillingSummary>
   }
 
+  /**
+   * Publishes a notebook as a link anyone can open, hosted by Tensflare for `days` (7, 30 or 90). Only the name,
+   * quotes, document names, pages and comments are sent (`SharedNotebook` without authors).
+   */
+  async publishNotebook(notebook: { name: string; notes: { quote: string; doc: string; page?: number; pageLabel?: string; comment?: string }[] }, days: number): Promise<{ id: string; url: string; expiresAt: string }> {
+    const res = await this.fetchImpl(`${this.apiUrl}/v1/notebooks`, {
+      method: 'POST', headers: { Authorization: `Bearer ${await this.accessToken()}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ notebook, days }), signal: AbortSignal.timeout(30_000),
+    })
+    const body = await res.json().catch(() => ({})) as { id?: string; url?: string; expires_at?: string; error?: string }
+    if (!res.ok || !body.id || !body.url?.startsWith('https://')) throw Object.assign(new Error(body.error || `Couldn’t make the link (HTTP ${res.status})`), { status: res.status === 429 ? 429 : 502 })
+    return { id: body.id, url: body.url, expiresAt: body.expires_at ?? '' }
+  }
+
+  /** Takes a published notebook link down; Tensflare deletes what was on it. Already gone counts as done. */
+  async removeNotebookLink(id: string): Promise<void> {
+    const res = await this.fetchImpl(`${this.apiUrl}/v1/notebooks/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { Authorization: `Bearer ${await this.accessToken()}` }, signal: AbortSignal.timeout(15_000) })
+    if (!res.ok && res.status !== 404) throw new Error(`Couldn’t take the link down (HTTP ${res.status})`)
+  }
+
   /** A one-time link that opens the account website signed in, at `next` (e.g. /account/upgrade). */
   async webLink(next = '/account'): Promise<string> {
     const res = await this.fetchImpl(`${this.apiUrl}/v1/web-login`, {
