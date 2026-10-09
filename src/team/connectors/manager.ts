@@ -42,6 +42,8 @@ export interface ConnectorInfo {
   owner?: string
   /** Sharing must be read again for files that haven't changed (after switching to `source`). */
   recheckAccess?: boolean
+  /** When every file's sharing was last read again (Microsoft, whose change feed doesn't report sharing). */
+  accessCheckedAt?: number
   /** SharePoint: the site's document library; OneDrive and Google: unset. */
   drive?: string
   cursor: string | null
@@ -53,6 +55,13 @@ export interface ConnectorInfo {
 }
 
 export const MAX_FILE_BYTES = 100 * 1024 * 1024
+
+/**
+ * How often a Microsoft source that follows sharing reads every file's sharing again. Graph's delta feed reports
+ * edits, not sharing changes, so without this a file un-shared at the source would stay visible to the people
+ * removed from it until someone edited it. Google's change feed carries sharing, so Drive doesn't need it.
+ */
+export const ACCESS_RECHECK_MS = 6 * 60 * 60 * 1000
 
 export interface ConnectorOptions {
   dir: string
@@ -67,6 +76,7 @@ export interface ConnectorOptions {
   defaultVisibility?: Visibility
   /** On a server in the cloud: sign-ins come back to <public-url>/connectors/callback instead of a loopback port. */
   web?: WebCallback
+  now?: () => number
 }
 
 export class ConnectorManager {
@@ -90,7 +100,7 @@ export class ConnectorManager {
   }
 
   list() {
-    return this.state.map(({ files, cursor: _c, recheckAccess: _r, ...c }) => ({ ...c, visibility: c.visibility ?? 'everyone', fileCount: Object.keys(files).length, filesDir: this.filesDir(c.id) }))
+    return this.state.map(({ files, cursor: _c, recheckAccess: _r, accessCheckedAt: _a, ...c }) => ({ ...c, visibility: c.visibility ?? 'everyone', fileCount: Object.keys(files).length, filesDir: this.filesDir(c.id) }))
   }
 
   private localPath(c: ConnectorInfo, remoteId: string, name: string): string {
@@ -197,17 +207,30 @@ export class ConnectorManager {
         for (const known of Object.keys(c.files)) if (!listed.has(known)) changes.removed.push(known)
       }
       for (const remoteId of changes.removed) await this.removeFile(c, remoteId)
+      const followsSharing = (c.visibility ?? 'everyone') === 'source'
+      const now = (this.opts.now ?? Date.now)()
+      // Microsoft: every few hours, every file's sharing is read again (see ACCESS_RECHECK_MS).
+      const sweep = followsSharing && c.kind === 'microsoft' && !!src.access && now - (c.accessCheckedAt ?? 0) >= ACCESS_RECHECK_MS
+      const recheck = async (f: RemoteFile, known: ConnectorInfo['files'][string]) => {
+        // Google lists sharing with each file; Microsoft's is read for each file the feed returns, and in a sweep.
+        const reread = !!src.access && (c.kind === 'microsoft' || sweep || (c.recheckAccess && known.access === undefined))
+        const access = f.access ?? (reread ? await src.access!(f) : known.access)
+        if (JSON.stringify(access) !== JSON.stringify(known.access)) { known.access = access; this.applyAccess(c, f.id) }
+      }
+      const listed = new Set<string>()
       for (const f of changes.upserts) {
+        listed.add(f.id)
         const known = c.files[f.id]
         if (known?.version === f.version) {
           // Unchanged content, but sharing can change on its own: keep the access list current.
-          if ((c.visibility ?? 'everyone') === 'source') {
-            const access = f.access ?? (c.recheckAccess && known.access === undefined && src.access ? await src.access(f) : known.access)
-            if (JSON.stringify(access) !== JSON.stringify(known.access)) { known.access = access; this.applyAccess(c, f.id) }
-          }
+          if (followsSharing) await recheck(f, known)
           continue
         }
         try { await this.fetchFile(c, src, f) } catch (err) { c.error = `Some files couldn’t be read: ${(err as Error).message}` }
+      }
+      if (sweep) {
+        for (const [id, known] of Object.entries(c.files)) if (!listed.has(id)) await recheck({ id, name: known.name, modified: '', version: known.version }, known)
+        c.accessCheckedAt = now
       }
       if (c.recheckAccess && (c.kind !== 'gdrive' || changes.full)) delete c.recheckAccess
       c.cursor = changes.cursor

@@ -223,6 +223,41 @@ describe('OneDrive and SharePoint', () => {
     expect(manager.list()[0].fileCount).toBe(1)
     await expect(manager.add('microsoft', { siteUrl: 'https://evil.example/sites/x' })).rejects.toThrow(/SharePoint/)
   })
+
+  it('notices when a file is un-shared, though Graph’s change feed doesn’t report it', async () => {
+    let clock = Date.parse('2026-10-09T09:00:00Z')
+    let shared = ['chidi@okafor.ng']
+    let deltaRound = 0
+    let permissionCalls = 0
+    const graphFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input)
+      if (url.startsWith('https://login.microsoftonline.com/')) return json({ access_token: 'ms-access', refresh_token: 'ms-refresh', expires_in: 3600 })
+      if (url.includes('/me?')) return json({ mail: 'ada@okafor.ng' })
+      if (url.includes('/root/delta?$select')) return json({ value: [{ id: '7', name: 'Salary review.txt', file: {}, cTag: 'c1' }], '@odata.deltaLink': 'https://graph.microsoft.com/v1.0/me/drive/root/delta?token=d1' })
+      // Later rounds: nothing edited, so the feed is empty, as it is when only sharing changes.
+      if (url.includes('token=d')) { deltaRound++; return json({ value: [], '@odata.deltaLink': `https://graph.microsoft.com/v1.0/me/drive/root/delta?token=d${deltaRound + 1}` }) }
+      if (url.endsWith('/items/7/permissions')) { permissionCalls++; return json({ value: shared.map(email => ({ grantedToV2: { user: { email } } })) }) }
+      if (url.includes('/items/7/content')) return new Response('The salary review for 2027 is attached.')
+      void init
+      return json({}, 404)
+    }) as typeof fetch
+    const duct = new Duct({ embed: false })
+    const manager = new ConnectorManager(duct, { dir: mkdtempSync(join(work, 'ms-')), vault: new MemoryVault(), clientIds: { microsoft: { clientId: 'mid' } }, openUrl: browser, fetch: graphFetch, entitled: () => true, defaultVisibility: 'source', now: () => clock })
+    const c = await manager.add('microsoft')
+    await manager.sync(c.id)
+    const chidi = ['user:chidi@okafor.ng', 'domain:okafor.ng', 'anyone']
+    expect(await duct.search('salary', 10, undefined, { viewer: chidi })).toHaveLength(1)
+
+    shared = []   // un-shared in Microsoft 365; the file itself is untouched
+    clock += 60 * 60 * 1000
+    await manager.sync(c.id)
+    expect(permissionCalls).toBe(1)   // within the interval, nothing is read again
+    clock += 6 * 60 * 60 * 1000
+    await manager.sync(c.id)
+    expect(permissionCalls).toBe(2)
+    expect(await duct.search('salary', 10, undefined, { viewer: chidi })).toHaveLength(0)
+    expect(await duct.search('salary', 10, undefined, { viewer: ['user:ada@okafor.ng', 'domain:okafor.ng', 'anyone'] })).toHaveLength(1)   // who connected it
+  })
 })
 
 // ---------- a fake S3 bucket that checks Signature Version 4 ----------
