@@ -207,6 +207,9 @@ const FEATURE_GROUPS = [
     ['diff', 'Compare versions', 'Show what changed between the last two versions of a document.'],
     ['deadlines', 'Deadlines radar', 'Expiry, due and renewal dates from your documents on the home screen, worked out on this computer.'],
   ] },
+  { title: 'Sharing', items: [
+    ['publicLinks', 'Public notebook links', 'On a server where people sign in, a notebook’s owner can make a link anyone can open without signing in.'],
+  ] },
   { title: 'Developers', items: [
     ['developerApi', 'Developer API', 'The /v1 API for apps: collections, API keys, and indexing your own text by id.'],
   ] },
@@ -851,7 +854,8 @@ async function renderNotebooks() {
     if (!data.sharing) return ''
     if (shared(b)) return '<span class="nb-share">' + (b.role === 'view' ? 'Can read' : 'Can edit') + ' · from ' + esc(b.owner) + '</span>'
     if (!b.owner) return '<span class="nb-share">Everyone</span>'
-    return b.sharing.length ? '<span class="nb-share">Shared with ' + (b.sharing.length === 1 ? esc(b.sharing[0].to.replace(/^(user|domain):/, '').replace(/^anyone$/, 'everyone')) : b.sharing.length) + '</span>' : '<span class="nb-share">Only you</span>'
+    const pub = b.publicLink ? '<span class="nb-share nb-public">Public link</span>' : ''
+    return pub + (b.sharing.length ? '<span class="nb-share">Shared with ' + (b.sharing.length === 1 ? esc(b.sharing[0].to.replace(/^(user|domain):/, '').replace(/^anyone$/, 'everyone')) : b.sharing.length) + '</span>' : (pub ? '' : '<span class="nb-share">Only you</span>'))
   }
   const row = b => '<button class="nb-row" data-notebook="' + esc(b.id) + '"><span class="nb-name">' + esc(b.name) + '</span>' + access(b) +
     '<span class="nb-meta">' + plural(b.notes, 'note') + ' · ' + timeAgo(b.updatedAt) + '</span></button>'

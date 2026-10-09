@@ -513,6 +513,7 @@ main { flex: 1; min-height: 0; display: flex; }
   let nb = ''
   let notes = []
   let sharingOn = false   // a server where people sign in: notebooks can be shared with them
+  let publicLinksOn = false  // and links anyone can open are allowed there
   let me = null           // the signed-in person's email
   let seenAt = 0          // the open notebook's updatedAt when its notes were last loaded
 
@@ -525,6 +526,7 @@ main { flex: 1; min-height: 0; display: flex; }
     const data = await (await api('/api/notebooks')).json()
     notebooks = data.notebooks
     sharingOn = !!data.sharing
+    publicLinksOn = !!data.publicLinks
     me = data.me
     const wanted = params.get('notebook') || store.get('duct.notebook')
     nb = notebooks.some(b => b.id === wanted) ? wanted : (notebooks.find(b => !sharedWithMe(b))?.id || notebooks[0]?.id || '')
@@ -769,6 +771,7 @@ main { flex: 1; min-height: 0; display: flex; }
         h('p', { class: 'hint', text: 'People only see notes from documents they can open themselves.' }),
         h('div', { class: 'actions' }, h('button', { text: 'Copy link', onclick: copyLink })),
         h('hr', { class: 'sep' }))
+      if (publicLinksOn) drawPublicLink(panel, b)
     } else if (sharingOn && sharedWithMe(b)) {
       panel.append(h('p', { class: 'hint', text: b.owner + ' shared this notebook with you. Only they can change who can see it.' }), h('div', { class: 'actions' }, h('button', { text: 'Copy link', onclick: copyLink })), h('hr', { class: 'sep' }))
     }
@@ -776,6 +779,37 @@ main { flex: 1; min-height: 0; display: flex; }
       h('p', { class: 'hint', text: 'A single file anyone can open in a browser, even on a phone, without Duct. It holds the quotes, document names, pages and comments: never the documents themselves or where they’re kept.' }),
       h('div', { class: 'actions' }, h('button', { text: 'Save the page', onclick: () => exportAs('html') })))
     if (!sharingOn) panel.append(h('p', { class: 'hint', text: 'Working on it together? On a Duct team server, notebooks can be shared with people, who add to them as you do.' }))
+  }
+
+  /** A link anyone can open without signing in: create it, copy it, see how often it was opened, turn it off. */
+  function drawPublicLink(panel, b) {
+    panel.append(h('h3', { text: 'Public link' }))
+    if (b.publicLink) {
+      const url = new URL(b.publicLink, location.href).toString()
+      const field = h('input', { value: url, readonly: true, 'aria-label': 'Public link', onfocus: e => e.target.select() })
+      panel.append(h('div', { class: 'add' }, field, h('button', { text: 'Copy', onclick: async () => {
+        try { await navigator.clipboard.writeText(url); toast('Public link copied') } catch { field.select() }
+      } })),
+      h('p', { class: 'hint', text: 'Anyone with this link can read the notebook. ' + (b.publicViews === 1 ? 'Opened once.' : 'Opened ' + (b.publicViews || 0) + ' times.') }),
+      h('div', { class: 'actions' },
+        h('button', { text: 'New link', title: 'Make a new link; the old one stops working', onclick: () => setPublic(true) }),
+        h('button', { text: 'Turn off', onclick: () => setPublic(false) })))
+    } else {
+      panel.append(h('p', { class: 'hint', text: 'A link anyone can open without signing in, served by this server. It shows every note here, including quotes from documents only you can open, and leaves out who added them.' }),
+        h('div', { class: 'actions' }, h('button', { text: 'Create a public link', onclick: () => setPublic(true) })))
+    }
+    panel.append(h('hr', { class: 'sep' }))
+  }
+
+  async function setPublic(on) {
+    const b = current()
+    try {
+      const res = await (await api('/api/notebooks/' + encodeURIComponent(nb) + '/public-link', { method: on ? 'POST' : 'DELETE' })).json()
+      b.publicLink = res.publicLink
+      b.publicViews = res.publicViews || 0
+      drawShare()
+      toast(on ? 'Public link ready. Anyone with it can read this notebook.' : 'Public link turned off. It no longer opens.')
+    } catch (err) { toast(err.message, true) }
   }
 
   async function copyLink() {

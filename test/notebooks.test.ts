@@ -283,6 +283,50 @@ describe('shared notebooks on a server where people sign in', () => {
     expect(page.text).not.toContain('eight percent')
   })
 
+  it('a public link opens the notebook for anyone, as its owner sees it, without saying who wrote what', async () => {
+    const id = (await ada('POST', '/api/notebooks', { name: 'Public brief' })).json.notebook.id
+    await ada('POST', `/api/notebooks/${id}/notes`, { path: lease, quote: 'The tenant may terminate', comment: 'Ada’s comment' })
+    await ada('POST', `/api/notebooks/${id}/notes`, { path: salaries, quote: 'rises by eight percent' })
+    expect((await ben('POST', `/api/notebooks/${id}/public-link`)).status).toBe(404)  // not his to see, let alone publish
+
+    const made = await ada('POST', `/api/notebooks/${id}/public-link`)
+    expect(made.status).toBe(201)
+    const link = made.json.publicLink as string
+    expect(link).toMatch(/^\/n\/[\w-]{24}$/)
+
+    const page = await fetch(base + link)  // no sign-in
+    const html = await page.text()
+    expect(page.status).toBe(200)
+    expect(page.headers.get('content-security-policy')).toContain("default-src 'none'")
+    expect(page.headers.get('x-robots-tag')).toBe('noindex, nofollow')
+    expect(html).toContain('The tenant may terminate')
+    expect(html).toContain('rises by eight percent')   // Ada can open the salary review, and chose to publish
+    expect(html).toContain('Ada’s comment')
+    expect(html).not.toContain('ada@okafor.ng')         // no names of who added notes, or who shared
+
+    await fetch(base + link)
+    const listed = (await ada('GET', '/api/notebooks')).json
+    expect(listed.publicLinks).toBe(true)
+    expect(listed.notebooks.find((b: { id: string }) => b.id === id)).toMatchObject({ publicLink: link, publicViews: 2 })
+    await ada('PUT', `/api/notebooks/${id}/sharing`, { sharing: [{ to: 'ben@okafor.ng' }] })
+    const forBen = (await ben('GET', '/api/notebooks')).json.notebooks.find((b: { id: string }) => b.id === id)
+    expect(forBen.publicLink).toBeUndefined()           // the link is the owner's to hand out
+    expect(forBen.publicToken).toBeUndefined()
+
+    // A new link replaces the old; turning it off ends it.
+    const again = (await ada('POST', `/api/notebooks/${id}/public-link`)).json.publicLink
+    expect((await fetch(base + link)).status).toBe(404)
+    await ada('DELETE', `/api/notebooks/${id}/public-link`)
+    expect((await fetch(base + again)).status).toBe(404)
+
+    // Admins can switch public links off for the whole server.
+    const relink = (await ada('POST', `/api/notebooks/${id}/public-link`)).json.publicLink
+    duct.setFeatures({ publicLinks: false })
+    expect((await fetch(base + relink)).status).toBe(404)
+    expect((await ada('POST', `/api/notebooks/${id}/public-link`)).status).toBe(403)
+    duct.setFeatures({ publicLinks: true })
+  })
+
   it('notebooks from before sharing stay everyone’s', async () => {
     const old = duct.createNotebook('From 0.x')
     expect((await ben('GET', `/api/notebooks/${old.id}/notes`)).json.notebook.role).toBe('edit')
@@ -338,6 +382,10 @@ describe('a notebook as a page to send', () => {
       expect(got.map(n => n.path)).toEqual(['shared:MSA <final>.pdf', lease])
       expect(got[0]).toMatchObject({ page: 4, comment: 'Line one\nLine two', author: 'ada@okafor.ng' })
       expect((await post({ content: 'hello' })).status).toBe(400)
+      // Public links need a server where people sign in; here the page file is the way to share.
+      const refused = await fetch(`${base}/api/notebooks/${notebook.id}/public-link`, { method: 'POST' })
+      expect(refused.status).toBe(403)
+      expect((await refused.json()).error).toMatch(/send the notebook as a page/)
     } finally {
       server.close()
       rmSync(dir, { recursive: true, force: true })

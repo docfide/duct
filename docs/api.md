@@ -388,6 +388,8 @@ Without sign-in (the desktop app, a token-only server) notebooks belong to every
 | `GET /api/notebooks` | `{ notebooks, sharing, me }`: the notebooks the caller can see, with note counts and `role`, most recently changed first. `sharing` says whether this server can share with people; `me` is the signed-in email |
 | `POST /api/notebooks` | `{ "name" }` → `201 { notebook }`, owned by the signed-in person |
 | `PUT /api/notebooks/:id/sharing` | Owner only, on a server with sign-in. `{ "sharing": [{ "to": "ada@okafor.ng" \| "okafor.ng" \| "anyone", "can": "view" \| "edit" }] }` replaces the list |
+| `POST /api/notebooks/:id/public-link` | Owner only, on a server with sign-in and the `publicLinks` feature on: `201 { publicLink: "/n/<token>", publicViews: 0 }`. A new link replaces the old one. `DELETE` turns it off |
+| `GET /n/:token` | The notebook's public page, no sign-in: the notes its owner can see, without who added them; `noindex`; 404 once the link is off |
 | `POST /api/notebooks/import` | `{ "content": "<text of a shared .html page or a JSON export>" }` → `201 { notebook }`. Notes are matched by document name to documents the caller can open; others keep their name and quote |
 | `PATCH /api/notebooks/:id` | `{ "name" }` renames |
 | `DELETE /api/notebooks/:id` | Deletes the notebook and its notes |

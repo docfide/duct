@@ -34,7 +34,7 @@ export function sharedFrom(name: string, notes: Note[], pageLabel: (format: stri
   }
 }
 
-export function notebookPage(nb: SharedNotebook, opts: { sharedBy?: string; date?: Date } = {}): string {
+export function notebookPage(nb: SharedNotebook, opts: { sharedBy?: string; date?: Date; noindex?: boolean } = {}): string {
   const date = (opts.date ?? new Date()).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })
   const docs = new Set(nb.notes.map(n => n.doc)).size
   const count = `${nb.notes.length} ${nb.notes.length === 1 ? 'quote' : 'quotes'} from ${docs} ${docs === 1 ? 'document' : 'documents'}`
@@ -53,7 +53,7 @@ export function notebookPage(nb: SharedNotebook, opts: { sharedBy?: string; date
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
-<meta name="generator" content="Duct">
+<meta name="generator" content="Duct">${opts.noindex ? '\n<meta name="robots" content="noindex, nofollow">' : ''}
 <title>${esc(nb.name)}</title>
 <style>
 :root { --bg: #FBFAF6; --card: #FFFFFF; --text: #1B1B19; --muted: #6B6B66; --line: #E6E4DC; --accent: #4D7C0F; --mark: #A3E635; color-scheme: light dark; }

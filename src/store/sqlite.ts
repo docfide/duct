@@ -58,6 +58,10 @@ export interface Notebook {
   owner: string | null
   /** Who else it's shared with ("user:…", "domain:…", "anyone") and whether they may edit. */
   sharing: NotebookShare[]
+  /** The secret in its public link (/n/<token>), when it has one. */
+  publicToken: string | null
+  /** How many times the public link was opened. Nothing about who opened it is kept. */
+  publicViews: number
 }
 export interface Note {
   id: string
@@ -363,6 +367,8 @@ export class SqliteStore {
         name TEXT NOT NULL,
         owner TEXT,
         sharing TEXT NOT NULL DEFAULT '[]',
+        public_token TEXT UNIQUE,
+        public_views INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
@@ -401,6 +407,7 @@ export class SqliteStore {
     const hasColumn = (table: string, name: string) => (this.db.prepare(`PRAGMA table_info(${table})`).all() as unknown as { name: string }[]).some(c => c.name === name)
     if (!hasColumn('notebooks', 'owner')) this.db.exec("ALTER TABLE notebooks ADD COLUMN owner TEXT; ALTER TABLE notebooks ADD COLUMN sharing TEXT NOT NULL DEFAULT '[]';")
     if (!hasColumn('notes', 'author')) this.db.exec('ALTER TABLE notes ADD COLUMN author TEXT;')
+    if (!hasColumn('notebooks', 'public_token')) this.db.exec('ALTER TABLE notebooks ADD COLUMN public_token TEXT; CREATE UNIQUE INDEX IF NOT EXISTS notebooks_public ON notebooks(public_token); ALTER TABLE notebooks ADD COLUMN public_views INTEGER NOT NULL DEFAULT 0;')
     this.db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run('schema_version', SCHEMA_VERSION)
   }
 
@@ -633,7 +640,7 @@ export class SqliteStore {
 
   listNotebooks(id?: string): Notebook[] {
     const rows = this.db.prepare(`
-      SELECT b.id, b.name, b.owner, b.sharing, b.created_at AS createdAt, b.updated_at AS updatedAt, count(n.id) AS notes
+      SELECT b.id, b.name, b.owner, b.sharing, b.public_token AS publicToken, b.public_views AS publicViews, b.created_at AS createdAt, b.updated_at AS updatedAt, count(n.id) AS notes
       FROM notebooks b LEFT JOIN notes n ON n.notebook_id = b.id
       ${id === undefined ? '' : 'WHERE b.id = ?'}
       GROUP BY b.id ORDER BY b.updated_at DESC
@@ -648,7 +655,20 @@ export class SqliteStore {
   createNotebook(id: string, name: string, owner: string | null = null): Notebook {
     const now = Date.now()
     this.db.prepare('INSERT INTO notebooks (id, name, owner, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run(id, name, owner, now, now)
-    return { id, name, owner, sharing: [], createdAt: now, updatedAt: now, notes: 0 }
+    return { id, name, owner, sharing: [], publicToken: null, publicViews: 0, createdAt: now, updatedAt: now, notes: 0 }
+  }
+
+  /** Gives a notebook a public link token, or (null) takes it away. A new token makes old links stop working. */
+  setPublicToken(id: string, token: string | null): boolean {
+    return this.db.prepare('UPDATE notebooks SET public_token = ?, public_views = 0 WHERE id = ?').run(token, id).changes > 0
+  }
+
+  /** The notebook a public link opens, counting the view. */
+  openPublicNotebook(token: string): Notebook | undefined {
+    const row = this.db.prepare('SELECT id FROM notebooks WHERE public_token = ?').get(token) as { id: string } | undefined
+    if (!row) return undefined
+    this.db.prepare('UPDATE notebooks SET public_views = public_views + 1 WHERE id = ?').run(row.id)
+    return this.getNotebook(row.id)
   }
 
   setNotebookSharing(id: string, sharing: NotebookShare[]): boolean {

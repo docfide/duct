@@ -296,6 +296,18 @@ export class Duct {
     return this.store.createNotebook(randomUUID(), cleanName(name, 'Untitled notebook'), owner?.toLowerCase() || null)
   }
 
+  /** Gives a notebook a new public link token (old links stop working), or with `on` false takes it away. */
+  setNotebookPublic(id: string, on: boolean): string | null {
+    const token = on ? randomBytes(18).toString('base64url') : null
+    if (!this.store.setPublicToken(id, token)) throw new Error('Notebook not found')
+    return token
+  }
+
+  /** The notebook a public link opens (counting the view), or undefined if the link was turned off. */
+  openPublicNotebook(token: string): Notebook | undefined {
+    return /^[\w-]{16,64}$/.test(token) ? this.store.openPublicNotebook(token) : undefined
+  }
+
   /** Replaces who a notebook is shared with. See `cleanSharing()` for what `sharing` may hold. */
   shareNotebook(id: string, sharing: unknown): NotebookShare[] {
     const nb = this.store.getNotebook(id)

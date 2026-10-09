@@ -880,12 +880,19 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
   }
 
   /** What the caller may do with each notebook they may know about, with the sharing list for owners only. */
-  const notebookView = (nb: Notebook, role: NotebookRole, res: express.Response) => ({
-    ...nb,
-    notes: res.locals.viewer ? visibleNotes(duct.listNotes(nb.id), res).length : nb.notes,
-    role,
-    sharing: role === 'owner' ? nb.sharing : [],
-  })
+  const notebookView = (nb: Notebook, role: NotebookRole, res: express.Response) => {
+    // The public link's secret and its view count are the owner's to see.
+    const { publicToken, publicViews, ...rest } = nb
+    return {
+      ...rest,
+      notes: res.locals.viewer ? visibleNotes(duct.listNotes(nb.id), res).length : nb.notes,
+      role,
+      sharing: role === 'owner' ? nb.sharing : [],
+      ...(role === 'owner' ? { publicLink: publicToken ? `/n/${publicToken}` : null, publicViews } : {}),
+    }
+  }
+  /** Public links need a server people sign in to (so there's an owner who chose to publish) and the switch on. */
+  const publicLinksOn = () => !!oidc && duct.getFeatures().publicLinks
 
   /** The notebook if the caller may do `needs` with it; otherwise answers 404 (they can't see it) or 403 and returns null. */
   const notebookFor = (id: string, res: express.Response, needs: NotebookRole): { nb: Notebook; role: NotebookRole } | null => {
@@ -914,7 +921,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
       return role ? [notebookView(nb, role, res)] : []
     })
     // `sharing`: whether notebooks can be shared with people here (a server with sign-in).
-    res.json({ notebooks, sharing: !!oidc, me: emailOf(res) ?? null })
+    res.json({ notebooks, sharing: !!oidc, publicLinks: publicLinksOn(), me: emailOf(res) ?? null })
   })
 
   app.post('/api/notebooks', (req, res) => {
@@ -951,6 +958,22 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     } catch (err) {
       sendError(res, err, 400)
     }
+  })
+
+  // A public link: anyone who has it can read the notebook, without signing in. Owner only; a new link replaces
+  // the old one. { on: false } (or DELETE) turns it off.
+  app.post('/api/notebooks/:id/public-link', (req, res) => {
+    if (!publicLinksOn()) { res.status(403).json({ error: oidc ? 'Public links are switched off on this server (Settings › Features).' : 'Public links need a Duct server where people sign in. On this computer, send the notebook as a page instead.' }); return }
+    if (!notebookFor(req.params.id, res, 'owner')) return
+    const token = duct.setNotebookPublic(req.params.id, true)!
+    audit(res, 'notes', undefined, 'made a public link to a notebook')
+    res.status(201).json({ publicLink: `/n/${token}`, publicViews: 0 })
+  })
+  app.delete('/api/notebooks/:id/public-link', (req, res) => {
+    if (!notebookFor(req.params.id, res, 'owner')) return
+    duct.setNotebookPublic(req.params.id, false)
+    audit(res, 'notes', undefined, 'turned off a notebook’s public link')
+    res.json({ publicLink: null })
   })
 
   app.delete('/api/notebooks/:id', (req, res) => {
@@ -1175,6 +1198,21 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     res.setHeader('Content-Security-Policy', INLINE_SCRIPT_CSP)
     res.type('html').send(viewerHtml)
   })
+  // A notebook's public page. It shows the notes its owner can see (someone without an owner: only notes from
+  // documents open to everyone), leaves out who added them, and isn't indexed by search engines. Each open
+  // counts a view; nothing about the visitor is kept.
+  const publicLimiter = rateLimit({ windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false })
+  app.get('/n/:token', publicLimiter, (req, res) => {
+    const nb = publicLinksOn() ? duct.openPublicNotebook(req.params.token) : undefined
+    res.setHeader('Cache-Control', 'no-store')
+    res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; img-src data:; frame-ancestors 'none'")
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow')
+    if (!nb) { res.status(404).type('text/plain').send('This link doesn’t work any more. Ask whoever sent it for a new one.'); return }
+    const hidden = duct.hiddenFrom(principalsFor(nb.owner ?? undefined))
+    const notes = duct.listNotes(nb.id).filter(n => !hidden.has(n.path)).map(n => ({ ...n, author: null }))
+    res.type('html').send(notebookPage(sharedFrom(nb.name, notes, f => pageLabel(f as DocumentFormat)), { noindex: true }))
+  })
+
   app.get('/workspace', (_req, res) => {
     res.setHeader('Content-Security-Policy', INLINE_SCRIPT_CSP)
     res.type('html').send(workspaceHtml)

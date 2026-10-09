@@ -32,6 +32,8 @@ export interface Features {
   developerApi: boolean
   /** The deadlines radar: expiry, due and renewal dates read from documents, on this computer. */
   deadlines: boolean
+  /** Public links to notebooks on a server with sign-in: anyone with the link can read the notebook. */
+  publicLinks: boolean
   /** File types Duct reads, by family. Off: those files are skipped when indexing and hidden from search. */
   formats: Record<FormatKind, boolean>
 }
@@ -41,7 +43,7 @@ export type FeatureName = Exclude<keyof Features, 'formats'>
 export const FORMAT_KINDS: FormatKind[] = ['document', 'spreadsheet', 'presentation', 'ebook', 'email', 'text', 'code', 'image', 'archive']
 
 export const FEATURE_NAMES: FeatureName[] = [
-  'ask', 'semanticSearch', 'schemaExtraction', 'fileNameSearch', 'webPages', 'uploads', 'watchedFolders', 'ocrOnDemand', 'export', 'diff', 'developerApi', 'deadlines',
+  'ask', 'semanticSearch', 'schemaExtraction', 'fileNameSearch', 'webPages', 'uploads', 'watchedFolders', 'ocrOnDemand', 'export', 'diff', 'developerApi', 'deadlines', 'publicLinks',
 ]
 
 /** Labels for settings screens and error messages. */
@@ -58,6 +60,7 @@ export const FEATURE_LABELS: Record<FeatureName, string> = {
   diff: 'Version comparison',
   developerApi: 'Developer API',
   deadlines: 'Deadlines radar',
+  publicLinks: 'Public notebook links',
 }
 
 export function defaultFeatures(): Features {
