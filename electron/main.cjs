@@ -112,7 +112,32 @@ function shortcutStatus() {
 }
 
 // Desktop-only switches shown in the page's Settings > Features (the rest live in the index's settings).
+// Open at login: started in the background (no window), so quick search, the island and watched folders are ready.
+// macOS and Windows keep this in the system's login items; Linux uses an XDG autostart entry.
+const HIDDEN_FLAG = '--hidden'
+const autostartFile = () => path.join(app.getPath('home'), '.config', 'autostart', 'duct.desktop')
+function openAtLoginEnabled() {
+  if (process.platform === 'linux') return fs.existsSync(autostartFile())
+  return app.getLoginItemSettings({ args: [HIDDEN_FLAG] }).openAtLogin
+}
+function setOpenAtLogin(on) {
+  if (process.platform === 'linux') {
+    if (!on) { fs.rmSync(autostartFile(), { force: true }); return }
+    const exec = process.env.APPIMAGE || process.execPath
+    fs.mkdirSync(path.dirname(autostartFile()), { recursive: true })
+    fs.writeFileSync(autostartFile(), `[Desktop Entry]\nType=Application\nName=Duct\nExec="${exec}" ${HIDDEN_FLAG}\nX-GNOME-Autostart-enabled=true\n`)
+    return
+  }
+  app.setLoginItemSettings({ openAtLogin: on, openAsHidden: true, args: [HIDDEN_FLAG] })
+}
+/**
+ * Started by the system at login, rather than by someone opening Duct: stay in the background. Windows and Linux pass
+ * --hidden; recent macOS doesn't say, so there the window opens, and closing it leaves Duct in the menu bar.
+ */
+const startedAtLogin = () => process.argv.includes(HIDDEN_FLAG) || (process.platform === 'darwin' && app.getLoginItemSettings().wasOpenedAtLogin)
+
 const DESKTOP_PREFS = {
+  openAtLogin: { get: openAtLoginEnabled, set: on => setOpenAtLogin(on) },
   island: { get: islandEnabled, set: on => setIslandEnabled(on) },
   sounds: { get: soundsEnabled, set: on => setSoundsEnabled(on) },
   shortcut: { get: shortcutEnabled, set: on => setShortcutEnabled(on) },
@@ -314,7 +339,7 @@ async function addFilesToLibrary(filePaths) {
   return { added, duplicates, failed }
 }
 
-function createWindow() {
+function createWindow({ background = false } = {}) {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 860,
@@ -343,7 +368,7 @@ function createWindow() {
   mainWindow.loadURL(serverUrl)
 
   mainWindow.once('ready-to-show', () => {
-    mainWindow.show()
+    if (!background) mainWindow.show()
   })
 
   mainWindow.on('closed', () => {
@@ -555,39 +580,18 @@ ipcMain.handle('duct:watchDirectory', async () => {
 
 // Only documents in the index can be opened or revealed; the page can't name arbitrary paths.
 // PDFs open in Duct's viewer at the page, with the matched words highlighted; other files use their default app.
+// "Open" shows the document in Duct's workspace on its own, where text can be selected and added to any notebook;
+// "Open in app" there hands it to the app it belongs to.
 async function openDocument(filePath, page, terms) {
-  const doc = indexedFile(filePath)
-  if (!doc) return false
-  if (path.extname(doc.path).toLowerCase() === '.pdf') {
-    const safeTerms = Array.isArray(terms) ? terms.filter(t => typeof t === 'string').slice(0, 12) : []
-    const pageNumber = Number.isInteger(page) && page > 0 ? page : 1
-    const viewer = new BrowserWindow({
-      width: 1000,
-      height: 1100,
-      title: doc.displayName || path.basename(doc.path),
-      backgroundColor: '#0C0C0B',
-      icon: path.join(__dirname, 'icon.png'),
-      webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
-    })
-    viewer.webContents.on('will-navigate', (event, url) => { if (!url.startsWith(serverUrl)) event.preventDefault() })
-    viewer.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-    await viewer.loadURL(`${serverUrl}/viewer?path=${encodeURIComponent(doc.path)}&page=${pageNumber}&terms=${encodeURIComponent(JSON.stringify(safeTerms))}`)
-    return true
-  }
+  if (!indexedFile(filePath)) return false
   telemetry?.record('opens')
-  return (await shell.openPath(doc.path)) === ''
-}
-
-function indexedFile(filePath) {
-  const doc = typeof filePath === 'string' ? duct.getDocument(filePath) : undefined
-  if (!doc || doc.source === 'url' || !fs.existsSync(doc.path)) return null
-  return doc
+  return openWorkspace(filePath, '', page, terms, '', 'one')
 }
 
 ipcMain.handle('duct:openDocument', (_event, filePath, page, terms) => openDocument(filePath, page, terms))
 
 // The workspace: two documents side by side with a notebook. Any indexed document can be shown, not only PDFs.
-function openWorkspace(left, right, page, terms, notebook) {
+function openWorkspace(left, right, page, terms, notebook, layout) {
   const known = p => (typeof p === 'string' && duct.getDocument(p) ? duct.getDocument(p).path : '')
   const query = new URLSearchParams()
   if (known(left)) query.set('left', known(left))
@@ -595,13 +599,14 @@ function openWorkspace(left, right, page, terms, notebook) {
   if (Number.isInteger(page) && page > 0) query.set('lpage', String(page))
   if (Array.isArray(terms) && terms.length) query.set('lterms', JSON.stringify(terms.filter(t => typeof t === 'string').slice(0, 12)))
   if (typeof notebook === 'string' && /^[\w-]{1,64}$/.test(notebook)) query.set('notebook', notebook)
+  if (layout === 'one') query.set('layout', 'one')
   const win = new BrowserWindow({
     width: 1500,
     height: 950,
     title: 'Duct Workspace',
     backgroundColor: '#0C0C0B',
     icon: path.join(__dirname, 'icon.png'),
-    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, preload: path.join(__dirname, 'workspace-preload.cjs') },
   })
   win.webContents.on('will-navigate', (event, url) => { if (!url.startsWith(serverUrl)) event.preventDefault() })
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
@@ -610,6 +615,12 @@ function openWorkspace(left, right, page, terms, notebook) {
 }
 
 ipcMain.handle('duct:openWorkspace', (_event, left, right, page, terms, notebook) => openWorkspace(left, right, page, terms, notebook))
+
+ipcMain.handle('duct:openInApp', async (_event, filePath) => {
+  const doc = indexedFile(filePath)
+  if (!doc) return false
+  return (await shell.openPath(doc.path)) === ''
+})
 
 ipcMain.handle('duct:revealDocument', (_event, filePath) => {
   const doc = indexedFile(filePath)
@@ -647,7 +658,7 @@ app.whenReady().then(async () => {
   console.log(`  Server started at ${url}`)
 
   createAppMenu()
-  createWindow()
+  createWindow({ background: startedAtLogin() })
   createTray()
   if (islandEnabled()) startIsland()
   registerShortcut()

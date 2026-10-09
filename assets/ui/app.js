@@ -218,6 +218,7 @@ const FEATURE_GROUPS = [
 ]
 const KIND_LABELS = { document: 'Documents (PDF, Word, Pages, Markdown, HTML…)', spreadsheet: 'Spreadsheets', presentation: 'Presentations', ebook: 'E-books', email: 'Email', text: 'Text, CSV, JSON and subtitles', code: 'Source code', image: 'Images and SVG', archive: 'ZIP archives' }
 const DESKTOP_PREFS = [
+  ['openAtLogin', 'Open at login', 'Start Duct when you sign in to this computer, so quick search and watched folders are always ready.'],
   ['island', 'Notch companion', 'Duct at the top of the screen: progress, quick search and a drop zone.'],
   ['sounds', 'Sounds', 'Short sounds when a job finishes or needs you.'],
   ['shortcut', 'Quick search shortcut', 'Search from any app, without switching to Duct.'],
@@ -905,11 +906,9 @@ async function openDocument(path, page, highlightTerms = []) {
     if (!(await desktop.openDocument(path, page, highlightTerms))) toast("Couldn't open " + fileName(path), true)
     return
   }
-  if (/\.pdf$/i.test(path)) {
-    window.open('/viewer?path=' + encodeURIComponent(path) + '&page=' + (page || 1) + '&terms=' + encodeURIComponent(JSON.stringify(highlightTerms)), '_blank', 'noopener')
-    return
-  }
-  window.open('/api/file/' + encodeURIComponent(fileName(path)) + '?path=' + encodeURIComponent(path), '_blank', 'noopener')
+  // The workspace with this one document: pages as they look, and text you can add to any notebook.
+  const q = new URLSearchParams({ left: path, layout: 'one', lpage: String(page || 1), lterms: JSON.stringify(highlightTerms || []) })
+  window.open('/workspace?' + q, '_blank', 'noopener')
 }
 
 const openResult = r => r && openDocument(r.chunk.documentPath, r.chunk.page, terms(r))
@@ -1029,7 +1028,7 @@ function renderDocuments() {
       if (desktop && desktop.revealDocument && !link) actions.push('<button class="btn btn-sm" data-doc-act="reveal">Show</button>')
       if (isAdmin()) actions.push('<button class="btn btn-sm btn-danger" data-doc-act="remove" title="Remove from Duct">✕</button>')
       return '<div class="doc-row" role="row" data-path="' + esc(d.path) + '">' + badge(d.format) +
-        '<span class="name-cell"><span class="name" title="' + esc(d.path) + '">' + esc(d.displayName || fileName(d.path)) + '</span>' +
+        '<span class="name-cell"><span class="name" title="' + esc((d.displayName || fileName(d.path)) + '\n' + d.path) + '">' + esc(d.displayName || fileName(d.path)) + '</span>' +
         ((d.tags || []).length ? '<span class="tags">' + d.tags.map(t => '<span class="tag">' + esc(t) + '</span>').join('') + '</span>' : '') + '</span>' +
         '<span class="folder">' + esc(link ? d.path : d.source === 'library' ? 'Duct Library' : folderOf(d.path)) + '</span>' +
         statusOf(d) + '<span class="row-actions">' + actions.join('') + '</span>' +
