@@ -3,7 +3,7 @@ import type { Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, basename } from 'node:path'
 import { Duct } from '../src/index.js'
 import { createServer } from '../src/server.js'
 import { numberVariants, toFtsQuery } from '../src/store/sqlite.js'
@@ -40,7 +40,7 @@ describe('numbers in different formats (finance)', () => {
     const duct = new Duct({ embed: false })
     await duct.index(dir)
     for (const q of ['1200', '1,200', '1,200.00', '1 200']) {
-      const names = (await duct.search(q)).map(r => r.chunk.documentPath.split('/').pop()).sort()
+      const names = (await duct.search(q)).map(r => basename(r.chunk.documentPath)).sort()
       expect(names, q).toEqual(['a.txt', 'b.txt', 'c.txt'])
     }
     duct.close()
@@ -73,8 +73,8 @@ describe('tags and dates (bids, legal)', () => {
     const duct = new Duct({ embed: false })
     await duct.index(dir)
     const yearAgo = Date.now() - 365 * 86400000
-    expect((await duct.search('quarterly', 10, undefined, { modifiedAfter: yearAgo })).map(r => r.chunk.documentPath.split('/').pop())).toEqual(['new.txt'])
-    expect((await duct.search('quarterly', 10, undefined, { modifiedBefore: yearAgo })).map(r => r.chunk.documentPath.split('/').pop())).toEqual(['old.txt'])
+    expect((await duct.search('quarterly', 10, undefined, { modifiedAfter: yearAgo })).map(r => basename(r.chunk.documentPath))).toEqual(['new.txt'])
+    expect((await duct.search('quarterly', 10, undefined, { modifiedBefore: yearAgo })).map(r => basename(r.chunk.documentPath))).toEqual(['old.txt'])
     expect(duct.getDocument(join(dir, 'old.txt'))?.modifiedAt).toBeLessThan(yearAgo)
     duct.close()
   })

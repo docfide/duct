@@ -1,7 +1,7 @@
 import { describe, it, expect, afterAll } from 'vitest'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, basename } from 'node:path'
 import { Duct } from '../src/index.js'
 import { reciprocalRankFusion } from '../src/search/hybrid.js'
 import { markedWords, osaDistance } from '../src/store/sqlite.js'
@@ -85,7 +85,7 @@ describe('fast search keeps the same answers', () => {
     const duct = new Duct({ embed: false })
     await duct.index(dir)
     const quiet = await duct.search('indemnity', 10, undefined, { under: join(dir, 'quiet') })
-    expect(quiet.map(r => r.chunk.documentPath.split('/').pop()).sort()).toEqual(['q0.txt', 'q1.txt', 'q2.txt'])
+    expect(quiet.map(r => basename(r.chunk.documentPath)).sort()).toEqual(['q0.txt', 'q1.txt', 'q2.txt'])
     expect(quiet.every(r => r.snippet?.includes('\u0002'))).toBe(true)
     const all = await duct.search('indemnity', 10)
     expect(all).toHaveLength(10)

@@ -3,7 +3,7 @@ import type { Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, basename } from 'node:path'
 import { Duct } from '../src/index.js'
 import { createServer } from '../src/server.js'
 import { OidcLogin } from '../src/team/oidc.js'
@@ -123,7 +123,7 @@ describe('Duct in your cloud: results follow who may see each document', () => {
     'handbook.txt': 'Staff handbook: payroll is paid on the 25th.',
   }
   const get = (path: string, cookie: string) => fetch(`${base}${path}`, { headers: { Cookie: cookie } })
-  const names = async (path: string, cookie: string) => ((await (await get(path, cookie)).json()).results as { chunk: { documentPath: string } }[]).map(r => r.chunk.documentPath.split('/').pop()).sort()
+  const names = async (path: string, cookie: string) => ((await (await get(path, cookie)).json()).results as { chunk: { documentPath: string } }[]).map(r => basename(r.chunk.documentPath)).sort()
 
   it('searches, lists, opens and counts only what each person may see', async () => {
     await start({}, FILES)
@@ -141,7 +141,7 @@ describe('Duct in your cloud: results follow who may see each document', () => {
     expect(await names('/api/search?q=payroll', auditor)).toEqual([])
     expect(await names('/api/search?q=travel', auditor)).toEqual(['policy.txt'])   // no access list: everyone
 
-    const listed = (await (await get('/api/documents', ada)).json()).documents.map((d: { path: string }) => d.path.split('/').pop()).sort()
+    const listed = (await (await get('/api/documents', ada)).json()).documents.map((d: { path: string }) => basename(d.path)).sort()
     expect(listed).toEqual(['handbook.txt', 'policy.txt'])
     const salaries = encodeURIComponent(join(docs, 'salaries.txt'))
     expect((await get(`/api/file?path=${salaries}`, ada)).status).toBe(404)
@@ -162,7 +162,7 @@ describe('Duct in your cloud: results follow who may see each document', () => {
     await start({}, FILES, { authToken: 'admin-t', memberTokens: ['member-t'] })
     duct.setDocumentAccess(join(docs, 'salaries.txt'), ['user:boss@okafor.ng'])
     duct.setDocumentAccess(join(docs, 'handbook.txt'), ['anyone'])
-    const search = async (t: string) => ((await (await fetch(`${base}/api/search?q=payroll`, { headers: { Authorization: `Bearer ${t}` } })).json()).results as { chunk: { documentPath: string } }[]).map(r => r.chunk.documentPath.split('/').pop()).sort()
+    const search = async (t: string) => ((await (await fetch(`${base}/api/search?q=payroll`, { headers: { Authorization: `Bearer ${t}` } })).json()).results as { chunk: { documentPath: string } }[]).map(r => basename(r.chunk.documentPath)).sort()
     expect(await search('member-t')).toEqual(['board.txt', 'handbook.txt'])
     expect(await search('admin-t')).toEqual(['board.txt', 'handbook.txt', 'salaries.txt'])
   })

@@ -236,6 +236,9 @@ describe('Duct integration', () => {
     const results = await duct2.search('termination', 5)
     expect(results.length).toBeGreaterThan(0)
 
+    // Windows won't delete a database that's still open.
+    duct1.close()
+    duct2.close()
     rmSync(tmpDir, { recursive: true, force: true })
   })
 
