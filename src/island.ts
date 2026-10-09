@@ -498,7 +498,7 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
     },
   }
   const docName = r => r.name || fileName(r.chunk.documentPath)
-  const pageText = (format, page) => (PAGE_LABELS[format] || 'p.') + ' ' + page
+  const pageText = (format, page) => format === 'audio' ? 'at ' + (page - 1) + ':00' : (PAGE_LABELS[format] || 'p.') + ' ' + page
 
   /** With nothing typed: recent searches and documents, so the shortcut also takes you back to what you were doing. */
   function showRecent() {

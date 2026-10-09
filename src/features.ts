@@ -40,7 +40,7 @@ export interface Features {
 
 export type FeatureName = Exclude<keyof Features, 'formats'>
 
-export const FORMAT_KINDS: FormatKind[] = ['document', 'spreadsheet', 'presentation', 'ebook', 'email', 'text', 'code', 'image', 'archive']
+export const FORMAT_KINDS: FormatKind[] = ['document', 'spreadsheet', 'presentation', 'ebook', 'email', 'text', 'code', 'image', 'audio', 'archive']
 
 export const FEATURE_NAMES: FeatureName[] = [
   'ask', 'semanticSearch', 'schemaExtraction', 'fileNameSearch', 'webPages', 'uploads', 'watchedFolders', 'ocrOnDemand', 'export', 'diff', 'developerApi', 'deadlines', 'publicLinks',
@@ -66,7 +66,8 @@ export const FEATURE_LABELS: Record<FeatureName, string> = {
 export function defaultFeatures(): Features {
   return {
     ...Object.fromEntries(FEATURE_NAMES.map(n => [n, true])) as Record<FeatureName, boolean>,
-    formats: Object.fromEntries(FORMAT_KINDS.map(k => [k, true])) as Record<FormatKind, boolean>,
+    // Audio is off until someone turns it on: transcribing downloads a speech model, and music folders aren't speech.
+    formats: Object.fromEntries(FORMAT_KINDS.map(k => [k, k !== 'audio'])) as Record<FormatKind, boolean>,
   }
 }
 

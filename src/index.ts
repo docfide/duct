@@ -803,7 +803,7 @@ export class Duct {
     if (isUrl(filePath)) {
       return await extractUrl(filePath, { blockPrivate: this.blockPrivateUrls })
     }
-    return await extract(filePath, { ocr: ocr ?? this.ocr })
+    return await extract(filePath, { ocr: ocr ?? this.ocr, ...(this.persistPath ? { modelsDir: join(this.persistPath, 'models') } : {}) })
   }
 
   private findDocument(path: string) {

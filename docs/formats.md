@@ -12,6 +12,7 @@ Duct reads these formats. The list lives in one place, `src/formats.ts`. The ind
 | Spreadsheets | .xlsx .xlsm .xls .xlsb, .ods | One page per sheet ("sheet 2") |
 | Presentations | .pptx .pptm .ppsx .potx, .odp, .key | One page per slide, with speaker notes |
 | E-books | .epub | One page per chapter ("ch. 3"). DRM-protected books are reported as unreadable |
+| Audio | .mp3 .m4a .wav .ogg .oga .opus .flac .aac .amr .wma .aiff .aif .caf .3gp | Off until turned on (Settings › Features › Audio and voice notes). What's said is transcribed on this computer with Whisper (base, about 77 MB, downloaded once the first time; the privacy ledger lists it under On-device models). The transcript is a page per minute, each line with its time; results say "at 2:00" and open the recording there. Files tagged with an artist and an album are taken as songs and skipped; recordings over 3 hours aren't transcribed. Not available on Intel Macs |
 | Email | .eml, .msg (Outlook) | Subject, sender, recipients, date and body are searchable. Supported attachments are indexed under "Attachment: name" |
 | Web and Markdown | .html .htm .xhtml, .md .markdown .mdx | |
 | Text | .txt .text .csv .tsv .json .jsonl .ndjson .log .xml .yaml .yml .toml .ini .cfg .conf .tex .bib .rst .adoc .asciidoc .org .nfo .srt .vtt | UTF-8, UTF-16 and Windows-1252 are detected. Subtitles keep only the spoken lines |

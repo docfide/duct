@@ -148,6 +148,7 @@ body.no-mascot .mascot-slot { display: none; }
 .type.slide { background: #2d1d0b; color: #ffb74d; }
 .type.mail { background: #22163a; color: #b388ff; }
 .type.img { background: #0e2830; color: #64d8e8; }
+.type.audio { background: #2b1d10; color: #fbbf74; }
 .type.zip { background: #262613; color: #e6e675; }
 
 /* ---------- results ---------- */

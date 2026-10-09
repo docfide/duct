@@ -73,7 +73,9 @@ describe('importing an export', () => {
     const duct = new Duct({ embed: false })
     const lib = join(work, 'lib')
     const r = await importWhatsApp(duct, lib, zipPath, 'WhatsApp Chat - Okafor Holdings.zip')
-    expect(r).toMatchObject({ chat: 'Okafor Holdings', messages: 6, attachments: 1, skipped: 1 })
+    // The voice note is kept with the chat; it's transcribed only once audio search is turned on.
+    expect(r).toMatchObject({ chat: 'Okafor Holdings', messages: 6, attachments: 2, skipped: 0 })
+    expect(duct.getDocuments().some(d => d.path.endsWith('.opus'))).toBe(false)
 
     const doc = duct.getDocuments().find(d => d.displayName === 'Supply agreement.docx · from Chidi Okafor')!
     expect(doc.path.endsWith(join('WhatsApp', 'Okafor Holdings', 'Supply agreement.docx'))).toBe(true)

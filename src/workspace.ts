@@ -103,6 +103,14 @@ main { flex: 1; min-height: 0; display: flex; }
 .sheet-tabs button { flex: none; }
 mark.ws-find { background: #FDE68A; color: #111110; border-radius: 2px; }
 mark.ws-find.current { background: var(--lime); outline: 2px solid var(--lime); }
+.audio-pane { position: absolute; inset: 0; display: flex; flex-direction: column; }
+.audio-pane > .scroller { position: relative; inset: auto; flex: 1; min-height: 0; }
+.player { flex: none; padding: 10px 14px; background: var(--s1); border-bottom: 1px solid var(--border); }
+.player audio { width: 100%; }
+.player .hint { margin: 6px 0 0; color: var(--subtle); font-size: 12px; }
+.transcript .line { margin: 0 0 6px; display: flex; gap: 10px; align-items: baseline; line-height: 1.6; }
+.transcript .line .time { flex: none; font-family: var(--mono); font-size: 11px; color: var(--lime); padding: 0 4px; }
+.transcript .line.playing { background: var(--lime-bg); border-radius: 4px; }
 .text-view { padding: 24px clamp(16px, 4vw, 48px) 60px; background: var(--black); min-height: 100%; }
 .text-view .sec { max-width: 78ch; margin: 0 auto 26px; }
 .text-view .sec-label { user-select: none; -webkit-user-select: none; font-family: var(--mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--lime); margin: 0 0 8px; padding-top: 8px; border-top: 1px solid var(--border); }
@@ -365,6 +373,7 @@ mark.ws-find.current { background: var(--lime); outline: 2px solid var(--lime); 
       try {
         if (this.format === 'pdf' && this.mode === 'native') await this.renderPdf()
         else if (this.format === 'image' && RASTER.has(ext) && this.mode === 'native') this.renderImage(doc)
+        else if (this.format === 'audio') await this.renderAudio()
         else if (this.format !== 'pdf' && this.format !== 'image' && this.mode === 'native') await this.renderView()
         else await this.renderText()
       } catch (err) {
@@ -462,6 +471,52 @@ mark.ws-find.current { background: var(--lime); outline: 2px solid var(--lime); 
       this.body.replaceChildren()
       if (this.view.kind === 'html') this.renderRich(this.view)
       else await this.renderText()
+    }
+
+    /**
+     * A recording: the player, and the transcript Duct made of it, a line per passage with its time. Clicking a time
+     * plays from there; the line being played is highlighted. Opened from a result, it's cued at that minute.
+     */
+    async renderAudio() {
+      const data = await (await api('/api/document-text?path=' + encodeURIComponent(this.path))).json()
+      const player = h('audio', { controls: true, preload: 'metadata', src: this.fileUrl(), 'aria-label': 'Recording' })
+      player.addEventListener('error', () => { bar.append(h('p', { class: 'hint', text: 'This kind of recording can’t play here. “Open in app” plays it; the transcript is below.' })) }, { once: true })
+      const bar = h('div', { class: 'player' }, player)
+      const view = h('div', { class: 'text-view transcript' })
+      const LINE = new RegExp('^\\\\[((?:\\\\d+:)?\\\\d+:\\\\d\\\\d)\\\\]\\\\s*(.*)$')
+      const seconds = t => t.split(':').reduce((acc, n) => acc * 60 + Number(n), 0)
+      const lines = []
+      for (const sec of data.sections) {
+        const block = h('div', { class: 'sec', 'data-page': sec.page || false })
+        for (const raw of sec.text.split('\\n')) {
+          const m = LINE.exec(raw)
+          if (!m) { if (raw.trim()) block.append(h('p', { class: 'line', text: raw })); continue }
+          const at = seconds(m[1])
+          const row = h('p', { class: 'line', 'data-at': at },
+            h('button', { class: 'ghost time', title: 'Play from ' + m[1], 'aria-label': 'Play from ' + m[1], text: m[1], onclick: () => { player.currentTime = at; player.play().catch(() => {}) } }),
+            h('span', { text: m[2] }))
+          lines.push(row)
+          block.append(row)
+        }
+        view.append(block)
+      }
+      if (!lines.length) view.append(h('div', { class: 'empty', text: 'No speech was found in this recording.' }))
+      player.addEventListener('timeupdate', () => {
+        const t = player.currentTime
+        let cur = null
+        for (const l of lines) { if (Number(l.dataset.at) <= t + 0.2) cur = l; else break }
+        for (const l of lines) l.classList.toggle('playing', l === cur)
+      })
+      const scroller = h('div', { class: 'scroller' }, view)
+      this.body.append(h('div', { class: 'audio-pane' }, bar, scroller))
+      // From a result: cue the recording at its minute (it doesn't start playing by itself).
+      if (this.page > 1) {
+        const first = lines.find(l => Number(l.dataset.at) >= (this.page - 1) * 60)
+        if (first) { player.currentTime = Number(first.dataset.at); first.scrollIntoView({ block: 'center' }) }
+      }
+      this.findInput.hidden = false
+      this.findInput.value = this.terms.join(' ')
+      if (this.terms.length) this.domFind(false, false)
     }
 
     renderRich(view) {

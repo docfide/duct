@@ -1,6 +1,7 @@
 import { chatSections, chatTitle, isChatFileName, parseWhatsAppChat } from '../whatsapp-chat.js'
 import { readFileSync, statSync } from 'node:fs'
-import { basename, extname } from 'node:path'
+import { homedir } from 'node:os'
+import { basename, extname, join } from 'node:path'
 import type { ExtractedDocument, DocumentFormat } from '../types.js'
 import { formatForPath } from '../formats.js'
 import { ocrPdf } from '../ocr/index.js'
@@ -10,6 +11,13 @@ import { UnsupportedFileError, cleanDetails, decodeText, decodeXml, isZip, readP
 import { extractDoc, extractOdp, extractOdt, extractRtf, isOle } from './office.js'
 import { extractEpub, extractIwork, extractZip } from './packages.js'
 import { extractEml, extractMsg } from './email.js'
+import { extractAudio } from './audio.js'
+
+
+/** Where the speech model goes when the caller doesn't say: beside the CLI's index. */
+function defaultModelsDir(): string {
+  return join(process.env['DUCT_HOME'] || join(homedir(), '.duct'), 'models')
+}
 
 export { UnsupportedFileError } from './common.js'
 export type { ExtractOptions } from './common.js'
@@ -197,6 +205,7 @@ export async function extract(path: string, options: ExtractOptions = {}): Promi
     case 'code': return extractCode(path)
     case 'svg': return extractSvg(path)
     case 'zip': return extractZip(path, options, extract)
+    case 'audio': return extractAudio(path, options.modelsDir ?? defaultModelsDir())
     case 'image':
       if (options.ocr) return extractImage(path)
       return { path, format: 'image', content: '', metadata: { size: statSync(path).size, needsOcr: true } }

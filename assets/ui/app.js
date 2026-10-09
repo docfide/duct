@@ -175,7 +175,7 @@ const BADGES = {
   pdf: ['PDF', 'pdf'], docx: ['DOC', 'doc'], doc: ['DOC', 'doc'], odt: ['ODT', 'doc'], rtf: ['RTF', 'doc'], pages: ['PAGES', 'doc'],
   md: ['MD', 'doc'], html: ['HTML', 'doc'], epub: ['EPUB', 'doc'], xlsx: ['XLS', 'sheet'], ods: ['ODS', 'sheet'], numbers: ['NUM', 'sheet'],
   pptx: ['PPT', 'slide'], odp: ['ODP', 'slide'], key: ['KEY', 'slide'], eml: ['EML', 'mail'], msg: ['MSG', 'mail'], txt: ['TXT', ''],
-  code: ['CODE', ''], svg: ['SVG', 'img'], image: ['IMG', 'img'], zip: ['ZIP', 'zip'], url: ['WEB', 'doc'],
+  code: ['CODE', ''], svg: ['SVG', 'img'], image: ['IMG', 'img'], zip: ['ZIP', 'zip'], url: ['WEB', 'doc'], audio: ['AUDIO', 'audio'],
 }
 const badge = format => { const [label, cls] = BADGES[format] || ['FILE', '']; return '<span class="type ' + cls + '">' + label + '</span>' }
 
@@ -184,6 +184,7 @@ const GROUPS = [
   { id: 'docs', label: 'Documents', test: f => (f.kind === 'document' && f.format !== 'pdf') || f.kind === 'ebook' },
   { id: 'sheets', label: 'Spreadsheets', test: f => f.kind === 'spreadsheet' },
   { id: 'slides', label: 'Presentations', test: f => f.kind === 'presentation' },
+  { id: 'audio', label: 'Audio', test: f => f.kind === 'audio' },
   { id: 'email', label: 'Email', test: f => f.kind === 'email' },
   { id: 'images', label: 'Images', test: f => f.kind === 'image' },
   { id: 'text', label: 'Text & code', test: f => f.kind === 'text' || f.kind === 'code' },
@@ -224,7 +225,7 @@ const FEATURE_GROUPS = [
     ['developerApi', 'Developer API', 'The /v1 API for apps: collections, API keys, and indexing your own text by id.'],
   ] },
 ]
-const KIND_LABELS = { document: 'Documents (PDF, Word, Pages, Markdown, HTML…)', spreadsheet: 'Spreadsheets', presentation: 'Presentations', ebook: 'E-books', email: 'Email', text: 'Text, CSV, JSON and subtitles', code: 'Source code', image: 'Images and SVG', archive: 'ZIP archives' }
+const KIND_LABELS = { document: 'Documents (PDF, Word, Pages, Markdown, HTML…)', spreadsheet: 'Spreadsheets', presentation: 'Presentations', ebook: 'E-books', email: 'Email', text: 'Text, CSV, JSON and subtitles', code: 'Source code', image: 'Images and SVG', audio: 'Audio and voice notes: what’s said, transcribed on this computer (downloads a 77 MB speech model the first time; songs are skipped)', archive: 'ZIP archives' }
 const DESKTOP_PREFS = [
   ['openAtLogin', 'Open at login', 'Start Duct when you sign in to this computer, so quick search and watched folders are always ready.'],
   ['island', 'Notch companion', 'Duct at the top of the screen: progress, quick search and a drop zone.'],
@@ -377,6 +378,8 @@ async function saveTags(path, tags) {
 }
 
 function pageRef(chunk) {
+  // Audio is transcribed a page per minute: page 3 starts at 2:00.
+  if (chunk.documentFormat === 'audio') return 'at ' + (chunk.page - 1) + ':00'
   const label = state.info.formats.find(f => f.format === chunk.documentFormat)?.pageLabel || 'p.'
   return label + ' ' + chunk.page
 }
@@ -710,6 +713,7 @@ function groupResults(results) {
 const cardResult = i => state.cards && state.cards[i] ? state.results[state.cards[i][0]] : undefined
 
 function resultLabel(c, link) {
+  if (c.documentFormat === 'audio') return c.page ? 'Play from ' + (c.page - 1) + ':00' : 'Play'
   return link ? 'Open link' : c.page ? 'Open at ' + pageRef(c) : 'Open'
 }
 
@@ -814,7 +818,7 @@ function renderPreview(r) {
     '<div class="meta">' + esc(label) + (c.page ? ' · ' + esc(pageRef(c)) : '') + (c.heading ? ' · ' + esc(c.heading) : '') + '<br>' + esc(link ? c.documentPath : folderOf(c.documentPath)) +
     (c.metadata && (c.metadata.author || c.metadata.year) ? '<br>' + esc([c.metadata.author, c.metadata.year].filter(Boolean).join(', ')) : '') + '</div>' +
     renderTagEditor(c.documentPath) +
-    '<div class="actions"><button class="btn btn-primary" data-act="open">' + (link ? 'Open link' : c.page ? 'Open at ' + esc(pageRef(c)) : 'Open') + '</button>' +
+    '<div class="actions"><button class="btn btn-primary" data-act="open">' + esc(resultLabel(c, link)) + '</button>' +
     (desktop && desktop.revealDocument && !link ? '<button class="btn" data-act="reveal">Show in folder</button>' : '') +
     (c.metadata && typeof c.metadata.webUrl === 'string' && /^https:\/\//.test(c.metadata.webUrl) ? '<a class="btn" href="' + esc(c.metadata.webUrl) + '" target="_blank" rel="noopener">Open in ' + (c.metadata.connector === 'gdrive' ? 'Google Drive' : 'Microsoft 365') + '</a>' : '') +
     (link ? '' : '<button class="btn" data-act="workspace" title="Open beside another document, with notes">Side by side</button>') +
@@ -1682,6 +1686,7 @@ const LEDGER_WHAT = {
   ai: 'The question and the passages needed to answer it, or text to index for search by meaning: only because you chose this provider.',
   cloud: 'Requests to read the sources you connected. Files come in; nothing of yours goes out.',
   signin: 'Signing in to a service you connected.',
+  models: 'Downloading the speech model for audio search, once. Your recordings are transcribed on this computer and never sent.',
   web: 'Fetching web pages you added to Duct.',
 }
 let ledgerDays = 1
