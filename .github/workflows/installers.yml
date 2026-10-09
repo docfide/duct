@@ -1,0 +1,47 @@
+name: Installers
+
+# The desktop app for each platform, attached to a release (the site's Download page links to the latest).
+# Runs when a release is published; run it by hand to rebuild and re-attach a release's installers.
+# Unsigned until signing certificates are set up: macOS asks people to allow it once in System Settings.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release to attach the installers to (e.g. v1.0.0-alpha.1)
+        required: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, args: --mac --arm64 }
+          - { os: macos-15-intel, args: --mac --x64 }
+          - { os: windows-latest, args: --win --x64 }
+          - { os: ubuntu-latest, args: --linux --x64 }
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npx electron-builder ${{ matrix.args }} --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Attach to the release
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(release/*.dmg release/*.zip release/*.exe release/*.AppImage release/*.deb)
+          gh release upload "${{ github.event.release.tag_name || inputs.tag }}" "${files[@]}" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
