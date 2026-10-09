@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, realpathSync, unlinkSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
+import { LIBREOFFICE_FORMATS, convertToPdf, documentView, viewCacheDir } from './document-view.js'
 import { fileURLToPath } from 'node:url'
 import type { Duct, Note, Notebook } from './index.js'
 import { canDo, notebookRole } from './notebooks.js'
@@ -69,6 +70,8 @@ const CSP = [
   "frame-ancestors 'none'",
 ].join('; ')
 // The island and PDF viewer pages still carry their script inline.
+/** Indexed web pages are stored by their address, not a file path. */
+const isRemote = (path: string) => /^https?:\/\//i.test(path)
 const INLINE_SCRIPT_CSP = CSP.replace("script-src 'self'", "script-src 'self' 'unsafe-inline'")
 const uiDir = fileURLToPath(new URL('../assets/ui', import.meta.url))
 const API_KEY_FIELDS = ['openaiKey', 'geminiKey', 'cohereKey', 'voyageKey', 'mistralKey', 'jinaKey'] as const
@@ -973,6 +976,32 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
   })
 
   // A document as text in sections, for the side-by-side workspace (formats the browser can't draw itself).
+  // The workspace's view of a document that isn't a PDF: pages from LibreOffice when it's installed, else the format's
+  // own structure as cleaned HTML, else text (see src/document-view.ts).
+  app.get('/api/document-view', async (req, res) => {
+    const path = typeof req.query.path === 'string' ? req.query.path : ''
+    const doc = path ? duct.getDocument(path) : undefined
+    if (!doc || doc.status === 'failed' || isRemote(doc.path)) { res.status(404).json({ error: 'Document not found' }); return }
+    try {
+      res.setHeader('Cache-Control', 'no-store')
+      res.json(await documentView(doc.path))
+    } catch {
+      res.json({ kind: 'text' })   // a file the richer view can't draw still has its text
+    }
+  })
+  app.get('/api/document-pdf', async (req, res) => {
+    const path = typeof req.query.path === 'string' ? req.query.path : ''
+    const doc = path ? duct.getDocument(path) : undefined
+    if (!doc || !LIBREOFFICE_FORMATS.has(extname(doc.path).toLowerCase()) || isRemote(doc.path)) { res.status(404).json({ error: 'Document not found' }); return }
+    try {
+      const pdf = await convertToPdf(doc.path, viewCacheDir(duct.dataDir))
+      res.setHeader('Cache-Control', 'no-store')
+      res.type('application/pdf').sendFile(pdf)
+    } catch (err) {
+      sendError(res, err, 422)
+    }
+  })
+
   app.get('/api/document-text', async (req, res) => {
     const path = typeof req.query.path === 'string' ? req.query.path : ''
     const doc = path ? duct.getDocument(path) : undefined

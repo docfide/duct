@@ -4,7 +4,7 @@
 import { basename, extname } from 'node:path'
 import type { DocumentFormat } from './types.js'
 
-export type FormatKind = 'document' | 'spreadsheet' | 'presentation' | 'ebook' | 'email' | 'text' | 'code' | 'image' | 'archive'
+export type FormatKind = 'document' | 'spreadsheet' | 'presentation' | 'ebook' | 'email' | 'text' | 'code' | 'image' | 'audio' | 'archive'
 
 export interface FileFormat {
   format: DocumentFormat
@@ -52,6 +52,8 @@ export const FORMATS: FileFormat[] = [
   },
   { format: 'svg', extensions: ['.svg'], label: 'SVG', kind: 'image' },
   { format: 'image', extensions: ['.png', '.jpg', '.jpeg', '.tiff', '.tif', '.bmp', '.gif', '.webp', '.heic', '.heif', '.avif'], label: 'Image (OCR)', kind: 'image' },
+  // Transcribed on this computer (src/speech.ts); off until turned on in Settings, since it downloads a speech model.
+  { format: 'audio', extensions: ['.mp3', '.m4a', '.wav', '.ogg', '.oga', '.opus', '.flac', '.aac', '.amr', '.wma', '.aiff', '.aif', '.caf', '.3gp'], label: 'Audio', kind: 'audio', pageLabel: 'minute' },
   { format: 'zip', extensions: ['.zip'], label: 'ZIP archive', kind: 'archive' },
 ]
 

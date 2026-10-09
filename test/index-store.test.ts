@@ -78,7 +78,7 @@ describe('change detection', () => {
     expect(byName['broken.pdf'].status).toBe('failed')
     expect(byName['broken.pdf'].error).toBeTruthy()
     expect(duct.stats().documents).toBe(1)
-  })
+  }, 30_000)   // reads PDFs; slow Windows runners have taken 6 s
 })
 
 describe('watched folders', () => {

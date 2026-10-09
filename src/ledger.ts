@@ -9,13 +9,14 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { join } from 'node:path'
 
-export type LedgerCategory = 'tensflare' | 'ai' | 'cloud' | 'signin' | 'web'
+export type LedgerCategory = 'tensflare' | 'ai' | 'cloud' | 'signin' | 'models' | 'web'
 
 export const LEDGER_CATEGORY_LABELS: Record<LedgerCategory, string> = {
   tensflare: 'Tensflare (account, usage counts, feedback, hosted AI, notebook links)',
   ai: 'AI provider you chose',
   cloud: 'Cloud sources you connected',
   signin: 'Sign-in providers',
+  models: 'On-device models',
   web: 'Web pages you added',
 }
 
@@ -53,6 +54,8 @@ export function categorize(host: string): LedgerCategory {
   if (AI_HOSTS.includes(h)) return 'ai'
   if (CLOUD_HOSTS.includes(h) || h.endsWith('.amazonaws.com') || h.endsWith('.r2.cloudflarestorage.com') || h.endsWith('.wasabisys.com') || h.endsWith('.backblazeb2.com') || h.endsWith('.sharepoint.com')) return 'cloud'
   if (SIGNIN_HOSTS.includes(h)) return 'signin'
+  // The speech model for audio search, downloaded once from Hugging Face.
+  if (h === 'huggingface.co' || h.endsWith('.huggingface.co') || h === 'hf.co' || h.endsWith('.hf.co')) return 'models'
   return 'web'
 }
 

@@ -13,6 +13,8 @@ export class UnsupportedFileError extends Error {
 
 export interface ExtractOptions {
   ocr?: boolean
+  /** Where the speech model is kept, for audio (see src/speech.ts). */
+  modelsDir?: string
   /** How deep we are inside containers (emails, ZIPs); nested containers stop at MAX_DEPTH. */
   depth?: number
 }

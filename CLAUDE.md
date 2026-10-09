@@ -20,13 +20,14 @@ npx electron-builder --mac dir -c.mac.identity=null # unsigned packaged app in r
 
 When launching Electron from a VS Code terminal, unset `ELECTRON_RUN_AS_NODE` first (`env -u ELECTRON_RUN_AS_NODE npm run electron:start`). Otherwise Electron runs as plain Node and `require('electron')` fails.
 
-CI (`.github/workflows/ci.yml`) runs typecheck and tests on Linux, macOS and Windows, plus a build. Publishing to npm and GHCR happens on a GitHub release (`publish.yml`). Desktop installers aren't built in CI yet: signing and notarization need Apple and Windows certificates.
+CI (`.github/workflows/ci.yml`) runs typecheck and tests on Linux, macOS and Windows, plus a build. Publishing to npm and GHCR happens on a GitHub release (`publish.yml`). Desktop installers are built on each release by `installers.yml` (unsigned until there are Apple and Windows certificates). `scripts/check-runtime-deps.mjs` fails a build whose code imports a package that isn't in `dependencies`.
 
 ## Layout
 
 ```
 src/
   index.ts        Duct class: the whole pipeline, change detection, config, watched folders, diff, schema extraction
+  document-view.ts  How the workspace shows non-PDF files: LibreOffice pages if installed, else cleaned HTML per format (cleanHtml allowlist), else text
   library.ts      addToLibrary(): copy a file into the Library (~/Duct Library), dedupe by hash, index it
   version.ts      VERSION read from package.json
   types.ts        All public interfaces (DuctConfig, RuntimeConfig, Chunk, Searcher, VectorStore, LLMProvider, …)

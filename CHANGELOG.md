@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Search results are grouped by document. A PDF that matches on several pages is one result with its best passage, links to the other pages ("Also on p. 2, p. 7") and its other passages a click away; the heading counts documents and passages. Quick search shows one row per document.
+- Open shows the document inside Duct, on its own, with your notebooks beside it; **Open in app** hands it to the program it belongs to. Closing one of two documents in the workspace leaves the other full width, and **One / Side by side / Stacked** switches between them.
+- Selected text can go to any notebook: the pop-up says **Add to "<notebook>"**, and its menu lists every notebook you can add to, or starts a new one named after the document.
+- Find in every document: the words you searched for are highlighted when it opens, "2 of 5" with previous and next (Shift+Enter, Enter) steps through every match on every page, and the find box takes other words too.
+- Documents look like themselves: Word files with their headings, lists, tables and pictures; spreadsheets as tables with a tab per sheet; Markdown formatted; emails with their headers and body. Where LibreOffice is installed, Word, OpenDocument, RTF, PowerPoint and Keynote files are shown as their real pages instead (converted on this computer, once per version). **Text** still shows what Duct read. HTML from documents is cleaned to a short list of safe tags, and an email's remote images are never loaded. `GET /api/document-view`, `GET /api/document-pdf`.
+- Search inside audio: voice notes (including WhatsApp's), recorded calls, meetings and interviews. What's said is transcribed on this computer by Whisper, never uploaded; the 77 MB model downloads once, the first time, and the privacy ledger lists it under On-device models. Results say "at 2:00" and play from there; the workspace shows the recording with its transcript, a time on every line. Off until turned on in Settings › Features; songs (tagged with an artist and an album) are skipped. Not available on Intel Macs.
+- **Open at login** (Settings › This computer) starts Duct when you sign in, so quick search and watched folders are always ready.
+
+### Fixed
+- Long file names in All documents ran over the folder, status and buttons; they now end in "…", with the full name and path on hover.
+- Highlights lit up a searched word inside another word ("tax" in "taxation").
+
+
 ## [1.0.0-alpha.2] - 2026-10-09
 
 ### Fixed

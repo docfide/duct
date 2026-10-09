@@ -12,7 +12,7 @@ export interface ExtractedDocument {
 export type DocumentFormat =
   | 'pdf' | 'docx' | 'doc' | 'odt' | 'rtf' | 'pages' | 'md' | 'html' | 'epub'
   | 'xlsx' | 'ods' | 'numbers' | 'pptx' | 'odp' | 'key'
-  | 'eml' | 'msg' | 'txt' | 'code' | 'svg' | 'image' | 'zip' | 'url'
+  | 'eml' | 'msg' | 'txt' | 'code' | 'svg' | 'image' | 'audio' | 'zip' | 'url'
 
 export interface DocumentInfo {
   path: string

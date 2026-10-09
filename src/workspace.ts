@@ -79,6 +79,38 @@ main { flex: 1; min-height: 0; display: flex; }
 .picker li .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .picker .hint { color: var(--subtle); font-family: var(--mono); font-size: 11px; }
 
+.rich { background: #FFFFFF; color: #1C1C1A; max-width: 860px; margin: 24px auto 60px; padding: 56px clamp(20px, 6vw, 72px); border-radius: 2px; box-shadow: 0 2px 18px rgba(0,0,0,.45); font-family: -apple-system, 'Segoe UI', Calibri, Arial, sans-serif; font-size: 15px; line-height: 1.6; overflow-wrap: anywhere; }
+.rich h1, .rich h2, .rich h3, .rich h4 { line-height: 1.25; margin: 1.3em 0 .5em; }
+.rich h1 { font-size: 1.7em; } .rich h2 { font-size: 1.35em; } .rich h3 { font-size: 1.15em; }
+.rich p { margin: 0 0 .8em; }
+.rich table { border-collapse: collapse; margin: 1em 0; font-size: 14px; }
+.rich th, .rich td { border: 1px solid #D4D4CF; padding: 5px 8px; vertical-align: top; text-align: left; }
+.rich th { background: #F3F3EF; font-weight: 600; }
+.rich img { max-width: 100%; height: auto; }
+.rich blockquote { margin: 1em 0; padding-left: 14px; border-left: 3px solid #D4D4CF; color: #4A4A46; }
+.rich pre, .rich code { font-family: var(--mono); font-size: 13px; background: #F3F3EF; border-radius: 4px; }
+.rich pre { padding: 10px 12px; overflow: auto; white-space: pre-wrap; }
+.rich .link { color: #1D4ED8; text-decoration: underline; }
+.rich .img-missing, .rich .note { color: #6B6B66; font-size: 13px; }
+.rich-sheet { max-width: none; margin: 0; padding: 16px; border-radius: 0; box-shadow: none; }
+.rich-sheet .sheet { overflow: auto; max-height: none; }
+.rich-sheet table { font-size: 13px; font-variant-numeric: tabular-nums; margin: 0; }
+.rich-sheet .sheet-name { font-size: 13px; font-family: var(--mono); text-transform: uppercase; letter-spacing: .06em; color: #4A4A46; margin: 18px 0 8px; }
+.rich-sheet section:first-child .sheet-name { margin-top: 0; }
+.rich-email .mail-head { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 0 0 18px; padding-bottom: 14px; border-bottom: 1px solid #D4D4CF; font-size: 14px; }
+.rich-email .mail-head dt { color: #6B6B66; } .rich-email .mail-head dd { margin: 0; }
+.sheet-tabs { position: sticky; top: 0; z-index: 2; display: flex; gap: 4px; padding: 8px 16px; background: var(--s1); border-bottom: 1px solid var(--border); overflow-x: auto; }
+.sheet-tabs button { flex: none; }
+mark.ws-find { background: #FDE68A; color: #111110; border-radius: 2px; }
+mark.ws-find.current { background: var(--lime); outline: 2px solid var(--lime); }
+.audio-pane { position: absolute; inset: 0; display: flex; flex-direction: column; }
+.audio-pane > .scroller { position: relative; inset: auto; flex: 1; min-height: 0; }
+.player { flex: none; padding: 10px 14px; background: var(--s1); border-bottom: 1px solid var(--border); }
+.player audio { width: 100%; }
+.player .hint { margin: 6px 0 0; color: var(--subtle); font-size: 12px; }
+.transcript .line { margin: 0 0 6px; display: flex; gap: 10px; align-items: baseline; line-height: 1.6; }
+.transcript .line .time { flex: none; font-family: var(--mono); font-size: 11px; color: var(--lime); padding: 0 4px; }
+.transcript .line.playing { background: var(--lime-bg); border-radius: 4px; }
 .text-view { padding: 24px clamp(16px, 4vw, 48px) 60px; background: var(--black); min-height: 100%; }
 .text-view .sec { max-width: 78ch; margin: 0 auto 26px; }
 .text-view .sec-label { user-select: none; -webkit-user-select: none; font-family: var(--mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--lime); margin: 0 0 8px; padding-top: 8px; border-top: 1px solid var(--border); }
@@ -187,6 +219,7 @@ main { flex: 1; min-height: 0; display: flex; }
   const TEXT_FORMATS = new Set(['md', 'code', 'txt'])
   const RASTER = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'])
   const WS = new RegExp('\\\\s+', 'g')
+  const WORD_CHAR = new RegExp('[\\\\p{L}\\\\p{N}]', 'u')
 
   function h(tag, props, ...kids) {
     const el = document.createElement(tag)
@@ -282,6 +315,7 @@ main { flex: 1; min-height: 0; display: flex; }
       this.pageInput.hidden = this.pageCount.hidden = this.zoomIn.hidden = this.zoomOut.hidden = this.modeBtn.hidden = true
       this.findInput.hidden = this.prevMatch.hidden = this.nextMatch.hidden = this.matchCount.hidden = true
       this.findBus = null
+      this.domMarks = null
     }
 
     clear() {
@@ -320,6 +354,7 @@ main { flex: 1; min-height: 0; display: flex; }
       this.path = path
       this.format = doc.format
       this.mode = 'native'
+      this.view = null
       this.page = page || 1
       this.terms = terms || []
       this.nameBtn.textContent = (doc.displayName || fileName(path)) + ' ▾'
@@ -338,14 +373,17 @@ main { flex: 1; min-height: 0; display: flex; }
       try {
         if (this.format === 'pdf' && this.mode === 'native') await this.renderPdf()
         else if (this.format === 'image' && RASTER.has(ext) && this.mode === 'native') this.renderImage(doc)
+        else if (this.format === 'audio') await this.renderAudio()
+        else if (this.format !== 'pdf' && this.format !== 'image' && this.mode === 'native') await this.renderView()
         else await this.renderText()
       } catch (err) {
         this.fail("Couldn't open this document: " + (err && err.message ? err.message : err))
       }
-      if (this.format === 'image' || this.format === 'pdf') {
+      const rich = this.view && this.view.kind !== 'text'
+      if (this.format === 'image' || this.format === 'pdf' || rich) {
         this.modeBtn.hidden = false
-        this.modeBtn.textContent = this.mode === 'native' ? 'Text' : (this.format === 'pdf' ? 'PDF' : 'Image')
-        this.modeBtn.title = this.mode === 'native' ? 'Show the extracted text' : 'Show the original'
+        this.modeBtn.textContent = this.mode === 'native' ? 'Text' : (this.format === 'pdf' || this.view?.kind === 'pdf' ? 'Pages' : this.format === 'image' ? 'Image' : 'Formatted')
+        this.modeBtn.title = this.mode === 'native' ? 'Show the text Duct read' : 'Show the document as it looks'
       }
     }
 
@@ -362,7 +400,7 @@ main { flex: 1; min-height: 0; display: flex; }
       return '/api/file/' + encodeURIComponent(fileName(this.path)) + '?path=' + encodeURIComponent(this.path)
     }
 
-    async renderPdf() {
+    async renderPdf(url = this.fileUrl()) {
       const { pdfjsLib, EventBus, PDFLinkService, PDFFindController, PDFViewer } = await loadPdf()
       const scroller = h('div', { class: 'scroller' }, h('div', { class: 'pdfViewer' }))
       this.body.append(scroller)
@@ -389,7 +427,7 @@ main { flex: 1; min-height: 0; display: flex; }
       this.resizer = new ResizeObserver(() => { if (this.fit && viewer.pagesCount) viewer.currentScaleValue = 'page-width' })
       this.resizer.observe(scroller)
       const doc = await pdfjsLib.getDocument({
-        url: this.fileUrl(), cMapUrl: '/vendor/pdfjs/cmaps/', cMapPacked: true, standardFontDataUrl: '/vendor/pdfjs/standard_fonts/',
+        url, cMapUrl: '/vendor/pdfjs/cmaps/', cMapPacked: true, standardFontDataUrl: '/vendor/pdfjs/standard_fonts/',
         wasmUrl: '/vendor/pdfjs/wasm/', isEvalSupported: false,
       }).promise
       this.pdf = { doc, viewer }
@@ -399,7 +437,7 @@ main { flex: 1; min-height: 0; display: flex; }
 
     /** Finds the words in the find box (or the searched-for terms) in the PDF: again = the next or previous match. */
     find(again, previous) {
-      if (!this.findBus) return
+      if (!this.findBus) { this.domFind(again, previous); return }
       const typed = this.findInput.value.trim()
       const query = typed === this.terms.join(' ') && this.terms.length ? this.terms : typed
       const any = Array.isArray(query) ? query.length > 0 : !!query
@@ -409,6 +447,152 @@ main { flex: 1; min-height: 0; display: flex; }
 
     showMatches(m) {
       this.matchCount.textContent = m.total ? m.current + ' of ' + m.total : 'No matches'
+    }
+
+    /**
+     * The document as it looks, from the server's view of it (src/document-view.ts): pages laid out by LibreOffice
+     * when it's installed, or the format's own structure as cleaned HTML, or else the text.
+     */
+    async renderView() {
+      const q = '?path=' + encodeURIComponent(this.path)
+      this.body.replaceChildren(h('div', { class: 'empty', text: 'Opening…' }))
+      this.view ||= await (await api('/api/document-view' + q)).json()
+      if (this.view.kind === 'pdf') {
+        this.body.replaceChildren(h('div', { class: 'empty', text: 'Laying out the pages with LibreOffice…' }))
+        try {
+          await api('/api/document-pdf' + q, { method: 'HEAD' })   // converts once, then it's cached
+          this.body.replaceChildren()
+          await this.renderPdf('/api/document-pdf' + q)
+          return
+        } catch {
+          this.view = { kind: 'text' }   // LibreOffice couldn't: show the text instead
+        }
+      }
+      this.body.replaceChildren()
+      if (this.view.kind === 'html') this.renderRich(this.view)
+      else await this.renderText()
+    }
+
+    /**
+     * A recording: the player, and the transcript Duct made of it, a line per passage with its time. Clicking a time
+     * plays from there; the line being played is highlighted. Opened from a result, it's cued at that minute.
+     */
+    async renderAudio() {
+      const data = await (await api('/api/document-text?path=' + encodeURIComponent(this.path))).json()
+      const player = h('audio', { controls: true, preload: 'metadata', src: this.fileUrl(), 'aria-label': 'Recording' })
+      player.addEventListener('error', () => { bar.append(h('p', { class: 'hint', text: 'This kind of recording can’t play here. “Open in app” plays it; the transcript is below.' })) }, { once: true })
+      const bar = h('div', { class: 'player' }, player)
+      const view = h('div', { class: 'text-view transcript' })
+      const LINE = new RegExp('^\\\\[((?:\\\\d+:)?\\\\d+:\\\\d\\\\d)\\\\]\\\\s*(.*)$')
+      const seconds = t => t.split(':').reduce((acc, n) => acc * 60 + Number(n), 0)
+      const lines = []
+      for (const sec of data.sections) {
+        const block = h('div', { class: 'sec', 'data-page': sec.page || false })
+        for (const raw of sec.text.split('\\n')) {
+          const m = LINE.exec(raw)
+          if (!m) { if (raw.trim()) block.append(h('p', { class: 'line', text: raw })); continue }
+          const at = seconds(m[1])
+          const row = h('p', { class: 'line', 'data-at': at },
+            h('button', { class: 'ghost time', title: 'Play from ' + m[1], 'aria-label': 'Play from ' + m[1], text: m[1], onclick: () => { player.currentTime = at; player.play().catch(() => {}) } }),
+            h('span', { text: m[2] }))
+          lines.push(row)
+          block.append(row)
+        }
+        view.append(block)
+      }
+      if (!lines.length) view.append(h('div', { class: 'empty', text: 'No speech was found in this recording.' }))
+      player.addEventListener('timeupdate', () => {
+        const t = player.currentTime
+        let cur = null
+        for (const l of lines) { if (Number(l.dataset.at) <= t + 0.2) cur = l; else break }
+        for (const l of lines) l.classList.toggle('playing', l === cur)
+      })
+      const scroller = h('div', { class: 'scroller' }, view)
+      this.body.append(h('div', { class: 'audio-pane' }, bar, scroller))
+      // From a result: cue the recording at its minute (it doesn't start playing by itself).
+      if (this.page > 1) {
+        const first = lines.find(l => Number(l.dataset.at) >= (this.page - 1) * 60)
+        if (first) { player.currentTime = Number(first.dataset.at); first.scrollIntoView({ block: 'center' }) }
+      }
+      this.findInput.hidden = false
+      this.findInput.value = this.terms.join(' ')
+      if (this.terms.length) this.domFind(false, false)
+    }
+
+    renderRich(view) {
+      // Cleaned on the server; checked again here, since this page may run scripts.
+      const tpl = document.createElement('template')
+      tpl.innerHTML = view.html
+      for (const el of [...tpl.content.querySelectorAll('*')]) {
+        if (/^(script|style|iframe|frame|object|embed|link|meta|base|form|svg|math)$/i.test(el.tagName)) { el.remove(); continue }
+        for (const a of [...el.attributes]) if (/^on/i.test(a.name) || /^(href|style|srcdoc|formaction|xlink:href|action)$/i.test(a.name) || (a.name === 'src' && !/^data:image\//i.test(a.value))) el.removeAttribute(a.name)
+      }
+      const page = h('div', { class: 'rich rich-' + view.via })
+      page.append(tpl.content)
+      const scroller = h('div', { class: 'scroller' })
+      if (view.sections && view.sections.length > 1) {
+        // Spreadsheets: a tab per sheet.
+        const tabs = h('div', { class: 'sheet-tabs', role: 'tablist', 'aria-label': 'Sheets' }, view.sections.map(sec =>
+          h('button', { role: 'tab', text: sec.title, onclick: () => page.querySelector('[data-page="' + sec.page + '"]')?.scrollIntoView({ block: 'start' }) })))
+        scroller.append(tabs)
+      }
+      scroller.append(page)
+      this.body.append(scroller)
+      this.findInput.hidden = false
+      this.findInput.value = this.terms.join(' ')
+      if (this.terms.length) this.domFind(false, false)
+    }
+
+    /** Find in the formatted or text view: marks every match, and steps through them in order. */
+    domFind(again, previous) {
+      const root = this.body.querySelector('.rich, .text-view')
+      if (!root) return
+      const typed = this.findInput.value.trim()
+      if (!again || !this.domMarks) {
+        for (const m of [...root.querySelectorAll('mark.ws-find')]) m.replaceWith(...m.childNodes)
+        root.normalize()
+        this.domMarks = []
+        this.domAt = -1
+        const words = (typed === this.terms.join(' ') && this.terms.length ? this.terms : typed.split(WS)).map(w => w.toLowerCase()).filter(w => w.length > 1)
+        if (words.length) {
+          const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+          const nodes = []
+          while (walker.nextNode()) nodes.push(walker.currentNode)
+          for (const node of nodes) {
+            const text = node.nodeValue, lower = text.toLowerCase()
+            const hits = []
+            for (const w of words) for (let i = lower.indexOf(w); i !== -1; i = lower.indexOf(w, i + 1)) {
+              if (i > 0 && WORD_CHAR.test(lower[i - 1])) continue
+              hits.push([i, i + w.length])
+            }
+            if (!hits.length) continue
+            hits.sort((a, b) => a[0] - b[0])
+            const frag = document.createDocumentFragment()
+            let at = 0
+            for (const [from, to] of hits) {
+              if (from < at) continue
+              frag.append(text.slice(at, from))
+              const m = h('mark', { class: 'ws-find', text: text.slice(from, to) })
+              frag.append(m)
+              this.domMarks.push(m)
+              at = to
+            }
+            frag.append(text.slice(at))
+            node.replaceWith(frag)
+          }
+        }
+      }
+      const marks = this.domMarks
+      this.prevMatch.hidden = this.nextMatch.hidden = this.matchCount.hidden = !typed
+      if (!marks.length) { this.matchCount.textContent = typed ? 'No matches' : ''; return }
+      if (!again) {
+        // Start at the result's page or sheet, if the document has them.
+        const first = marks.findIndex(m => (parseInt(m.closest('[data-page]')?.dataset.page || '1', 10) || 1) >= (this.page || 1))
+        this.domAt = first === -1 ? 0 : first
+      } else this.domAt = (this.domAt + (previous ? -1 : 1) + marks.length) % marks.length
+      marks.forEach((m, i) => m.classList.toggle('current', i === this.domAt))
+      marks[this.domAt].scrollIntoView({ block: 'center' })
+      this.matchCount.textContent = (this.domAt + 1) + ' of ' + marks.length
     }
 
     renderImage(doc) {
@@ -447,6 +631,9 @@ main { flex: 1; min-height: 0; display: flex; }
         const target = view.querySelector('[data-page="' + this.page + '"]')
         if (target && this.page > 1) target.scrollIntoView()
       }
+      this.findInput.hidden = false
+      this.findInput.value = this.terms.join(' ')
+      if (this.terms.length) this.domFind(false, false)
     }
 
     zoom(factor) {
