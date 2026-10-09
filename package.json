@@ -75,7 +75,12 @@
         "deb"
       ],
       "category": "Office",
-      "icon": "electron/icon.png"
+      "icon": "electron/icon.png",
+      "executableName": "duct"
+    },
+    "deb": {
+      "packageName": "duct",
+      "artifactName": "Duct-${version}-${arch}.${ext}"
     },
     "extraMetadata": {
       "main": "electron/main.cjs"
