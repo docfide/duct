@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Duct</title>
+  <meta name="description" content="Search every page of your documents, on your own computer.">
+  <link rel="stylesheet" href="/ui/app.css">
+  <script type="module" src="/ui/app.js"></script>
+</head>
+<body>
+  <div class="offline-note" id="offlineNote" role="status" hidden>You’re offline. Everything in Duct is still searchable.</div>
+  <!-- First run: shown until something has been added (or the person skips it). -->
+  <section id="welcome" class="welcome" hidden aria-labelledby="welcomeTitle">
+    <div class="welcome-card">
+      <div class="mascot-slot mascot-xl" data-mascot="welcome" aria-hidden="true"></div>
+      <div id="welcomeStart">
+        <h1 id="welcomeTitle">Find anything in your documents</h1>
+        <p class="lead">Duct reads the files on this computer and makes every page searchable. Nothing is uploaded anywhere.</p>
+        <div class="welcome-actions">
+          <button class="btn btn-primary btn-lg" data-action="watch-folder">Choose a folder to search</button>
+          <button class="btn btn-ghost btn-lg" data-action="add-files">Add files</button>
+        </div>
+        <form id="welcomeWatchForm" class="inline-form" hidden>
+          <input type="text" name="dir" placeholder="/path/to/a/folder on this server" aria-label="Folder on the server" required>
+          <button class="btn btn-primary" type="submit">Watch</button>
+        </form>
+        <p class="hint">Or drop files anywhere on this window. Duct reads <span data-bind="supported"></span>.</p>
+        <button class="link" data-action="skip-welcome">Skip for now</button>
+      </div>
+      <div id="welcomeProgress" hidden>
+        <h1>Reading your documents…</h1>
+        <p class="lead" id="welcomeProgressText">Getting started</p>
+        <div class="progress" role="progressbar" aria-label="Indexing progress"><div class="progress-bar" id="welcomeBar"></div></div>
+        <p class="hint" id="welcomeCurrent">&nbsp;</p>
+        <p class="found-so-far" id="welcomeFound" aria-live="polite"></p>
+        <button class="btn btn-primary btn-lg" data-action="finish-welcome">Start searching</button>
+        <p class="hint">You can search while Duct keeps reading in the background.</p>
+      </div>
+      <div id="welcomeReady" hidden>
+        <h1>Ready.</h1>
+        <p class="lead" id="welcomeReadyFound"></p>
+        <form id="welcomeSearch" class="welcome-search" role="search">
+          <label for="welcomeQ">Think of a document you couldn’t find last week. Search for it.</label>
+          <div class="welcome-search-row">
+            <input id="welcomeQ" name="q" type="search" autocomplete="off" placeholder="A name, a phrase, an amount…">
+            <button class="btn btn-primary" type="submit">Search</button>
+          </div>
+        </form>
+        <div class="try" id="welcomeTry"></div>
+        <button class="link" data-action="finish-welcome">Go to Duct</button>
+      </div>
+    </div>
+  </section>
+
+  <div id="app" class="app" hidden>
+    <div id="licenceBanner" class="licence-banner" role="status" hidden></div>
+    <header class="topbar">
+      <button class="icon-btn sidebar-toggle" data-action="toggle-sidebar" aria-label="Show sidebar">☰</button>
+      <a class="brand" href="/" aria-label="Duct home">
+        <svg width="22" height="22" viewBox="0 0 30 30" fill="none" aria-hidden="true">
+          <line x1="4" y1="9" x2="16" y2="9" stroke="#4a4a46" stroke-width="2.4" stroke-linecap="round"/>
+          <line x1="4" y1="15" x2="22" y2="15" stroke="#A3E635" stroke-width="2.6" stroke-linecap="round"/>
+          <line x1="4" y1="21" x2="12" y2="21" stroke="#4a4a46" stroke-width="2.4" stroke-linecap="round"/>
+          <path d="M24 12 L28 15 L24 18" stroke="#A3E635" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>duct</span>
+      </a>
+      <form class="searchbar" id="searchForm" role="search">
+        <div class="mode-switch" role="tablist" aria-label="Mode">
+          <button type="button" role="tab" class="mode active" data-mode="search" aria-selected="true">Search</button>
+          <button type="button" role="tab" class="mode" data-mode="ask" aria-selected="false" title="Answers from your documents using an AI model (Labs)">Ask <span class="labs">Labs</span></button>
+        </div>
+        <input id="q" type="search" autocomplete="off" spellcheck="false" placeholder="Search your documents" aria-label="Search your documents">
+        <kbd class="search-kbd" aria-hidden="true">/</kbd>
+      </form>
+      <div class="top-actions">
+        <button class="status-pill" id="statusPill" data-action="status" aria-live="polite"></button>
+        <div class="menu-wrap">
+          <button class="btn btn-primary" data-action="toggle-add" aria-haspopup="menu" aria-expanded="false">+ Add</button>
+          <div class="menu" id="addMenu" role="menu" hidden>
+            <button role="menuitem" data-action="add-files"><strong>Add files to your Library</strong><span>Copied to your Duct Library and indexed</span></button>
+            <button role="menuitem" data-action="watch-folder" data-requires="watch"><strong>Watch a folder</strong><span>Indexed where it is and kept in sync</span></button>
+            <button role="menuitem" data-action="add-url"><strong>Add a web page</strong><span>Index the text of a public page</span></button>
+            <button role="menuitem" data-action="add-whatsapp"><strong>Add a WhatsApp chat</strong><span>The messages and every file in it, with who sent what</span></button>
+          </div>
+        </div>
+        <button class="icon-btn" data-action="open-settings" aria-label="Settings" title="Settings">⚙</button>
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar" id="sidebar">
+        <nav class="side-section" aria-label="Views">
+          <button class="side-item active" data-view="search"><span>Search</span></button>
+          <button class="side-item" data-view="documents"><span>All documents</span><span class="count" data-bind="docCount"></span></button>
+          <button class="side-item attention" data-view="attention" hidden><span>Needs attention</span><span class="count warn" data-bind="attentionCount"></span></button>
+          <button class="side-item" data-view="notebooks"><span>Notebooks</span><span class="count" data-bind="notebookCount"></span></button>
+        </nav>
+        <div class="side-section">
+          <h2>File types</h2>
+          <div id="kindList"></div>
+        </div>
+        <div class="side-section">
+          <h2>Modified</h2>
+          <div id="dateList"></div>
+        </div>
+        <div class="side-section" id="tagSection" hidden>
+          <h2>Tags</h2>
+          <div id="tagList"></div>
+        </div>
+        <div class="side-section">
+          <h2>Sources</h2>
+          <div id="sourceList"></div>
+          <button class="side-add" data-action="watch-folder" data-requires="watch">+ Watch a folder</button>
+        </div>
+      </aside>
+
+      <main class="content" id="content">
+        <section id="viewHome" class="view" aria-label="Home">
+          <div class="home">
+            <div class="mascot-slot mascot-lg" data-mascot="idle" aria-hidden="true"></div>
+            <h1 id="homeTitle"></h1>
+            <p class="lead" id="homeSub"></p>
+            <div class="try" id="homeTry"></div>
+            <div class="home-attention" id="homeAttention" hidden></div>
+            <section class="radar" id="homeRadar" hidden aria-label="Coming up"></section>
+            <div class="recent" id="recent"></div>
+          </div>
+        </section>
+
+        <section id="viewResults" class="view" hidden aria-label="Results">
+          <div class="results-head">
+            <h2 id="resultsTitle"></h2>
+            <div class="scope-chips" id="scopeChips"></div>
+            <div class="results-tools">
+              <button class="btn btn-sm" data-action="show-collected" id="collectedBtn" hidden>Collected <span class="count" data-bind="collectedCount">0</span></button>
+              <div class="menu-wrap">
+                <button class="btn btn-sm" data-action="toggle-export" aria-haspopup="menu" aria-expanded="false">Export</button>
+                <div class="menu menu-sm" id="exportMenu" role="menu" hidden>
+                  <button role="menuitem" data-export="docx"><strong>Word document</strong><span>Each passage with its source</span></button>
+                  <button role="menuitem" data-export="csv"><strong>Spreadsheet (CSV)</strong><span>An evidence list: file, page, passage</span></button>
+                  <button role="menuitem" data-export="md"><strong>Markdown</strong><span>Quotes with sources, to paste anywhere</span></button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <ol class="results" id="results"></ol>
+          <div class="empty" id="resultsEmpty" hidden>
+            <div class="mascot-slot mascot-md" data-mascot="nothingFound" aria-hidden="true"></div>
+            <p id="resultsEmptyText"></p>
+          </div>
+        </section>
+
+        <section id="viewAsk" class="view" hidden aria-label="Ask">
+          <div class="ask" id="askLog">
+            <div class="ask-intro">
+              <h2>Ask your documents <span class="labs">Labs</span></h2>
+              <p>Answers are written by an AI model from the passages Duct finds, with numbered sources. Check the sources for anything important.</p>
+              <p class="hint" id="askSetup" hidden>Ask needs an AI model. <button class="link" data-action="open-settings" data-tab="ai">Choose one in Settings</button>.</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="viewNotebooks" class="view" hidden aria-label="Notebooks">
+          <div class="results-head">
+            <h2>Notebooks</h2>
+            <div class="results-tools">
+              <button class="btn btn-sm" data-action="import-notebook">Import a shared notebook…</button>
+              <button class="btn btn-sm btn-primary" data-action="new-notebook">+ New notebook</button>
+            </div>
+          </div>
+          <form class="nb-new" id="nbNewForm" hidden>
+            <input id="nbNewName" maxlength="120" placeholder="What’s it for? e.g. Acme lease review" aria-label="Notebook name" autocomplete="off">
+            <button class="btn btn-primary" type="submit">Create</button>
+            <button class="btn" type="button" data-action="cancel-notebook">Cancel</button>
+          </form>
+          <input type="file" id="nbImportInput" accept=".html,.htm,.json,text/html,application/json" hidden>
+          <div id="notebookList"></div>
+        </section>
+
+        <section id="viewDocuments" class="view" hidden aria-label="Documents">
+          <div class="results-head">
+            <h2 id="documentsTitle">All documents</h2>
+            <div class="scope-chips" id="docScopeChips"></div>
+            <div class="seg" role="tablist" aria-label="Show">
+              <button role="tab" class="seg-item active" data-doc-filter="all">All</button>
+              <button role="tab" class="seg-item" data-doc-filter="attention">Needs attention</button>
+            </div>
+          </div>
+          <div class="doc-table" id="docTable" role="table" aria-label="Documents"></div>
+        </section>
+      </main>
+
+      <aside class="preview" id="preview" aria-label="Preview" hidden>
+        <button class="icon-btn preview-close" data-action="close-preview" aria-label="Close preview">✕</button>
+        <div id="previewBody"></div>
+      </aside>
+    </div>
+  </div>
+
+  <dialog id="settings" class="settings" aria-labelledby="settingsTitle">
+    <form method="dialog" class="settings-head">
+      <h2 id="settingsTitle">Settings</h2>
+      <button class="icon-btn" aria-label="Close settings">✕</button>
+    </form>
+    <div class="settings-body">
+      <nav class="settings-tabs" role="tablist" aria-label="Settings sections">
+        <button role="tab" class="tab active" data-tab="general">General</button>
+        <button role="tab" class="tab" data-tab="features">Features</button>
+        <button role="tab" class="tab" data-tab="search" data-admin>Search</button>
+        <button role="tab" class="tab" data-tab="ai" data-admin>AI</button>
+        <button role="tab" class="tab" data-tab="library">Library</button>
+        <button role="tab" class="tab" data-tab="account" data-admin>Account</button>
+        <button role="tab" class="tab" data-tab="privacy" data-admin>Privacy</button>
+        <button role="tab" class="tab" data-tab="audit" data-admin>Audit log</button>
+        <button role="tab" class="tab" data-tab="about">About</button>
+      </nav>
+      <div class="settings-panels">
+        <section class="panel" data-panel="general">
+          <p class="hint" id="signedInAs" hidden>Signed in to this server as <strong id="signedInEmail"></strong>. <button class="link" data-action="sign-out">Sign out</button></p>
+          <label class="check" data-admin><input type="checkbox" data-setting="ocr"> <span><strong>Read scanned pages and images (OCR)</strong><small>Slower to index. Without it, scans are listed under Needs attention so you can read them one by one.</small></span></label>
+          <label class="check"><input type="checkbox" id="mascotToggle"> <span><strong>Show the mascot</strong><small>Only on this device.</small></span></label>
+          <div id="telemetryBox" hidden>
+            <label class="check" data-admin><input type="checkbox" id="telemetryToggle"> <span><strong>Send anonymous usage counts</strong><small id="telemetryHelp">A daily count of versions, features and library size (in ranges) so Tensflare knows what to improve. Never your documents, file names or searches.</small></span></label>
+            <details class="telemetry-details"><summary>What Duct sends</summary><pre id="telemetryReport"></pre></details>
+          </div>
+        </section>
+        <section class="panel" data-panel="features" hidden>
+          <p class="hint" id="featuresHint">Turn off anything you don't use. Switched-off features disappear from Duct and its API.</p>
+          <div id="featureList"></div>
+        </section>
+        <section class="panel" data-panel="search" hidden>
+          <label class="field"><span>How results are found</span>
+            <select data-setting="searchMode">
+              <option value="bm25">Keywords: exact words, phrases and word forms</option>
+              <option value="hybrid">Hybrid: keywords plus meaning (needs an embedding model)</option>
+              <option value="vector">Meaning only (needs an embedding model)</option>
+            </select>
+          </label>
+          <label class="check"><input type="checkbox" data-setting="rerank"> <span><strong>Re-rank results</strong><small>Favours passages where your words appear close together.</small></span></label>
+        </section>
+        <section class="panel" data-panel="ai" hidden>
+          <p class="notice" id="embedNotice" hidden></p>
+          <h3>Search by meaning (embeddings)</h3>
+          <label class="field"><span>Provider</span>
+            <select data-setting="embedProvider">
+              <option value="">Automatic (from saved API keys)</option>
+              <option value="ollama">Ollama (runs on this computer)</option>
+              <option value="openai">OpenAI</option>
+              <option value="gemini">Google Gemini</option>
+              <option value="cohere">Cohere</option>
+              <option value="voyage">Voyage AI</option>
+              <option value="mistral">Mistral</option>
+              <option value="jina">Jina AI</option>
+              <option value="openai-compatible">OpenAI-compatible server</option>
+              <option value="tensflare">Tensflare (included with Pro and Team)</option>
+            </select>
+          </label>
+          <label class="field"><span>Model <small>optional</small></span><input type="text" data-setting="embedModel" placeholder="Provider default"></label>
+          <label class="field" data-show-for="embed-url"><span>Server URL</span><input type="url" data-setting="embedBaseUrl" placeholder="http://localhost:11434"></label>
+          <h3>Answers (Ask)</h3>
+          <label class="field"><span>Provider</span>
+            <select data-setting="llmProvider">
+              <option value="none">Off</option>
+              <option value="ollama">Ollama (runs on this computer)</option>
+              <option value="openai">OpenAI</option>
+              <option value="gemini">Google Gemini</option>
+              <option value="tensflare">Tensflare (included with Pro and Team)</option>
+            </select>
+          </label>
+          <label class="field"><span>Model <small>optional</small></span><input type="text" data-setting="llmModel" placeholder="Provider default"></label>
+          <label class="field" data-show-for="llm-url"><span>Server URL</span><input type="url" data-setting="llmBaseUrl" placeholder="http://localhost:11434"></label>
+          <h3>API keys</h3>
+          <p class="hint" id="keyStorage"></p>
+          <div class="keys" id="keys"></div>
+        </section>
+        <section class="panel" data-panel="library" hidden>
+          <div class="kv"><span>Library folder</span><code id="libraryDir"></code></div>
+          <p class="hint">Files you add are copied here. Watched folders stay where they are.</p>
+          <div id="cloudSources" hidden>
+            <h3>Cloud sources</h3>
+            <p class="hint">Duct reads these directly, read-only, and keeps a private local copy to search. Documents never pass through Tensflare.</p>
+            <div id="connectorList"></div>
+            <div class="about-actions" data-admin>
+              <button class="btn" data-action="connect-source" data-kind="gdrive" id="connectGoogle">Connect Google Drive</button>
+              <button class="btn" data-action="connect-source" data-kind="microsoft" id="connectMicrosoft">Connect OneDrive</button>
+            </div>
+            <form class="inline-form" id="sharepointForm" data-admin>
+              <input type="url" name="site" placeholder="https://yourcompany.sharepoint.com/sites/Legal" aria-label="SharePoint site address">
+              <button class="btn" type="submit">Connect SharePoint site</button>
+            </form>
+            <details class="s3-connect" id="s3Connect" data-admin>
+              <summary>Connect an S3 bucket</summary>
+              <form class="stack-form" id="s3Form">
+                <p class="hint">Amazon S3, or any S3-compatible store: MinIO, Cloudflare R2, Wasabi, Backblaze B2. Use a key that can only list and read this bucket.</p>
+                <label>Bucket <input name="bucket" required autocomplete="off" placeholder="company-documents"></label>
+                <label>Folder (optional) <input name="prefix" autocomplete="off" placeholder="contracts/"></label>
+                <label>Region <input name="region" autocomplete="off" placeholder="eu-west-2 (auto for R2)"></label>
+                <label>Endpoint (S3-compatible stores only) <input name="endpoint" type="url" autocomplete="off" placeholder="https://<account>.r2.cloudflarestorage.com"></label>
+                <label>Access key ID <input name="accessKeyId" required autocomplete="off"></label>
+                <label>Secret access key <input name="secretAccessKey" type="password" required autocomplete="new-password"></label>
+                <button class="btn btn-primary" type="submit">Connect bucket</button>
+              </form>
+            </details>
+            <p class="hint" id="connectorsUpsell" hidden>Connectors for Google Drive, OneDrive, SharePoint and S3 are part of the Team plan.</p>
+          </div>
+          <h3>Watched folders</h3>
+          <div id="settingsSources"></div>
+          <button class="btn btn-ghost" data-action="watch-folder" data-requires="watch">Watch a folder</button>
+          <h3 data-admin>Danger zone</h3>
+          <button class="btn btn-danger" data-action="clear-index" data-admin>Clear the index</button>
+        </section>
+        <section class="panel" data-panel="privacy" hidden>
+          <div class="ledger-head">
+            <h3>What left this computer</h3>
+            <div class="seg" role="group" aria-label="Period">
+              <button class="seg-btn active" data-ledger-days="1">Today</button>
+              <button class="seg-btn" data-ledger-days="7">7 days</button>
+              <button class="seg-btn" data-ledger-days="30">30 days</button>
+            </div>
+          </div>
+          <div id="ledgerBody"></div>
+        </section>
+        <section class="panel" data-panel="audit" hidden>
+          <div id="auditList"></div>
+        </section>
+        <section class="panel" data-panel="account" hidden>
+          <div id="accountBody"></div>
+        </section>
+        <section class="panel" data-panel="about" hidden>
+          <p><strong>Duct</strong> <span data-bind="version"></span></p>
+          <p class="hint">Reads <span data-bind="supported"></span>.</p>
+          <p class="hint">Your documents are indexed on this computer. Search runs locally; AI features only send passages to the provider you choose.</p>
+          <div class="about-actions">
+            <button class="btn btn-primary" data-action="open-feedback">Send feedback</button>
+            <button class="btn" data-action="copy-diagnostics">Copy diagnostics</button>
+          </div>
+          <p class="hint" id="crashSummary" hidden></p>
+          <h3>Legal</h3>
+          <p class="links">
+            <a href="https://duct.tensflare.com/legal/privacy/" target="_blank" rel="noopener">Privacy policy</a>
+            <a href="https://duct.tensflare.com/legal/terms/" target="_blank" rel="noopener">Terms of service</a>
+            <a href="https://duct.tensflare.com/privacy/usage-counts/" target="_blank" rel="noopener">What Duct sends</a>
+            <a href="https://duct.tensflare.com/legal/refunds/" target="_blank" rel="noopener">Refunds</a>
+          </p>
+          <p class="hint">Duct is open source under the Apache 2.0 licence. © Tensflare Ltd.</p>
+        </section>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="urlDialog" class="small-dialog" aria-labelledby="urlTitle">
+    <form method="dialog" id="urlForm">
+      <h2 id="urlTitle">Add a web page</h2>
+      <input type="url" name="url" placeholder="https://example.com/handbook" required aria-label="Web page address">
+      <div class="dialog-actions">
+        <button class="btn btn-ghost" value="cancel" formnovalidate>Cancel</button>
+        <button class="btn btn-primary" value="ok">Add page</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="whatsappDialog" class="small-dialog" aria-labelledby="whatsappTitle">
+    <form method="dialog">
+      <h2 id="whatsappTitle">Add a WhatsApp chat</h2>
+      <ol class="steps-list">
+        <li>On your phone, open the chat in WhatsApp.</li>
+        <li>Tap the chat’s name (iPhone) or ⋮ › More (Android), then <strong>Export chat</strong> › <strong>Attach media</strong>.</li>
+        <li>Send the .zip to this computer: email it to yourself, AirDrop it, or save it to Drive.</li>
+        <li>Choose it here. Exporting the chat again later updates it.</li>
+      </ol>
+      <p class="hint">Duct reads the export on this computer. Nothing is sent anywhere, and Duct never opens WhatsApp itself.</p>
+      <div class="dialog-actions">
+        <button class="btn btn-ghost" value="cancel">Cancel</button>
+        <button class="btn btn-primary" type="button" data-action="pick-whatsapp">Choose the export</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="collectDialog" class="collect-dialog" aria-labelledby="collectTitle">
+    <form method="dialog" class="settings-head">
+      <h2 id="collectTitle">Collected passages</h2>
+      <button class="icon-btn" aria-label="Close">✕</button>
+    </form>
+    <div class="collect-body">
+      <p class="hint">Passages you collect from search results, kept on this device until you clear them. Export them with their sources, for a bid, a brief or an audit file.</p>
+      <label class="field"><span>Title</span><input type="text" id="collectName" placeholder="Collected passages" maxlength="200"></label>
+      <ol class="collect-list" id="collectList"></ol>
+      <div class="dialog-actions">
+        <button class="btn btn-ghost" data-action="clear-collected">Clear all</button>
+        <span class="spacer"></span>
+        <button class="btn" data-collect-export="md">Markdown</button>
+        <button class="btn" data-collect-export="csv">CSV</button>
+        <button class="btn btn-primary" data-collect-export="docx">Word document</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="feedbackDialog" class="collect-dialog" aria-labelledby="feedbackTitle">
+    <form method="dialog" class="settings-head">
+      <h2 id="feedbackTitle">Send feedback</h2>
+      <button class="icon-btn" aria-label="Close">✕</button>
+    </form>
+    <div class="collect-body">
+      <p class="hint">Tell us what worked, what didn’t, or what you expected. It goes to the Duct team at Tensflare.</p>
+      <label class="field"><span>Your message</span><textarea id="feedbackMessage" rows="6" maxlength="5000" placeholder="What happened? What did you expect?"></textarea></label>
+      <label class="field"><span>Email <small>optional, if you’d like a reply</small></span><input type="email" id="feedbackEmail" maxlength="254"></label>
+      <label class="check"><input type="checkbox" id="feedbackDiag" checked> <span><strong>Include diagnostics</strong><small>Version, operating system, settings and error codes. Never your documents, file names, paths or searches.</small></span></label>
+      <details class="telemetry-details"><summary>See exactly what’s included</summary><pre id="feedbackDiagPreview"></pre></details>
+      <label class="check" id="feedbackCrashRow" hidden><input type="checkbox" id="feedbackCrashes"> <span><strong>Include crash reports (<span id="feedbackCrashCount">0</span>)</strong><small>The type of error and the place in Duct’s code where it happened. No messages, documents or paths.</small></span></label>
+      <details class="telemetry-details" id="feedbackCrashDetails" hidden><summary>See the crash reports</summary><pre id="feedbackCrashPreview"></pre></details>
+      <div class="dialog-actions">
+        <a class="btn btn-ghost" id="feedbackEmailLink" href="mailto:duct@tensflare.com">Email instead</a>
+        <span class="spacer"></span>
+        <button class="btn btn-primary" data-action="send-feedback">Send</button>
+      </div>
+    </div>
+  </dialog>
+
+  <input type="file" id="fileInput" multiple hidden>
+  <input type="file" id="whatsappInput" accept=".zip,.txt" hidden>
+  <div class="drop-overlay" id="dropOverlay" hidden><div>Drop to add to your Library</div></div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

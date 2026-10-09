@@ -1,24 +1,48 @@
 import express from 'express'
 import multer from 'multer'
 import rateLimit from 'express-rate-limit'
-import { existsSync, mkdirSync, unlinkSync } from 'node:fs'
-import { extname, join } from 'node:path'
-import type { Duct } from './index.js'
+import { createHash, timingSafeEqual } from 'node:crypto'
+import { existsSync, mkdirSync, realpathSync, unlinkSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { createRequire } from 'node:module'
+import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import type { Duct, Note, Notebook } from './index.js'
+import { canDo, notebookRole } from './notebooks.js'
+import type { NotebookActor, NotebookRole } from './notebooks.js'
+import { notebookPage, parseSharedNotebook, sharedFrom } from './notebook-page.js'
+import type { DocumentFormat, SearchResult, SearchScope } from './types.js'
+import { isUrl } from './extract/web.js'
+import { addToLibrary, defaultLibraryDir } from './library.js'
+import { VERSION } from './version.js'
+import { viewerHtml } from './viewer.js'
+import { workspaceHtml } from './workspace.js'
+import { ACCEPT_ATTRIBUTE, FORMATS, SUPPORTED_SUMMARY, isSupportedFile, pageLabel } from './formats.js'
+import { islandHtml } from './island.js'
+import { EXPORT_TYPES, exportFileName, isExportFormat, renderExport } from './export.js'
+import type { ExportItem } from './export.js'
+import { createApiRouter } from './api/v1.js'
+import type { TensflareAccount } from './account.js'
+import type { Telemetry } from './telemetry.js'
+import type { SettingsSync } from './sync.js'
+import type { ConnectorManager } from './team/connectors/manager.js'
+import { currentLedger, LEDGER_CATEGORY_LABELS } from './ledger.js'
+import { importWhatsApp } from './whatsapp.js'
+import { principalsFor } from './access.js'
+import type { OidcLogin } from './team/oidc.js'
+import { teamServer } from './team/server.js'
+export { s3Details } from './team/server.js'
+import { clearCrashes, collectDiagnostics, listCrashes, sendFeedback, validateFeedback } from './diagnostics.js'
+import { Collections } from './api/collections.js'
+import { FEATURE_LABELS, FEATURE_NAMES, FORMAT_KINDS, FeatureDisabledError } from './features.js'
+import type { FeatureName } from './features.js'
 
-const VALID_EXTS = new Set(['.pdf', '.docx', '.md', '.markdown', '.html', '.htm', '.txt', '.csv', '.json', '.log', '.xml', '.xlsx', '.pptx', '.png', '.jpg', '.jpeg', '.tiff', '.tif', '.bmp', '.gif', '.webp'])
-
-const uploadDir = join(process.cwd(), '.duct-uploads')
-if (!existsSync(uploadDir)) mkdirSync(uploadDir, { recursive: true })
-
-const storage = multer.diskStorage({
-  destination: uploadDir,
-  filename: (_req, file, cb) => {
-    const ext = extname(file.originalname).toLowerCase()
-    cb(null, Date.now() + '-' + Math.random().toString(36).slice(2) + ext)
-  },
-})
-
-const originalNames = new Map<string, string>()
+// Mascot art ships with the package; the dotLottie player and its wasm are served
+// locally (never from a CDN) so the UI works offline.
+const mascotDir = fileURLToPath(new URL('../assets/mascot', import.meta.url))
+const lottiePlayerDir = dirname(createRequire(import.meta.url).resolve('@lottiefiles/dotlottie-web'))
+// pdf.js (legacy build, for wider browser support) powers the /viewer page; served locally like the mascot.
+const pdfjsDir = dirname(createRequire(import.meta.url).resolve('pdfjs-dist/package.json'))
 
 function parseMetadata(raw: unknown): Record<string, unknown> | undefined {
   if (!raw) return undefined
@@ -29,18 +53,167 @@ function parseMetadata(raw: unknown): Record<string, unknown> | undefined {
   return undefined
 }
 
-export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimitMb?: number }) {
+const LOOPBACK_HOSTS = ['localhost', '127.0.0.1', '::1']
+// The main UI (assets/ui) has no inline scripts, so scripts may only come from this server.
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self' 'wasm-unsafe-eval'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "font-src 'self' data:",
+  "connect-src 'self'",
+  "worker-src 'self' blob:",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join('; ')
+// The island and PDF viewer pages still carry their script inline.
+const INLINE_SCRIPT_CSP = CSP.replace("script-src 'self'", "script-src 'self' 'unsafe-inline'")
+const uiDir = fileURLToPath(new URL('../assets/ui', import.meta.url))
+const API_KEY_FIELDS = ['openaiKey', 'geminiKey', 'cohereKey', 'voyageKey', 'mistralKey', 'jinaKey'] as const
+
+export interface ServerOptions {
+  /** Require this token (Bearer header or login cookie) on every /api request. Its holders are admins. */
+  authToken?: string
+  /**
+   * Extra tokens for team members (requires authToken). Members can search, ask, open, upload and run OCR,
+   * but can't change settings, delete documents, clear the index or change watched folders.
+   */
+  memberTokens?: string[]
+  uploadLimitMb?: number
+  /** Directories POST /api/watch may watch (and their subfolders). Empty or unset disables watching through the API. */
+  watchRoots?: string[]
+  /** Hostnames accepted in the Host header. Defaults to loopback names; '*' accepts any (only with authToken). */
+  allowedHosts?: string[] | '*'
+  /** Behind a reverse proxy (Caddy, nginx, a load balancer): how many proxy hops to trust for the client's address and https. */
+  trustProxy?: number
+  /** Where uploaded files are kept. Defaults to ~/Duct Library; created on first upload. */
+  libraryDir?: string
+  /**
+   * Called with API keys entered in Settings, so the host can store them securely (the desktop app uses
+   * the system keychain). Keys are otherwise kept in memory only.
+   */
+  onSecrets?: (keys: Partial<Record<typeof API_KEY_FIELDS[number], string>>) => void
+  /** Developer API collections. Defaults to <index>/collections (in memory for an in-memory index). */
+  collections?: Collections
+  /** "Sign in with Tensflare" for this install (optional; everything local works without it). */
+  account?: TensflareAccount
+  /** Anonymous usage counts (src/telemetry.ts). Without it the server counts and sends nothing. */
+  telemetry?: Telemetry
+  /** Where crash records are kept (see src/diagnostics.ts). */
+  crashDir?: string
+  /** How Duct is running, for diagnostics: desktop, server, docker or cli. */
+  channel?: string
+  /** Overrides where feedback is sent (tests, staging). */
+  feedbackUrl?: string
+  /** Settings sync between the account's devices (Pro and Team). */
+  sync?: SettingsSync
+  /** Google Drive, OneDrive and SharePoint sources (Team). */
+  connectors?: ConnectorManager
+  /** Sign-in with the organisation's identity provider (OpenID Connect) for a shared server. */
+  oidc?: OidcLogin
+  /**
+   * The audit log: on by default for a shared server (token or sign-in). `queries` also records search
+   * terms and questions; `days` is how long entries are kept (default 365).
+   */
+  audit?: false | { queries?: boolean; days?: number }
+}
+
+/** 403 for a switched-off feature, otherwise `status` with the error's message. */
+function sendError(res: express.Response, err: unknown, status = 500): void {
+  if (err instanceof FeatureDisabledError) {
+    res.status(403).json({ error: err.message, feature: err.feature })
+    return
+  }
+  res.status(status).json({ error: (err as Error).message })
+}
+
+/** Search scope from query parameters: ?formats=pdf,docx &under=/folder &tag=a&tag=b &after=<ms> &before=<ms>. */
+function scopeFrom(query: express.Request['query']): SearchScope | undefined {
+  const scope: SearchScope = {}
+  if (typeof query.formats === 'string' && query.formats) scope.formats = query.formats.split(',') as DocumentFormat[]
+  if (typeof query.under === 'string' && query.under) scope.under = query.under
+  const tags = ([] as unknown[]).concat(query.tag ?? []).filter((t): t is string => typeof t === 'string' && t.length > 0)
+  if (tags.length) scope.tags = tags.slice(0, 10)
+  const time = (v: unknown) => typeof v === 'string' && /^\d{1,15}$/.test(v) ? Number(v) : undefined
+  const after = time(query.after)
+  const before = time(query.before)
+  if (after !== undefined) scope.modifiedAfter = after
+  if (before !== undefined) scope.modifiedBefore = before
+  return Object.keys(scope).length ? scope : undefined
+}
+
+function hostnameOf(hostHeader: string | undefined): string {
+  if (!hostHeader) return ''
+  const v6 = hostHeader.match(/^\[([^\]]+)\]/)
+  if (v6) return v6[1].toLowerCase()
+  return hostHeader.replace(/:\d+$/, '').toLowerCase()
+}
+
+function sameToken(a: string, b: string): boolean {
+  const ha = createHash('sha256').update(a).digest()
+  const hb = createHash('sha256').update(b).digest()
+  return timingSafeEqual(ha, hb)
+}
+
+function readCookie(header: string | undefined, name: string): string | undefined {
+  if (!header) return undefined
+  for (const part of header.split(';')) {
+    const [k, ...v] = part.trim().split('=')
+    if (k === name) return decodeURIComponent(v.join('='))
+  }
+  return undefined
+}
+
+function isInside(child: string, parent: string): boolean {
+  const rel = relative(parent, child)
+  return rel === '' || (!!rel && !rel.startsWith('..') && !isAbsolute(rel))
+}
+
+function realOrResolved(p: string): string {
+  try { return realpathSync(p) } catch { return resolve(p) }
+}
+
+/** What a chunk's page number means per format ("slide", "sheet", "ch."), for the pages' labels. */
+const PAGE_LABELS = JSON.stringify(Object.fromEntries(FORMATS.map(f => [f.format, f.pageLabel ?? 'p.'])))
+
+/** Fills the island page's placeholders. */
+function fillPage(page: string): string {
+  return page
+    .replace('__SUPPORTED__', SUPPORTED_SUMMARY)
+    .replace('__PAGE_LABELS__', PAGE_LABELS)
+}
+
+export function createServer(duct: Duct, opts?: ServerOptions) {
   const app = express()
   const token = opts?.authToken
   const maxMb = opts?.uploadLimitMb ?? 50
+  const allowedHosts = opts?.allowedHosts ?? LOOPBACK_HOSTS
+  const watchRoots = opts?.watchRoots ?? []
+  const libraryDir = resolve(opts?.libraryDir ?? defaultLibraryDir())
+  const incomingDir = join(libraryDir, '.incoming')
+
+  // Uploads land in the library's .incoming folder, then move into the library under their real name.
+  const storage = multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      try {
+        mkdirSync(incomingDir, { recursive: true })
+        cb(null, incomingDir)
+      } catch (err) {
+        cb(err as Error, incomingDir)
+      }
+    },
+    filename: (_req, file, cb) => cb(null, `${Date.now()}-${randomBytes(6).toString('hex')}${extname(file.originalname).toLowerCase()}`),
+  })
 
   const upload = multer({
     storage,
     limits: { fileSize: maxMb * 1024 * 1024 },
     fileFilter: (_req, file, cb) => {
       const ext = extname(file.originalname).toLowerCase()
-      if (VALID_EXTS.has(ext)) return cb(null, true)
-      cb(new Error(`Unsupported file type: ${ext}. Allowed: ${[...VALID_EXTS].join(', ')}`))
+      if (isSupportedFile(file.originalname)) return cb(null, true)
+      cb(new Error(`Unsupported file type: ${ext || file.originalname}. Duct reads ${SUPPORTED_SUMMARY}.`))
     },
   })
 
@@ -50,26 +223,305 @@ export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimi
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: 'Too many requests. Rate limit: 120 requests per minute.' },
+    // Only a shared (token-protected) server is rate limited; a local-only one serves just this machine.
+    skip: () => !token && !opts?.oidc,
   })
 
-  function auth(req: express.Request, res: express.Response, next: express.NextFunction): void {
-    if (!token) return next()
-    const header = req.headers['authorization']
-    if (header === `Bearer ${token}`) return next()
-    res.status(401).json({ error: 'Unauthorized. Provide a valid Bearer token.' })
+  const memberTokens = opts?.memberTokens ?? []
+  if (memberTokens.length > 0 && !token) throw new Error('memberTokens require an authToken for admins')
+
+  function roleFor(given: string | undefined): 'admin' | 'member' | null {
+    if (!given) return null
+    if (token && sameToken(given, token)) return 'admin'
+    if (memberTokens.some(t => sameToken(given, t))) return 'member'
+    return null
   }
 
-  app.use(express.json({ limit: '10mb' }))
-  app.use('/api/', apiLimiter)
-  app.use('/api/', auth)
+  const oidc = opts?.oidc
+  // Team features (sign-in, connectors, audit log, notebook sharing): src/team, under the Elastic License 2.0.
+  const team = oidc || opts?.connectors ? teamServer(duct, { oidc, connectors: opts?.connectors, account: opts?.account }) : undefined
+  function auth(req: express.Request, res: express.Response, next: express.NextFunction): void {
+    // Without a token or sign-in the server only serves this machine, and its user is the admin.
+    if (!token && !oidc) { res.locals.role = 'admin'; res.locals.actor = 'local'; return next() }
+    const header = req.headers['authorization']
+    const bearer = typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : undefined
+    const role = token ? (roleFor(bearer) ?? roleFor(readCookie(req.headers.cookie, 'duct_token'))) : null
+    if (role) { res.locals.role = role; res.locals.actor = `${role}-token`; return next() }
+    const user = team?.session(req)
+    if (user && 'error' in user) { res.status(402).json({ error: user.error, code: 'licence' }); return }
+    if (user) { res.locals.role = user.role; res.locals.actor = user.email; return next() }
+    res.status(401).json({ error: oidc ? 'Sign in first.' : 'Unauthorized. Provide a valid Bearer token.', ...(oidc ? { login: '/auth/login' } : {}) })
+  }
 
-  app.post('/api/index', (req, res) => {
-    const isUrl = req.body?.url
-    const bodyMeta = parseMetadata(req.body?.metadata)
-    if (isUrl) {
-      duct.index(isUrl, bodyMeta).then(r => res.json({ results: [{ file: isUrl, ...r }] })).catch(e => res.status(500).json({ error: e.message }))
+  // The audit log (shared servers): who did what, never document contents. Queries only when opted in.
+  const auditOn = opts?.audit !== false && (!!token || !!oidc)
+  const auditQueries = opts?.audit ? !!opts.audit.queries : false
+  const audit = (res: express.Response, action: string, target?: string, detail?: string) => {
+    if (!auditOn) return
+    try { duct.recordAudit({ actor: String(res.locals.actor ?? 'unknown'), role: res.locals.role, action, target: target?.slice(0, 1000), detail: detail?.slice(0, 1000) }) } catch {}
+  }
+  if (auditOn) {
+    const days = opts?.audit ? opts.audit.days ?? 365 : 365
+    const prune = () => { try { duct.pruneAudit(days) } catch {} }
+    prune()
+    setInterval(prune, 24 * 3600_000).unref()
+  }
+
+  function adminOnly(_req: express.Request, res: express.Response, next: express.NextFunction): void {
+    if (res.locals.role === 'admin') return next()
+    res.status(403).json({ error: 'Only an admin can do this.' })
+  }
+
+  if (opts?.trustProxy) app.set('trust proxy', opts.trustProxy)
+
+  // For load balancers and orchestrators; says nothing about the index.
+  app.get('/healthz', (_req, res) => { res.json({ ok: true }) })
+
+  // Security headers on every response.
+  app.use((_req, res, next) => {
+    res.setHeader('Content-Security-Policy', CSP)
+    res.setHeader('X-Content-Type-Options', 'nosniff')
+    res.setHeader('X-Frame-Options', 'DENY')
+    res.setHeader('Referrer-Policy', 'no-referrer')
+    next()
+  })
+
+  // Reject unexpected Host headers (DNS rebinding) and cross-site writes (CSRF).
+  app.use((req, res, next) => {
+    if (allowedHosts !== '*' && !allowedHosts.includes(hostnameOf(req.headers.host))) {
+      res.status(403).json({ error: 'Host not allowed.' })
       return
     }
+    const origin = req.headers.origin
+    if (origin && req.method !== 'GET' && req.method !== 'HEAD') {
+      let originHost = ''
+      try { originHost = new URL(origin).host } catch {}
+      if (originHost !== req.headers.host) {
+        res.status(403).json({ error: 'Cross-origin request blocked.' })
+        return
+      }
+    }
+    next()
+  })
+
+  // The developer API: its own keys, scopes, body parsing and rate limit (see src/api/v1.ts and docs/developer-api.md).
+  app.use('/v1', createApiRouter(duct, opts?.collections ?? new Collections(duct), { adminToken: token, uploadLimitMb: maxMb }))
+
+  app.use(express.json({ limit: '10mb' }))
+
+  app.use('/api/', apiLimiter)
+
+  // Browser login: exchanges the token for an HttpOnly cookie so the UI works on a protected server.
+  app.post('/api/login', (req, res) => {
+    if (!token) { res.json({ ok: true }); return }
+    const given = typeof req.body?.token === 'string' ? req.body.token : ''
+    if (!roleFor(given)) { res.status(401).json({ error: 'Invalid token.' }); return }
+    const secure = req.secure ? '; Secure' : ''
+    res.setHeader('Set-Cookie', `duct_token=${encodeURIComponent(given)}; HttpOnly; SameSite=Strict; Path=/${secure}`)
+    res.json({ ok: true })
+  })
+
+  if (team) team.mountPublic(app)
+  else app.get('/auth/mode', (_req, res) => { res.json({ oidc: false }) })
+
+  app.use('/api/', auth)
+
+  // Permission-aware team search: on a server with sign-in or tokens, documents with an access list (cloud sources
+  // that follow their files' sharing) are only seen by the people on it. Anything addressed by path is checked
+  // here; searches and lists get the viewer in their scope.
+  const viewerOf = (res: express.Response): string[] | undefined => {
+    if (!token && !oidc) return undefined                  // this machine only: its user sees everything
+    const actor = String(res.locals.actor ?? '')
+    if (actor.includes('@')) return principalsFor(actor)    // signed in
+    if (res.locals.role === 'admin') return undefined       // the admin token
+    return principalsFor(undefined)                         // member tokens carry no identity: unrestricted documents only
+  }
+  app.use('/api/', (req, res, next) => {
+    const viewer = viewerOf(res)
+    res.locals.viewer = viewer
+    if (viewer) {
+      const items = Array.isArray(req.body?.items) ? (req.body.items as { path?: unknown }[]).map(i => i?.path) : []
+      for (const p of [req.query['path'], req.body?.path, ...items]) {
+        if (typeof p === 'string' && !duct.canView(p, viewer)) { res.status(404).json({ error: 'Document not found' }); return }
+      }
+    }
+    next()
+  })
+  const scopeFor = (req: express.Request, res: express.Response): SearchScope | undefined => {
+    const scope = scopeFrom(req.query)
+    const viewer = res.locals.viewer as string[] | undefined
+    return viewer ? { ...scope, viewer } : scope
+  }
+
+  /** Answers 403 when a feature is switched off in Settings. */
+  const needs = (name: FeatureName): express.RequestHandler => (_req, res, next) => {
+    if (duct.getFeatures()[name]) next()
+    else sendError(res, new FeatureDisabledError(name))
+  }
+
+  app.get('/api/me', (_req, res) => {
+    res.json({ role: res.locals.role, auth: !!token || !!oidc, ...(oidc && String(res.locals.actor).includes('@') ? { user: res.locals.actor } : {}) })
+  })
+
+  // Everything the UI needs to know about this server, so the page itself can be a static file.
+  app.get('/api/info', (_req, res) => {
+    res.json({
+      version: VERSION,
+      role: res.locals.role,
+      auth: !!token,
+      libraryDir,
+      canWatch: watchRoots.length > 0,
+      supported: SUPPORTED_SUMMARY,
+      accept: ACCEPT_ATTRIBUTE,
+      formats: FORMATS.map(f => ({ format: f.format, kind: f.kind, label: f.label, pageLabel: f.pageLabel ?? 'p.' })),
+      features: duct.getFeatures(),
+      // The team licence, for the admin's banner (evaluation days left, or lapsed).
+      ...(team && res.locals.role === 'admin' ? { team: team.licenceInfo() } : {}),
+    })
+  })
+
+  // ---------- account and usage counts ----------
+
+  const account = opts?.account
+  const telemetry = opts?.telemetry
+  let signIn: { running: boolean; error?: string } = { running: false }
+
+  app.get('/api/account', (_req, res) => {
+    if (!account) { res.json({ available: false }); return }
+    res.json({ available: true, ...account.status(), signingIn: signIn.running, ...(signIn.error ? { signInError: signIn.error } : {}) })
+  })
+
+  // Opens the Tensflare sign-in page in the browser and returns at once; the page polls GET /api/account.
+  app.post('/api/account/signin', adminOnly, (_req, res) => {
+    if (!account) { res.status(404).json({ error: 'Accounts are not available on this server.' }); return }
+    if (!signIn.running) {
+      signIn = { running: true }
+      account.signIn().then(() => { signIn = { running: false } }, err => { signIn = { running: false, error: (err as Error).message } })
+    }
+    res.status(202).json({ started: true })
+  })
+
+  app.get('/api/account/billing', async (_req, res) => {
+    if (!account || !account.status().signedIn) { res.json({ subscription: null, refundable: false, invoices: [] }); return }
+    try { res.json(await account.billing()) } catch (err) { res.status(502).json({ error: (err as Error).message }) }
+  })
+
+  // Opens the account website signed in: billing, plan changes, team, devices. Only these pages are allowed.
+  app.post('/api/account/portal', adminOnly, async (req, res) => {
+    if (!account) { res.status(404).json({ error: 'Accounts are not available on this server.' }); return }
+    const next = ['/account', '/account/upgrade', '/account/change', '/account/cancel', '/account/refund'].includes(req.body?.next) ? req.body.next : '/account'
+    try { res.json({ url: await account.webLink(next) }) } catch (err) { res.status(502).json({ error: (err as Error).message }) }
+  })
+
+  // Hosted AI status and this month's credits (Pro and Team).
+  app.get('/api/account/ai', async (_req, res) => {
+    if (!account || !account.status().signedIn || !account.has('ai.hosted')) { res.json({ entitled: false }); return }
+    try { res.json(await account.aiInfo()) } catch (err) { res.status(502).json({ error: (err as Error).message }) }
+  })
+
+  // ---------- the privacy ledger: what left this computer ----------
+
+  app.get('/api/ledger', adminOnly, (req, res) => {
+    const ledger = currentLedger()
+    if (!ledger) { res.json({ recording: false, days: [], recent: [], labels: LEDGER_CATEGORY_LABELS }); return }
+    const days = Math.min(30, Math.max(1, parseInt(String(req.query['days'])) || 7))
+    res.json({ recording: true, since: new Date(ledger.since).toISOString(), days: ledger.summary(days), recent: ledger.recent(50), labels: LEDGER_CATEGORY_LABELS })
+  })
+
+  app.delete('/api/ledger', adminOnly, (_req, res) => {
+    currentLedger()?.clear()
+    res.json({ ok: true })
+  })
+
+  app.get('/api/sync', (_req, res) => {
+    res.json(opts?.sync ? opts.sync.status() : { available: false, enabled: false })
+  })
+
+  app.put('/api/sync', adminOnly, async (req, res) => {
+    if (!opts?.sync) { res.status(404).json({ error: 'Sync isn’t available here.' }); return }
+    if (typeof req.body?.enabled !== 'boolean') { res.status(400).json({ error: 'Send { "enabled": true | false }' }); return }
+    if (req.body.enabled && !opts.sync.status().available) { res.status(403).json({ error: 'Sync is part of Pro and Team.' }); return }
+    res.json({ ...(await opts.sync.enable(req.body.enabled)), available: opts.sync.status().available })
+  })
+
+  app.post('/api/account/signout', adminOnly, async (_req, res) => {
+    if (account) await account.signOut()
+    signIn = { running: false }
+    res.json({ ok: true })
+  })
+
+  app.get('/api/telemetry', (_req, res) => {
+    if (!telemetry) { res.json({ available: false }); return }
+    res.json({ available: true, ...telemetry.status(), report: telemetry.report() })
+  })
+
+  app.put('/api/telemetry', adminOnly, (req, res) => {
+    if (!telemetry) { res.status(404).json({ error: 'Usage counts are not available here.' }); return }
+    if (typeof req.body?.enabled !== 'boolean') { res.status(400).json({ error: 'Send { "enabled": true | false }' }); return }
+    telemetry.setEnabled(req.body.enabled)
+    res.json({ available: true, ...telemetry.status() })
+  })
+
+  // ---------- diagnostics, crash records and feedback (never document content) ----------
+
+  const channel = opts?.channel ?? 'server'
+  const crashDir = opts?.crashDir
+
+  app.get('/api/diagnostics', (_req, res) => {
+    res.json(collectDiagnostics(duct, channel, crashDir))
+  })
+
+  app.get('/api/crashes', adminOnly, (_req, res) => {
+    res.json({ crashes: crashDir ? listCrashes(crashDir) : [] })
+  })
+
+  app.delete('/api/crashes', adminOnly, (_req, res) => {
+    if (crashDir) clearCrashes(crashDir)
+    res.json({ ok: true })
+  })
+
+  // The page shows what will be sent before this is called; diagnostics and crash records are added here,
+  // from the same functions, only when the person ticked them.
+  app.post('/api/feedback', async (req, res) => {
+    let input
+    try { input = validateFeedback(req.body) } catch (err) { res.status(400).json({ error: (err as Error).message }); return }
+    if (req.body?.includeDiagnostics === true) input.diagnostics = collectDiagnostics(duct, channel, crashDir)
+    if (req.body?.includeCrashes === true && crashDir) input.crashes = listCrashes(crashDir).slice(0, 10)
+    try {
+      await sendFeedback(input, { url: opts?.feedbackUrl })
+      res.json({ ok: true })
+    } catch (err) {
+      res.status(502).json({ error: (err as Error).message })
+    }
+  })
+
+  app.get('/api/features', (_req, res) => {
+    res.json({ features: duct.getFeatures(), names: FEATURE_NAMES, labels: FEATURE_LABELS, formatKinds: FORMAT_KINDS })
+  })
+
+  app.put('/api/features', adminOnly, (req, res) => {
+    try {
+      const features = duct.setFeatures(req.body)
+      opts?.sync?.changed()
+      audit(res, 'features', undefined, JSON.stringify(req.body).slice(0, 500))
+      res.json({ ok: true, features })
+    } catch (err) {
+      sendError(res, err, 400)
+    }
+  })
+
+  app.post('/api/index', (req, res) => {
+    const url = req.body?.url
+    const bodyMeta = parseMetadata(req.body?.metadata)
+    if (url !== undefined) {
+      if (typeof url !== 'string' || !isUrl(url)) {
+        res.status(400).json({ error: 'The "url" field must be an http(s) URL.' })
+        return
+      }
+      duct.index(url, bodyMeta).then(r => res.json({ results: [{ file: url, ...r }] })).catch(e => sendError(res, e))
+      return
+    }
+    if (!duct.getFeatures().uploads) { sendError(res, new FeatureDisabledError('uploads')); return }
     upload.array('files')(req, res, async (err) => {
       if (err) {
         if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
@@ -89,13 +541,38 @@ export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimi
       try {
         const results = []
         for (const file of files) {
-          originalNames.set(file.path, file.originalname)
-          const result = await duct.index(file.path, meta)
-          results.push({ file: file.originalname, ...result })
+          results.push(await addToLibrary(duct, libraryDir, file.path, { originalName: file.originalname, metadata: meta, move: true }))
+          audit(res, 'upload', file.originalname)
         }
         res.json({ results })
       } catch (err) {
+        for (const file of files) { try { if (existsSync(file.path)) unlinkSync(file.path) } catch {} }
         res.status(500).json({ error: (err as Error).message })
+      }
+    })
+  })
+
+  // WhatsApp: an exported chat (.zip with media, or the chat .txt). Exports with photos and documents are large,
+  // so these get their own size limit.
+  const whatsappUpload = multer({
+    storage,
+    limits: { fileSize: Math.max(maxMb, 1024) * 1024 * 1024 },
+    fileFilter: (_req, file, cb) => /\.(zip|txt)$/i.test(file.originalname) ? cb(null, true) : cb(new Error('Choose the .zip (or .txt) that WhatsApp’s Export chat made.')),
+  })
+  app.post('/api/whatsapp', (req, res) => {
+    if (!duct.getFeatures().uploads) { sendError(res, new FeatureDisabledError('uploads')); return }
+    whatsappUpload.single('file')(req, res, async (err) => {
+      const file = req.file
+      try {
+        if (err) { res.status(err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ error: err.message }); return }
+        if (!file) { res.status(400).json({ error: 'No file uploaded.' }); return }
+        const result = await importWhatsApp(duct, libraryDir, file.path, file.originalname)
+        audit(res, 'upload', `WhatsApp: ${result.chat}`)
+        res.json(result)
+      } catch (e) {
+        sendError(res, e, (e as { status?: number }).status ?? 500)
+      } finally {
+        if (file) { try { if (existsSync(file.path)) unlinkSync(file.path) } catch {} }
       }
     })
   })
@@ -103,60 +580,70 @@ export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimi
   app.get('/api/search', async (req, res) => {
     const q = req.query.q as string
     if (!q) { res.status(400).json({ error: 'Query parameter "q" is required' }); return }
-    const topK = parseInt(req.query.topK as string) || 10
+    const topK = Math.min(100, parseInt(req.query.topK as string) || 10)
     const filter = parseMetadata(req.query.filter as string)
     try {
-      const results = await duct.search(q, topK, filter)
-      const mapped = results.map(r => ({
-        ...r,
-        chunk: { ...r.chunk, documentPath: originalNames.get(r.chunk.documentPath) || r.chunk.documentPath },
-      }))
-      res.json({ results: mapped })
+      const scope = scopeFor(req, res)
+      const results = await duct.search(q, topK, filter, scope)
+      telemetry?.record('searches')
+      audit(res, 'search', undefined, auditQueries ? q : undefined)
+      // Each result carries its document's name as people know it (an upload's original name, "… · from Ada").
+      const named = results.map(r => ({ ...r, name: duct.getDocument(r.chunk.documentPath)?.displayName ?? undefined }))
+      // Never a dead end: an empty search says why, and what to try.
+      res.json(results.length > 0 ? { results: named } : { results, help: await duct.searchHelp(q, filter, scope) })
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })
     }
   })
 
-  app.post('/api/ask', async (req, res) => {
+  // A first look at the library: kinds of documents and searches to try (first run and the home screen).
+  app.get('/api/discover', async (_req, res) => {
+    try { res.json(await duct.discover(res.locals.viewer)) } catch (err) { res.status(500).json({ error: (err as Error).message }) }
+  })
+
+  // The deadlines radar: expiry, due and renewal dates read from documents (?days=365&pastDays=30).
+  app.get('/api/deadlines', needs('deadlines'), (req, res) => {
+    const num = (v: unknown, d: number, max: number) => Math.min(max, Math.max(0, parseInt(String(v)) || d))
+    try { res.json(duct.deadlines({ days: num(req.query['days'], 365, 3650), pastDays: num(req.query['pastDays'], 30, 365), viewer: res.locals.viewer })) } catch (err) { sendError(res, err) }
+  })
+
+  app.post('/api/ask', needs('ask'), async (req, res) => {
     const { question, topK = 5, agentic } = req.body
     if (!question) { res.status(400).json({ error: 'Question is required' }); return }
     try {
-      const result = agentic ? await duct.agenticSearch(question) : await duct.ask(question, topK)
-      result.sources = result.sources.map(s => ({
-        ...s,
-        documentPath: originalNames.get(s.documentPath) || s.documentPath,
-      }))
+      const result = agentic ? await duct.agenticSearch(question, res.locals.viewer) : await duct.ask(question, topK, res.locals.viewer)
+      telemetry?.record('ask')
+      audit(res, 'ask', undefined, auditQueries ? String(question) : undefined)
       res.json(result)
     } catch (err) {
-      res.status(500).json({ error: (err as Error).message })
+      sendError(res, err)
     }
   })
 
   app.get('/api/documents', (req, res) => {
     const path = req.query.path as string
     if (path) {
-      const raw = duct.getDocument(path)
-      if (!raw) { res.status(404).json({ error: 'Document not found' }); return }
-      const doc = { ...raw, path: originalNames.get(raw.path) || raw.path, storePath: raw.path }
+      const doc = duct.getDocument(path)
+      if (!doc) { res.status(404).json({ error: 'Document not found' }); return }
       res.json({ document: doc })
       return
     }
-    const docs = duct.getDocuments().map(d => ({
-      ...d,
-      path: originalNames.get(d.path) || d.path,
-      storePath: d.path,
-    }))
-    res.json({ documents: docs })
+    const hidden = duct.hiddenFrom(res.locals.viewer)
+    res.json({ documents: hidden.size ? duct.getDocuments().filter(d => !hidden.has(d.path)) : duct.getDocuments() })
   })
 
-  app.delete('/api/documents', async (req, res) => {
+  app.delete('/api/documents', adminOnly, async (req, res) => {
     const path = req.query.path as string
     if (!path) { res.status(400).json({ error: 'Query parameter "path" is required' }); return }
+    const doc = duct.getDocument(path)
+    if (!doc) { res.status(404).json({ error: 'Document not found' }); return }
     try {
-      await duct.removeDocument(path)
-      originalNames.delete(path)
-      if (path.startsWith(uploadDir)) {
-        try { unlinkSync(path) } catch {}
+      await duct.removeDocument(doc.path)
+      audit(res, 'delete', doc.path)
+      // Library copies belong to Duct and are deleted; anything else (watched folders) is only unindexed.
+      const resolved = resolve(doc.path)
+      if (doc.source === 'library' && isInside(resolved, libraryDir) && resolved !== libraryDir) {
+        try { unlinkSync(resolved) } catch {}
       }
       res.json({ ok: true })
     } catch (err) {
@@ -164,18 +651,82 @@ export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimi
     }
   })
 
-  app.get('/api/config', (_req, res) => {
-    const cfg = duct.getConfig()
-    const sanitized = { ...cfg, openaiKey: '', geminiKey: '', cohereKey: '', voyageKey: '', mistralKey: '', jinaKey: '' }
-    res.json(sanitized)
+  // Opens an indexed document: PDFs, images and plain text display in the browser, anything else downloads.
+  // Only files that are in the index can be read, never arbitrary paths.
+  // The optional :name only gives the browser's viewer a readable title; the path query decides the file.
+  app.get(['/api/file', '/api/file/:name'], (req, res) => {
+    const doc = typeof req.query.path === 'string' ? duct.getDocument(req.query.path) : undefined
+    if (!doc || doc.source === 'url' || isUrl(doc.path) || !existsSync(doc.path)) {
+      res.status(404).json({ error: 'Document not found' })
+      return
+    }
+    const ext = extname(doc.path).toLowerCase()
+    const name = encodeURIComponent(doc.displayName ?? doc.path.split(/[\\/]/).pop() ?? 'document')
+    const textTypes = new Set(['.txt', '.md', '.markdown', '.csv', '.log', '.json'])
+    const inlineTypes = new Set(['.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'])
+    if (textTypes.has(ext)) res.type('text/plain; charset=utf-8')
+    const inline = inlineTypes.has(ext) || textTypes.has(ext)
+    res.setHeader('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${name}`)
+    // The browser's PDF viewer needs plugin/object access; nothing else on this response may run.
+    res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; object-src 'self'; frame-ancestors 'none'")
+    telemetry?.record('opens')
+    audit(res, 'open', doc.path)
+    res.sendFile(doc.path, { dotfiles: 'allow', headers: { 'Cache-Control': 'no-store' } })
   })
 
-  app.put('/api/config', (req, res) => {
+  // Runs OCR on one document now (OCR is otherwise off by default because it is slow).
+  app.post('/api/ocr', needs('ocrOnDemand'), async (req, res) => {
+    const doc = typeof req.body?.path === 'string' ? duct.getDocument(req.body.path) : undefined
+    if (!doc || doc.source === 'url') { res.status(404).json({ error: 'Document not found' }); return }
+    try {
+      const result = await duct.index(doc.path, undefined, { ocr: true, force: true })
+      telemetry?.record('ocr')
+      audit(res, 'ocr', doc.path)
+      res.json({ ...result, document: duct.getDocument(doc.path) })
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message })
+    }
+  })
+
+  app.get('/api/activity', (_req, res) => {
+    res.json(duct.activity())
+  })
+
+  app.get('/api/sources', (_req, res) => {
+    res.json({ sources: duct.listSources(), canAdd: watchRoots.length > 0 })
+  })
+
+  app.delete('/api/sources', adminOnly, async (req, res) => {
+    const path = req.query.path as string
+    if (!path || !duct.listSources().some(s => s.path === path)) { res.status(404).json({ error: 'Not a watched folder' }); return }
+    try {
+      await duct.removeSource(path)
+      audit(res, 'unwatch', path)
+      res.json({ ok: true })
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message })
+    }
+  })
+
+  // Settings without the API keys themselves; keysSet says which keys are present.
+  function publicConfig() {
+    const cfg = duct.getConfig()
+    const keysSet = Object.fromEntries(API_KEY_FIELDS.map(k => [k, !!cfg[k]]))
+    return { ...cfg, ...Object.fromEntries(API_KEY_FIELDS.map(k => [k, ''])), keysSet }
+  }
+
+  app.get('/api/config', (_req, res) => {
+    res.json(publicConfig())
+  })
+
+  app.put('/api/config', adminOnly, (req, res) => {
     try {
       duct.configure(req.body)
-      const cfg = duct.getConfig()
-      const sanitized = { ...cfg, openaiKey: '', geminiKey: '', cohereKey: '', voyageKey: '', mistralKey: '', jinaKey: '' }
-      res.json({ ok: true, config: sanitized })
+      opts?.sync?.changed()
+      audit(res, 'settings', undefined, Object.keys(req.body ?? {}).map(k => API_KEY_FIELDS.includes(k as never) ? `${k} (set)` : k).join(', '))
+      const keys = Object.fromEntries(API_KEY_FIELDS.filter(k => typeof req.body?.[k] === 'string' && req.body[k]).map(k => [k, req.body[k] as string]))
+      if (Object.keys(keys).length) opts?.onSecrets?.(keys)
+      res.json({ ok: true, config: publicConfig() })
     } catch (err) {
       res.status(400).json({ error: (err as Error).message })
     }
@@ -185,42 +736,319 @@ export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimi
     res.json(duct.stats())
   })
 
-  app.delete('/api/clear', async (_req, res) => {
+  app.delete('/api/clear', adminOnly, async (_req, res) => {
     try {
       await duct.clear()
+      audit(res, 'clear-index')
       res.json({ ok: true })
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })
     }
   })
 
-  app.get('/api/export', async (req, res) => {
-    const q = req.query.q as string
-    const format = req.query.format as string || 'json'
-    if (!q) { res.status(400).json({ error: 'Query parameter "q" is required' }); return }
+  // ---------- tags ----------
+
+  app.get('/api/tags', (_req, res) => {
+    res.json({ tags: duct.listTags() })
+  })
+
+  // Members may tag too: tags organise shared work (by tender, client, matter or outcome).
+  app.put('/api/documents/tags', (req, res) => {
+    const { path, tags } = req.body ?? {}
+    if (typeof path !== 'string' || !Array.isArray(tags) || !tags.every(t => typeof t === 'string')) {
+      res.status(400).json({ error: 'Send { "path": "…", "tags": ["…"] }' })
+      return
+    }
     try {
-      const results = await duct.search(q, 100)
-      const mapped = results.map(r => ({
-        score: r.score,
-        document: originalNames.get(r.chunk.documentPath) || r.chunk.documentPath,
-        heading: r.chunk.heading || null,
-        content: r.chunk.content.slice(0, 2000),
-      }))
-      if (format === 'csv') {
-        const header = 'score,document,heading,content\n'
-        const rows = mapped.map(r =>
-          `"${r.score}","${(r.document || '').replace(/"/g, '""')}","${(r.heading || '').replace(/"/g, '""')}","${r.content.replace(/"/g, '""').replace(/\n/g, '\\n')}"`
-        ).join('\n')
-        res.type('text/csv').send(header + rows)
-      } else {
-        res.json({ results: mapped })
+      const saved = duct.setTags(path, tags)
+      audit(res, 'tags', path, saved.join(', '))
+      res.json({ path, tags: saved })
+    } catch (err) {
+      sendError(res, err, 404)
+    }
+  })
+
+  // ---------- notebooks ----------
+  // Named collections of quotes picked from documents, with comments. With sign-in, a notebook belongs to the
+  // person who made it and is private until they share it (src/notebooks.ts); without, it's everyone's.
+
+  const noteExport = (n: Note): ExportItem => ({
+    name: n.docName,
+    path: n.path,
+    ...(n.page ? { location: `${pageLabel(n.format as DocumentFormat)} ${n.page}` } : {}),
+    text: n.quote,
+    ...(n.comment.trim() ? { note: n.comment } : {}),
+    tags: duct.getDocument(n.path)?.tags ?? [],
+  })
+
+  const emailOf = (res: express.Response): string | undefined => {
+    const actor = String(res.locals.actor ?? '')
+    return actor.includes('@') ? actor : undefined
+  }
+  const actorOf = (res: express.Response): NotebookActor => {
+    const principals = res.locals.viewer as string[] | undefined
+    return principals ? { email: emailOf(res), admin: res.locals.role === 'admin', principals } : {}
+  }
+
+  // On a shared server, a note quoting a document someone may not see is left out for them, like the document
+  // itself (permission-aware team search): they don't see it, count it, export it, change it or delete it. Sharing
+  // a notebook never shares the documents it quotes.
+  const visibleNotes = (notes: Note[], res: express.Response): Note[] => {
+    const hidden = duct.hiddenFrom(res.locals.viewer)
+    return hidden.size ? notes.filter(n => !hidden.has(n.path)) : notes
+  }
+
+  /** What the caller may do with each notebook they may know about, with the sharing list for owners only. */
+  const notebookView = (nb: Notebook, role: NotebookRole, res: express.Response) => {
+    // The public link's secret and its view count are the owner's to see.
+    const { publicToken, publicViews, hosted, ...rest } = nb
+    return {
+      ...rest,
+      notes: res.locals.viewer ? visibleNotes(duct.listNotes(nb.id), res).length : nb.notes,
+      role,
+      sharing: role === 'owner' ? nb.sharing : [],
+      ...(role === 'owner' ? { publicLink: publicToken ? `/n/${publicToken}` : null, publicViews, hostedLink: hosted && hosted.expiresAt > Date.now() ? { url: hosted.url, expiresAt: hosted.expiresAt } : null } : {}),
+    }
+  }
+
+  /** The notebook if the caller may do `needs` with it; otherwise answers 404 (they can't see it) or 403 and returns null. */
+  const notebookFor = (id: string, res: express.Response, needs: NotebookRole): { nb: Notebook; role: NotebookRole } | null => {
+    const nb = duct.getNotebook(id)
+    const role = nb ? notebookRole(nb, actorOf(res)) : null
+    if (!nb || !role) { res.status(404).json({ error: 'Notebook not found' }); return null }
+    if (!canDo(role, needs)) {
+      const owner = nb.owner ? ` Ask ${nb.owner}` : ' Ask an admin'
+      res.status(403).json({ error: needs === 'owner' ? `Only the notebook’s owner can do this.${owner} if it needs changing.` : `You can read this notebook but not change it.${owner} to let you edit.` })
+      return null
+    }
+    return { nb, role }
+  }
+
+  /** The notebook a note is in, if the caller may edit it and see the document the note quotes; else answers and returns null. */
+  const noteFor = (id: string, res: express.Response): Notebook | null => {
+    const info = duct.noteInfo(id)
+    if (!info || !duct.canView(info.path, res.locals.viewer)) { res.status(404).json({ error: 'Note not found' }); return null }
+    return notebookFor(info.notebookId, res, 'edit')?.nb ?? null
+  }
+
+  app.get('/api/notebooks', (_req, res) => {
+    const who = actorOf(res)
+    const notebooks = duct.listNotebooks().flatMap(nb => {
+      const role = notebookRole(nb, who)
+      return role ? [notebookView(nb, role, res)] : []
+    })
+    // `sharing`: whether notebooks can be shared with people here (a server with sign-in).
+    // hostedLinks: whether this install can publish links hosted by Tensflare (it has an account to sign in with).
+    res.json({ notebooks, ...(team?.notebookFlags() ?? { sharing: false, publicLinks: false }), hostedLinks: !!account && !oidc, signedIn: !!account?.status().signedIn, me: emailOf(res) ?? null })
+  })
+
+  app.post('/api/notebooks', (req, res) => {
+    const notebook = duct.createNotebook(req.body?.name, emailOf(res))
+    audit(res, 'notes', undefined, `created notebook "${notebook.name}"`)
+    res.status(201).json({ notebook: notebookView(notebook, 'owner', res) })
+  })
+
+  // A notebook someone sent as a shared page (.html) or JSON: { "content": "<the file's text>" }.
+  app.post('/api/notebooks/import', (req, res) => {
+    const content = typeof req.body?.content === 'string' ? req.body.content : ''
+    const shared = content ? parseSharedNotebook(content) : null
+    if (!shared) { res.status(400).json({ error: 'That isn’t a notebook shared from Duct. Choose the .html page (or .json) someone sent you.' }); return }
+    const notebook = duct.importNotebook(shared, emailOf(res), res.locals.viewer)
+    audit(res, 'notes', undefined, `imported notebook "${notebook.name}", ${notebook.notes} notes`)
+    res.status(201).json({ notebook: notebookView(notebook, 'owner', res) })
+  })
+
+  app.patch('/api/notebooks/:id', (req, res) => {
+    if (!notebookFor(req.params.id, res, 'owner')) return
+    duct.renameNotebook(req.params.id, req.body?.name)
+    audit(res, 'notes', undefined, 'renamed a notebook')
+    res.json({ ok: true })
+  })
+
+  // A link hosted by Tensflare, for the desktop app where this server can't be reached by others. Sends the
+  // notebook's name, quotes, document names, pages and comments (the notes this person can see; never paths or
+  // who added them) to the account service. { days: 7 | 30 | 90 }. A new link replaces the old one.
+  app.post('/api/notebooks/:id/hosted-link', async (req, res) => {
+    if (!account || oidc) { res.status(400).json({ error: oidc ? 'On a team server, use a public link instead.' : 'Links hosted by Tensflare need the Duct app.' }); return }
+    if (!account.status().signedIn) { res.status(409).json({ error: 'Sign in with your Tensflare account first (Settings › Account). It’s free.', code: 'signin' }); return }
+    const found = notebookFor(req.params.id, res, 'owner')
+    if (!found) return
+    const days = [7, 30, 90].includes(Number(req.body?.days)) ? Number(req.body.days) : 30
+    const notes = visibleNotes(duct.listNotes(found.nb.id), res)
+    if (!notes.length) { res.status(400).json({ error: 'This notebook has no notes yet' }); return }
+    const shared = sharedFrom(found.nb.name, notes, f => pageLabel(f as DocumentFormat))
+    try {
+      const made = await account.publishNotebook({ name: shared.name, notes: shared.notes.map(({ author: _a, format: _f, ...n }) => n) }, days)
+      if (found.nb.hosted) await account.removeNotebookLink(found.nb.hosted.id).catch(() => {})
+      const hosted = { id: made.id, url: made.url, expiresAt: Date.parse(made.expiresAt) || Date.now() + days * 86_400_000 }
+      duct.setNotebookHostedLink(found.nb.id, hosted)
+      audit(res, 'notes', undefined, `published a notebook link for ${days} days`)
+      res.status(201).json({ hostedLink: { url: hosted.url, expiresAt: hosted.expiresAt } })
+    } catch (err) {
+      sendError(res, err, (err as { status?: number }).status ?? 502)
+    }
+  })
+  app.delete('/api/notebooks/:id/hosted-link', async (req, res) => {
+    const found = notebookFor(req.params.id, res, 'owner')
+    if (!found) return
+    if (found.nb.hosted && account) {
+      try { await account.removeNotebookLink(found.nb.hosted.id) } catch (err) { sendError(res, err, 502); return }
+    }
+    duct.setNotebookHostedLink(found.nb.id, null)
+    res.json({ hostedLink: null })
+  })
+
+  app.delete('/api/notebooks/:id', (req, res) => {
+    if (!notebookFor(req.params.id, res, 'owner')) return
+    const all = duct.listNotes(req.params.id)
+    if (visibleNotes(all, res).length !== all.length) { res.status(403).json({ error: 'This notebook has notes from documents you can’t open, so only someone who can see them all can delete it.' }); return }
+    duct.deleteNotebook(req.params.id)
+    audit(res, 'notes', undefined, 'deleted a notebook')
+    res.json({ ok: true })
+  })
+
+  app.get('/api/notebooks/:id/notes', (req, res) => {
+    const found = notebookFor(req.params.id, res, 'view')
+    if (!found) return
+    const notes = visibleNotes(duct.listNotes(found.nb.id), res)
+    res.json({ notebook: notebookView(found.nb, found.role, res), notes })
+  })
+
+  app.post('/api/notebooks/:id/notes', (req, res) => {
+    const { path, quote, page, comment } = req.body ?? {}
+    if (typeof path !== 'string' || typeof quote !== 'string') { res.status(400).json({ error: 'Send { "path": "…", "quote": "…", "page"?: 1, "comment"?: "…" }' }); return }
+    if (!notebookFor(req.params.id, res, 'edit')) return
+    try {
+      const note = duct.addNote(req.params.id, { path, quote, page, comment, author: emailOf(res) })
+      audit(res, 'notes', path, 'added a note')
+      res.status(201).json({ note })
+    } catch (err) {
+      sendError(res, err, /not found/i.test((err as Error).message) ? 404 : 400)
+    }
+  })
+
+  app.put('/api/notebooks/:id/order', (req, res) => {
+    const ids = req.body?.ids
+    if (!Array.isArray(ids) || !ids.every(i => typeof i === 'string')) { res.status(400).json({ error: 'Send { "ids": ["…"] }' }); return }
+    if (!notebookFor(req.params.id, res, 'edit')) return
+    duct.reorderNotes(req.params.id, ids)
+    res.json({ ok: true })
+  })
+
+  app.patch('/api/notes/:id', (req, res) => {
+    if (typeof req.body?.comment !== 'string') { res.status(400).json({ error: 'Send { "comment": "…" }' }); return }
+    if (!noteFor(req.params.id, res)) return
+    duct.updateNote(req.params.id, req.body.comment)
+    res.json({ ok: true })
+  })
+
+  app.delete('/api/notes/:id', (req, res) => {
+    if (!noteFor(req.params.id, res)) return
+    duct.deleteNote(req.params.id)
+    audit(res, 'notes', undefined, 'deleted a note')
+    res.json({ ok: true })
+  })
+
+  // The notebook as docx, md, csv or json (each quote with its source, then the comment), or html: a page to send
+  // to anyone, readable in any browser and importable into Duct (src/notebook-page.ts).
+  app.get('/api/notebooks/:id/export', needs('export'), async (req, res) => {
+    const found = notebookFor(req.params.id, res, 'view')
+    if (!found) return
+    const notes = visibleNotes(duct.listNotes(found.nb.id), res)
+    if (!notes.length) { res.status(400).json({ error: 'This notebook has no notes yet' }); return }
+    const format = (req.query.format as string) || 'docx'
+    try {
+      audit(res, 'export', undefined, `notebook as ${format}, ${notes.length} notes`)
+      if (format === 'html') {
+        const page = notebookPage(sharedFrom(found.nb.name, notes, f => pageLabel(f as DocumentFormat)), { sharedBy: emailOf(res) })
+        res.setHeader('Content-Type', 'text/html; charset=utf-8')
+        res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(exportFileName(found.nb.name, 'md').replace(/\.md$/, '.html'))}`)
+        res.send(page)
+        return
       }
+      await sendExport(res, notes.map(noteExport), format, found.nb.name)
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })
     }
   })
 
-  app.get('/api/diff', async (req, res) => {
+  // A document as text in sections, for the side-by-side workspace (formats the browser can't draw itself).
+  app.get('/api/document-text', async (req, res) => {
+    const path = typeof req.query.path === 'string' ? req.query.path : ''
+    const doc = path ? duct.getDocument(path) : undefined
+    if (!doc) { res.status(404).json({ error: 'Document not found' }); return }
+    try {
+      telemetry?.record('opens')
+      audit(res, 'open', doc.path)
+      res.setHeader('Cache-Control', 'no-store')
+      res.json({ name: doc.displayName, format: doc.format, pageLabel: pageLabel(doc.format), sections: (await duct.readableText(doc.path)) ?? [] })
+    } catch (err) {
+      sendError(res, err, 500)
+    }
+  })
+
+  team?.mount(app, { audit, auditOn, auditQueries, adminOnly, sendError, notebookFor })
+
+  // ---------- export ----------
+
+  const nameOf = (path: string) => duct.getDocument(path)?.displayName ?? path.split(/[\\/]/).pop() ?? path
+  const exportItem = (r: SearchResult): ExportItem => ({
+    name: nameOf(r.chunk.documentPath),
+    path: r.chunk.documentPath,
+    ...(r.chunk.page ? { location: `${pageLabel(r.chunk.documentFormat)} ${r.chunk.page}` } : {}),
+    ...(r.chunk.heading ? { heading: r.chunk.heading } : {}),
+    text: r.chunk.content.slice(0, 4000),
+    score: r.score,
+    tags: duct.getDocument(r.chunk.documentPath)?.tags ?? [],
+  })
+  const sendExport = async (res: express.Response, items: ExportItem[], format: string, title: string) => {
+    if (!isExportFormat(format)) { res.status(400).json({ error: 'format must be csv, md, json or docx' }); return }
+    const body = await renderExport(items, format, title)
+    res.setHeader('Content-Type', EXPORT_TYPES[format].mime)
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(exportFileName(title, format))}`)
+    res.send(body)
+  }
+
+  // Every result for a search (same scope parameters as /api/search), with sources.
+  app.get('/api/export', needs('export'), async (req, res) => {
+    const q = req.query.q as string
+    if (!q) { res.status(400).json({ error: 'Query parameter "q" is required' }); return }
+    try {
+      const topK = Math.min(500, parseInt(req.query.topK as string) || 100)
+      const results = await duct.search(q, topK, parseMetadata(req.query.filter as string), scopeFor(req, res))
+      audit(res, 'export', undefined, auditQueries ? q : `${results.length} results`)
+      await sendExport(res, results.map(exportItem), (req.query.format as string) || 'csv', `Search: ${q}`)
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message })
+    }
+  })
+
+  // Passages picked by hand ("Collect"), in the order given. Only indexed documents can be named.
+  app.post('/api/export', needs('export'), async (req, res) => {
+    const { items, format, title } = req.body ?? {}
+    if (!Array.isArray(items) || items.length === 0 || items.length > 500) { res.status(400).json({ error: 'Send 1 to 500 items' }); return }
+    const out: ExportItem[] = []
+    for (const it of items) {
+      const doc = typeof it?.path === 'string' ? duct.getDocument(it.path) : undefined
+      if (!doc || typeof it.text !== 'string') { res.status(400).json({ error: 'Each item needs the path of an indexed document and its text' }); return }
+      out.push({
+        name: doc.displayName ?? nameOf(doc.path),
+        path: doc.path,
+        ...(Number.isInteger(it.page) && it.page > 0 ? { location: `${pageLabel(doc.format)} ${it.page}` } : {}),
+        ...(typeof it.heading === 'string' && it.heading ? { heading: it.heading.slice(0, 300) } : {}),
+        text: it.text.slice(0, 20000),
+        tags: doc.tags ?? [],
+      })
+    }
+    try {
+      audit(res, 'export', undefined, `${out.length} collected passages`)
+      await sendExport(res, out, typeof format === 'string' ? format : 'docx', typeof title === 'string' && title.trim() ? title.trim().slice(0, 200) : 'Collected passages')
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message })
+    }
+  })
+
+  app.get('/api/diff', needs('diff'), async (req, res) => {
     const path = req.query.path as string
     if (!path) { res.status(400).json({ error: 'Path is required' }); return }
     try {
@@ -231,7 +1059,7 @@ export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimi
     }
   })
 
-  app.post('/api/extract', async (req, res) => {
+  app.post('/api/extract', needs('schemaExtraction'), async (req, res) => {
     const { fields, paths } = req.body
     if (!fields || !Array.isArray(fields)) {
       res.status(400).json({ error: 'Fields array is required' })
@@ -245,10 +1073,14 @@ export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimi
     }
   })
 
-  app.post('/api/watch', (req, res) => {
+  app.post('/api/watch', adminOnly, needs('watchedFolders'), (req, res) => {
     const { directories } = req.body
     if (!directories || !Array.isArray(directories)) {
       res.status(400).json({ error: 'Directories array is required' })
+      return
+    }
+    if (watchRoots.length === 0) {
+      res.status(403).json({ error: 'Watching folders through the API is disabled. Start the server with --watch-root <dir>.' })
       return
     }
     for (const dir of directories) {
@@ -256,16 +1088,24 @@ export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimi
         res.status(400).json({ error: `Directory does not exist: ${dir}` })
         return
       }
+      const real = realOrResolved(dir)
+      // Roots are resolved per request so symlinks (e.g. macOS /var -> /private/var) and late-created roots match.
+      if (!watchRoots.some(root => isInside(real, realOrResolved(root)))) {
+        res.status(403).json({ error: `Not inside an allowed watch root: ${dir}` })
+        return
+      }
     }
     try {
-      duct.watch(directories)
+      // Indexing the folder's existing files can take a while; progress is reported by /api/activity.
+      for (const d of directories) audit(res, 'watch', d)
+      duct.watch(directories).catch(err => console.error(`  Watch failed: ${(err as Error).message}`))
       res.json({ ok: true, watching: directories })
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })
     }
   })
 
-  app.post('/api/unwatch', (_req, res) => {
+  app.post('/api/unwatch', adminOnly, (_req, res) => {
     try {
       duct.unwatch()
       res.json({ ok: true })
@@ -274,692 +1114,36 @@ export function createServer(duct: Duct, opts?: { authToken?: string; uploadLimi
     }
   })
 
+  app.use('/mascot', express.static(mascotDir, { maxAge: '1d' }))
+  for (const [route, dir] of [['build', 'legacy/build'], ['web', 'legacy/web'], ['cmaps', 'cmaps'], ['standard_fonts', 'standard_fonts'], ['wasm', 'wasm']]) {
+    app.use(`/vendor/pdfjs/${route}`, express.static(join(pdfjsDir, dir), { maxAge: '1d', index: false }))
+  }
+  app.get('/viewer', (_req, res) => {
+    res.setHeader('Content-Security-Policy', INLINE_SCRIPT_CSP)
+    res.type('html').send(viewerHtml)
+  })
+  app.get('/workspace', (_req, res) => {
+    res.setHeader('Content-Security-Policy', INLINE_SCRIPT_CSP)
+    res.type('html').send(workspaceHtml)
+  })
+  // The desktop app's notch companion (see electron/island.cjs).
+  app.get('/island', (_req, res) => {
+    res.setHeader('Content-Security-Policy', INLINE_SCRIPT_CSP)
+    res.type('html').send(fillPage(islandHtml))
+  })
+
+  // The main UI: static files from assets/ui.
+  app.use('/ui', express.static(uiDir, { index: false, maxAge: 0 }))
+
+  app.get('/vendor/dotlottie/index.js', (_req, res) => res.sendFile(join(lottiePlayerDir, 'index.js')))
+  app.get('/vendor/dotlottie/dotlottie-player.wasm', (_req, res) => res.sendFile(join(lottiePlayerDir, 'dotlottie-player.wasm')))
+
   app.get('*', (_req, res) => {
-    res.type('html').send(html)
+    res.sendFile(join(uiDir, 'index.html'))
   })
 
   return app
 }
 
-const html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Duct — Local Search Engine</title>
-  
-  <!-- Open Graph Social Preview -->
-  <meta property="og:title" content="Duct — Local Document Intelligence">
-  <meta property="og:description" content="Extract, chunk, embed, search, and ask — document intelligence in one command.">
-  <meta property="og:image" content="https://duct.docfide.com/assets/social-preview.png">
-  <meta name="twitter:card" content="summary_large_image">
 
-<style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-
-:root {
-  --black:    #0C0C0B;
-  --s1:       #111110;
-  --s2:       #181816;
-  --s3:       #202020;
-  --border:   #252522;
-  --border2:  #333330;
-  --muted:    #555552;
-  --subtle:   #888883;
-  --body:     #C8C7C0;
-  --text:     #F0EFE8;
-  --lime:     #A3E635;
-  --lime-d:   #6AAA10;
-  --lime-bg:  #141A06;
-  --lime-h:   #B8F040;
-  --success:  #4ABA80;
-  --warning:  #E8A020;
-  --danger:   #E05555;
-  --info:     #5090E0;
-  --mono: 'SF Mono','Fira Code','Cascadia Code','Consolas',monospace;
-  --sans: -apple-system,BlinkMacSystemFont,'Inter',sans-serif;
-  --r: 6px;
-  --rl: 10px;
-}
-
-body { background: var(--black); color: var(--text); font-family: var(--sans); min-height: 100vh; overflow-x: hidden; }
-
-.root { display: flex; flex-direction: column; min-height: 100vh; }
-
-.top-bar { background: var(--s1); border-bottom: 1px solid var(--border); padding: 16px 28px; display: flex; align-items: center; justify-content: space-between; }
-.top-left { display: flex; align-items: center; gap: 14px; }
-.mark-wrap { width: 36px; height: 36px; background: var(--black); border-radius: 8px; border: 1px solid var(--border2); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-.wordmark { font-family: var(--mono); font-size: 20px; font-weight: 600; color: var(--text); letter-spacing: -0.5px; }
-.wordmark span { color: var(--lime); }
-.ds-tag { font-family: var(--mono); font-size: 9px; color: var(--muted); letter-spacing: 2.5px; }
-.version { font-family: var(--mono); font-size: 10px; color: var(--muted); background: var(--s2); border: 1px solid var(--border); padding: 4px 10px; border-radius: 4px; }
-
-.body { padding: 24px 28px; display: grid; grid-template-columns: 320px 1fr; gap: 32px; flex: 1; align-items: flex-start; }
-
-.sec-label { font-family: var(--mono); font-size: 9px; letter-spacing: 2.5px; color: var(--muted); text-transform: uppercase; padding-bottom: 8px; border-bottom: 1px solid var(--border); margin-bottom: 16px; display: flex; justify-content: space-between; align-items: baseline; }
-
-.sidebar { display: flex; flex-direction: column; gap: 24px; position: sticky; top: 24px; }
-.main { display: flex; flex-direction: column; gap: 24px; }
-
-/* COMPONENT: CLI-LIKE BLOCK */
-.cli { background: var(--black); border: 1px solid var(--border); border-radius: var(--rl); overflow: hidden; }
-.cli-bar { background: var(--s2); padding: 9px 14px; display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--border); }
-.cli-dot { width: 9px; height: 9px; border-radius: 50%; }
-.cli-title { font-family: var(--mono); font-size: 10px; color: var(--muted); margin-left: 6px; }
-.cli-body { padding: 16px; font-family: var(--mono); font-size: 12px; line-height: 2; }
-.cp { color: var(--lime); }
-.cc { color: var(--text); }
-.cd { color: var(--muted); }
-.cl { color: var(--lime); }
-
-/* COMPONENT: CELL */
-.cell { background: var(--s2); border: 1px solid var(--border); padding: 20px; border-radius: var(--rl); display: flex; flex-direction: column; gap: 12px; }
-
-/* BADGES */
-.badge { font-family: var(--mono); font-size: 9px; font-weight: 500; padding: 3px 7px; border-radius: 4px; display: inline-block; letter-spacing: 0.5px; border: 1px solid; }
-.b-lime { background: var(--lime-bg); color: var(--lime); border-color: var(--lime-d); }
-.b-ok   { background: #0A2018; color: var(--success); border-color: #1A4A30; }
-.b-warn { background: #1E1408; color: var(--warning); border-color: #4A3008; }
-.b-err  { background: #1E0808; color: var(--danger); border-color: #3A1818; }
-.b-info { background: #0A1830; color: var(--info); border-color: #183060; }
-.b-mute { background: var(--s3); color: var(--subtle); border-color: var(--border); }
-
-/* BUTTONS */
-.btn { font-family: var(--mono); font-size: 11px; font-weight: 500; padding: 7px 16px; border-radius: var(--r); border: 1px solid; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; transition: all .2s; }
-.btn-p { background: var(--lime); color: #0C0C0B; border-color: var(--lime); }
-.btn-p:hover { background: var(--lime-h); border-color: var(--lime-h); }
-.btn-g { background: transparent; color: var(--body); border-color: var(--border2); }
-.btn-g:hover { border-color: var(--subtle); color: var(--text); }
-.btn-d { background: transparent; color: var(--danger); border-color: #3A1818; }
-.btn:disabled { opacity: 0.5; cursor: not-allowed; }
-
-/* SEARCH BOX */
-.search-box { background: var(--black); border: 1px solid var(--border2); border-radius: var(--r); padding: 12px 16px; display: flex; align-items: center; gap: 12px; transition: border-color .2s; }
-.search-box:focus-within { border-color: var(--lime); }
-.search-icon { color: var(--lime); font-size: 16px; font-family: var(--mono); }
-.search-input { flex: 1; background: transparent; border: none; color: var(--text); font-family: var(--mono); font-size: 14px; outline: none; }
-.search-input::placeholder { color: var(--muted); }
-
-/* RESULTS */
-.result { background: var(--s1); border: 1px solid var(--border); border-radius: var(--r); padding: 16px; cursor: pointer; transition: border-color .2s; margin-bottom: 8px; }
-.result:hover { border-color: var(--border2); }
-.r-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-.r-score { font-family: var(--mono); font-size: 12px; color: var(--lime); font-weight: 600; min-width: 36px; }
-.r-file { font-family: var(--mono); font-size: 12px; color: var(--text); font-weight: 500; word-break: break-all; }
-.r-section { font-family: var(--mono); font-size: 11px; color: var(--muted); }
-.r-ext { margin-left: auto; }
-.r-snippet { font-size: 13px; color: var(--body); line-height: 1.7; }
-.r-snippet mark { background: #1E2A06; color: var(--lime); border-radius: 2px; padding: 0 2px; font-style: normal; }
-.r-full { display: none; padding-top: 12px; border-top: 1px solid var(--border); margin-top: 12px; white-space: pre-wrap; font-size: 12px; color: var(--subtle); font-family: var(--mono); line-height: 1.6; }
-.result.expanded .r-snippet { display: none; }
-.result.expanded .r-full { display: block; }
-
-/* CHAT */
-.chat-panel { background: var(--s1); border: 1px solid var(--border); border-radius: var(--rl); display: flex; flex-direction: column; overflow: hidden; }
-.chat-msgs { padding: 20px; display: flex; flex-direction: column; gap: 16px; max-height: 400px; overflow-y: auto; }
-.msg { padding: 12px 16px; border-radius: var(--r); font-size: 13px; line-height: 1.6; max-width: 85%; }
-.msg.q { background: var(--s2); border: 1px solid var(--border); color: var(--text); align-self: flex-end; }
-.msg.a { background: transparent; color: var(--body); align-self: flex-start; max-width: 100%; border-left: 2px solid var(--lime); border-radius: 0; padding-left: 14px; }
-.msg .source { font-size: 11px; color: var(--subtle); margin-top: 10px; border-top: 1px dotted var(--border); padding-top: 8px; font-family: var(--mono); }
-.msg .source a { color: var(--lime); text-decoration: none; }
-.chat-input-area { border-top: 1px solid var(--border); padding: 12px 20px; display: flex; gap: 10px; align-items: center; background: var(--black); }
-.chat-input-area input { flex: 1; background: transparent; border: none; color: var(--text); font-family: var(--mono); font-size: 13px; outline: none; }
-
-/* FORMS / UPLOAD */
-.drop-zone { border: 1px dashed var(--border2); border-radius: var(--r); padding: 24px; text-align: center; cursor: pointer; transition: border-color .2s; }
-.drop-zone:hover, .drop-zone.dragover { border-color: var(--lime); }
-.drop-zone .t-ui { margin-top: 8px; }
-.upload-file { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-family: var(--mono); font-size: 10px; color: var(--muted); }
-.upload-file .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-.inline-form { display: flex; gap: 8px; }
-.inline-form input { flex: 1; background: var(--black); border: 1px solid var(--border); border-radius: var(--r); padding: 8px 12px; color: var(--text); font-family: var(--mono); font-size: 11px; outline: none; }
-.inline-form input:focus { border-color: var(--border2); }
-
-.field-group { display: flex; flex-direction: column; gap: 6px; }
-.field-group label { font-family: var(--mono); font-size: 10px; color: var(--subtle); text-transform: uppercase; letter-spacing: 1px; }
-.field-group select, .field-group input { background: var(--black); border: 1px solid var(--border); border-radius: var(--r); padding: 8px 10px; color: var(--text); font-family: var(--mono); font-size: 12px; outline: none; }
-.field-group input[type="checkbox"] { width: auto; accent-color: var(--lime); }
-
-.doc-item { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); font-family: var(--mono); font-size: 10px; }
-.doc-item:last-child { border-bottom: none; }
-.doc-item .name { flex: 1; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.doc-item .meta { color: var(--muted); }
-
-.toast { position: fixed; bottom: 24px; right: 24px; background: var(--lime); color: var(--black); padding: 12px 20px; border-radius: var(--r); font-family: var(--mono); font-size: 11px; font-weight: 500; opacity: 0; transition: opacity .3s; pointer-events: none; z-index: 100; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
-.toast.show { opacity: 1; }
-.toast.error { background: var(--danger); color: #fff; }
-
-.t-ui { font-family: var(--mono); font-size: 12px; color: var(--body); }
-</style>
-</head>
-<body>
-<div class="root">
-  <div class="top-bar">
-    <div class="top-left">
-      <div class="mark-wrap">
-        <svg width="20" height="20" viewBox="0 0 30 30" fill="none">
-          <line x1="4" y1="9"  x2="16" y2="9"  stroke="#333330" stroke-width="2" stroke-linecap="round"/>
-          <line x1="4" y1="15" x2="22" y2="15" stroke="#A3E635" stroke-width="2.2" stroke-linecap="round"/>
-          <line x1="4" y1="21" x2="12" y2="21" stroke="#333330" stroke-width="2" stroke-linecap="round"/>
-          <path d="M24 12 L28 15 L24 18" stroke="#A3E635" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-        </svg>
-      </div>
-      <div>
-        <div class="wordmark">d<span>u</span>ct</div>
-        <div class="ds-tag">LOCAL SEARCH ENGINE</div>
-      </div>
-    </div>
-    <div class="version">v0.1.0</div>
-  </div>
-
-  <div class="body">
-    <!-- LEFT SIDEBAR -->
-    <aside class="sidebar">
-      
-      <div class="cli">
-        <div class="cli-bar">
-          <div class="cli-dot" style="background:#E05555;"></div>
-          <div class="cli-dot" style="background:#E8A020;"></div>
-          <div class="cli-dot" style="background:#4ABA80;"></div>
-          <div class="cli-title">duct — dashboard</div>
-        </div>
-        <div class="cli-body">
-          <div><span class="cl">✓</span> <span class="cd">indexed</span>  <span class="cc" id="docCount">0</span> <span class="cd">files,</span> <span class="cc" id="chunkCount">0</span> <span class="cd">chunks</span></div>
-          <div><span class="cl">✓</span> <span class="cd">engine</span>   <span class="cl" id="engineMode">bm25</span></div>
-        </div>
-      </div>
-
-      <div class="cell">
-        <div class="sec-label">Ingest</div>
-        
-        <div class="drop-zone" id="dropZone">
-          <div style="font-size:20px;margin-bottom:8px">📄</div>
-          <div class="t-ui">Drop files here</div>
-          <div style="font-size:10px;color:var(--muted);margin-top:4px;font-family:var(--mono);">pdf, docx, xlsx, pptx, md, csv, json, txt, images</div>
-        </div>
-        <input type="file" id="fileInput" multiple accept=".pdf,.docx,.md,.markdown,.html,.htm,.txt,.csv,.json,.log,.xml,.xlsx,.pptx,.png,.jpg,.jpeg,.tiff,.tif,.bmp,.gif,.webp" style="display:none;" />
-        <div id="uploadProgress" style="margin-top:8px;"></div>
-
-        <div class="inline-form" style="margin-top:8px;">
-          <input type="text" id="urlInput" placeholder="https://docs.example.com" />
-          <button class="btn btn-g" onclick="indexUrl()">Index URL</button>
-        </div>
-
-        <div class="inline-form" style="margin-top:8px;">
-          <input type="text" id="watchInput" placeholder="/absolute/path/to/dir" />
-          <button class="btn btn-g" onclick="watchDir()">Watch</button>
-        </div>
-        <div id="watchList" style="margin-top:8px;"></div>
-      </div>
-
-      <div class="cell">
-        <div class="sec-label">
-          <span>Documents</span>
-          <span style="color:var(--lime);cursor:pointer;" onclick="toggleDocs()">[show]</span>
-        </div>
-        <div id="docList" style="display:none; max-height:200px; overflow-y:auto;">
-          <div id="docEmpty" style="font-family:var(--mono);font-size:10px;color:var(--muted);">No documents indexed.</div>
-          <div id="docItems"></div>
-        </div>
-      </div>
-
-      <div class="cell">
-        <div class="sec-label">Search Settings</div>
-        
-        <div class="field-group">
-          <label>Search Engine</label>
-          <select id="cfgSearchMode" onchange="saveSearchConfig()">
-            <option value="bm25">BM25 (Keyword)</option>
-            <option value="vector">Vector (Semantic)</option>
-            <option value="hybrid">Hybrid (BM25 + Vector)</option>
-          </select>
-        </div>
-      </div>
-
-      <div class="cell">
-        <div class="sec-label">Embed Provider</div>
-
-        <div class="field-group">
-          <label>Provider</label>
-          <select id="cfgEmbedProvider" onchange="toggleEmbedFields(); saveEmbedConfig()">
-            <option value="">Auto (from API keys)</option>
-            <option value="openai">OpenAI</option>
-            <option value="gemini">Gemini</option>
-            <option value="cohere">Cohere</option>
-            <option value="voyage">Voyage AI</option>
-            <option value="mistral">Mistral</option>
-            <option value="jina">Jina AI</option>
-            <option value="ollama">Ollama (Local)</option>
-            <option value="openai-compatible">OpenAI-Compatible</option>
-          </select>
-        </div>
-        <div class="field-group">
-          <label>Model</label>
-          <input type="text" id="cfgEmbedModel" placeholder="text-embedding-3-small" onchange="saveEmbedConfig()" />
-        </div>
-        <div class="field-group" id="embedBaseUrlGroup" style="display:none;">
-          <label>Base URL</label>
-          <input type="text" id="cfgEmbedBaseUrl" placeholder="http://localhost:11434" onchange="saveEmbedConfig()" />
-        </div>
-      </div>
-
-      <div class="cell">
-        <div class="sec-label">LLM Settings</div>
-        
-        <div class="field-group">
-          <label>Provider</label>
-          <select id="cfgLLMProvider" onchange="saveLLMConfig()">
-            <option value="none">None</option>
-            <option value="ollama">Ollama (Local)</option>
-            <option value="openai">OpenAI</option>
-            <option value="gemini">Gemini</option>
-          </select>
-        </div>
-        <div class="field-group">
-          <label>Model</label>
-          <input type="text" id="cfgLLMModel" placeholder="llama3.2" onchange="saveLLMConfig()" />
-        </div>
-        <div class="field-group">
-          <label>Base URL / API Key</label>
-          <input type="password" id="cfgLLMBaseUrl" placeholder="http://localhost:11434" onchange="saveLLMConfig()" />
-        </div>
-      </div>
-
-    </aside>
-
-    <!-- MAIN CONTENT -->
-    <main class="main" style="display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 24px; align-items: start;">
-      
-      <div class="main-col">
-        <!-- SEARCH PANEL -->
-        <div>
-          <div class="sec-label">
-            <span>Search Engine</span>
-            <div style="display:flex;gap:8px;">
-              <button class="btn btn-g" style="padding:2px 8px;font-size:9px;" onclick="exportResults()">EXPORT JSON</button>
-              <button class="btn btn-d" style="padding:2px 8px;font-size:9px;" onclick="clearAll()">CLEAR INDEX</button>
-            </div>
-          </div>
-          
-          <div class="search-box">
-            <span class="search-icon">⌕</span>
-            <input type="text" class="search-input" id="searchInput" placeholder="Query indexed documents (e.g., 'termination clause')" />
-            <button class="btn btn-p" id="searchBtn">Search</button>
-          </div>
-
-          <div id="results" style="margin-top:16px;">
-            <!-- Results will be injected here -->
-            <div id="emptyState" style="text-align:center;padding:40px;font-family:var(--mono);font-size:12px;color:var(--muted);">
-              Awaiting query...
-            </div>
-          </div>
-        </div>
-
-        <!-- ASK PANEL -->
-        <div style="margin-top:32px;">
-          <div class="sec-label">Agentic QA</div>
-          <div class="chat-panel">
-            <div class="chat-msgs" id="chatMessages">
-              <div class="msg a">
-                Ask questions about your documents. Make sure you configure an LLM provider in the settings.
-              </div>
-            </div>
-            <div class="chat-input-area">
-              <span style="color:var(--lime);font-family:var(--mono);">></span>
-              <input type="text" id="chatInput" placeholder="What is the termination policy?" />
-              <button class="btn btn-p" id="askBtn">Ask</button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- READER PANEL -->
-      <aside class="reader-panel cell" style="position: sticky; top: 24px; height: calc(100vh - 120px); overflow-y: auto;">
-        <div class="sec-label">Document Reader</div>
-        <div id="docViewer" style="display:none;">
-          <div class="r-head" style="margin-bottom:16px;">
-             <span class="r-file" id="viewerTitle" style="font-size:14px;"></span>
-             <span class="badge b-mute r-ext" id="viewerExt"></span>
-          </div>
-          <div id="viewerContent" class="t-ui" style="line-height:1.7; white-space:pre-wrap;"></div>
-        </div>
-        <div id="viewerEmpty" style="text-align:center;padding:40px;font-family:var(--mono);font-size:10px;color:var(--muted);">
-          Click a result to read it here.
-        </div>
-      </aside>
-
-    </main>
-  </div>
-</div>
-
-<div class="toast" id="toast"></div>
-
-<script>
-  let indexing = false
-  let searchMode = 'bm25'
-
-  document.getElementById('fileInput').addEventListener('change', handleFiles)
-  document.getElementById('searchInput').addEventListener('keydown', e => { if (e.key === 'Enter') search() })
-  document.getElementById('searchBtn').addEventListener('click', search)
-  document.getElementById('chatInput').addEventListener('keydown', e => { if (e.key === 'Enter') sendQuestion() })
-  document.getElementById('askBtn').addEventListener('click', sendQuestion)
-
-  const dropZone = document.getElementById('dropZone')
-  dropZone.addEventListener('dragenter', e => { e.preventDefault(); dropZone.classList.add('dragover') })
-  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover') })
-  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'))
-  dropZone.addEventListener('drop', async e => {
-    e.preventDefault(); e.stopPropagation()
-    dropZone.classList.remove('dragover')
-    const files = e.dataTransfer?.files
-    if (files && files.length > 0) await handleFilesDrop(files)
-  })
-  dropZone.addEventListener('click', () => document.getElementById('fileInput').click())
-
-  function toggleDocs() {
-    const dl = document.getElementById('docList')
-    dl.style.display = dl.style.display === 'none' ? 'block' : 'none'
-  }
-
-  async function handleFiles(e) { const files = e.target.files; if (files) await uploadFiles(files); e.target.value = ''; }
-  async function handleFilesDrop(files) { await uploadFiles(files) }
-
-  async function uploadFiles(files) {
-    if (!files.length || indexing) return
-    indexing = true
-    const progress = document.getElementById('uploadProgress')
-    progress.innerHTML = ''
-    const errors = []
-    const list = Array.from(files)
-
-    const showFile = (f, status, cls) => {
-      const div = document.createElement('div')
-      div.className = 'upload-file'
-      div.innerHTML = '<span class="name">' + esc(f.name) + '</span><span class="status ' + cls + '">' + status + '</span>'
-      progress.appendChild(div)
-    }
-
-    for (const f of list) showFile(f, 'Uploading...', '')
-
-    for (let i = 0; i < list.length; i++) {
-      const f = list[i]
-      const row = progress.children[i]
-      row.querySelector('.status').textContent = 'Indexing...'
-
-      const formData = new FormData()
-      formData.append('files', f)
-      try {
-        const res = await fetch('/api/index', { method: 'POST', body: formData })
-        const data = await res.json()
-        if (data.error) {
-          row.querySelector('.status').textContent = 'Err: ' + data.error
-          row.querySelector('.status').style.color = 'var(--danger)'
-          errors.push(f.name + ': ' + data.error)
-        } else {
-          row.querySelector('.status').textContent = 'OK'
-          row.querySelector('.status').style.color = 'var(--success)'
-        }
-      } catch (err) {
-        row.querySelector('.status').textContent = 'Err'
-        row.querySelector('.status').style.color = 'var(--danger)'
-        errors.push(f.name + ': ' + err.message)
-      }
-    }
-
-    indexing = false
-    refreshStats()
-    refreshDocs()
-    if (errors.length === 0) toast('All files indexed')
-    else toast(errors.length + ' file(s) failed', true)
-  }
-
-  async function indexUrl() {
-    const url = document.getElementById('urlInput').value.trim()
-    if (!url) return
-    try {
-      const res = await fetch('/api/index', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }) })
-      const data = await res.json()
-      if (data.error) { toast('Error: ' + data.error, true); return }
-      document.getElementById('urlInput').value = ''
-      toast('Indexed: ' + url)
-      refreshStats()
-      refreshDocs()
-    } catch (err) { toast('Error: ' + err.message, true) }
-  }
-
-  async function watchDir() {
-    const dir = document.getElementById('watchInput').value.trim()
-    if (!dir) return
-    try {
-      const res = await fetch('/api/watch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ directories: [dir] })
-      })
-      const data = await res.json()
-      if (data.ok) {
-        toast('Now watching ' + dir)
-        document.getElementById('watchInput').value = ''
-        const list = document.getElementById('watchList')
-        list.innerHTML += '<div style="font-family:var(--mono);font-size:10px;color:var(--muted);padding:4px 0;">&#128065; ' + esc(dir) + '</div>'
-      } else {
-        toast('Error: ' + data.error, true)
-      }
-    } catch (e) { toast('Error: ' + e.message, true) }
-  }
-
-  async function search() {
-    const q = document.getElementById('searchInput').value.trim()
-    if (!q) return
-    const btn = document.getElementById('searchBtn')
-    btn.disabled = true; btn.textContent = '...'
-    document.getElementById('emptyState') && (document.getElementById('emptyState').style.display = 'none')
-
-    try {
-      const res = await fetch('/api/search?q=' + encodeURIComponent(q) + '&topK=10')
-      const data = await res.json()
-      const div = document.getElementById('results')
-      if (!data.results || data.results.length === 0) {
-        div.innerHTML = '<div style="text-align:center;padding:40px;font-family:var(--mono);font-size:12px;color:var(--muted);">No results found.</div>'
-        btn.disabled = false; btn.textContent = 'Search'; return
-      }
-      div.innerHTML = data.results.map((r, i) => {
-        const heading = r.chunk.heading ? ' <span class="r-section">› ' + esc(r.chunk.heading) + '</span>' : ''
-        const ext = r.chunk.documentPath.split('.').pop()
-        const snippet = r.chunk.content.slice(0, 300)
-        const full = r.chunk.content
-        return '<div class="result" onclick="viewResult(this)">' +
-          '<div class="r-head"><span class="r-score">' + r.score.toFixed(2) + '</span><span class="r-file">' + esc(r.chunk.documentPath.split('/').pop() || r.chunk.documentPath) + '</span>' + heading + '<span class="badge b-mute r-ext">' + esc(ext) + '</span></div>' +
-          '<div class="r-snippet">' + highlight(esc(snippet), q) + (full.length > 300 ? '... <span style="color:var(--lime);font-size:11px;font-family:var(--mono)">[read more]</span>' : '') + '</div>' +
-          '<div class="r-full" style="display:none;">' + highlight(esc(full), q) + '</div>' +
-          '</div>'
-      }).join('')
-    } catch (err) {
-      document.getElementById('results').innerHTML = '<div style="color:var(--danger);padding:20px;font-family:var(--mono);font-size:12px;">Error: ' + esc(err.message) + '</div>'
-    }
-    btn.disabled = false; btn.textContent = 'Search'
-  }
-
-  async function sendQuestion() {
-    const input = document.getElementById('chatInput')
-    const q = input.value.trim()
-    if (!q) return
-    const btn = document.getElementById('askBtn')
-    const msgs = document.getElementById('chatMessages')
-    input.value = ''
-
-    msgs.appendChild(el('div', 'msg q', q))
-    const thinking = el('div', 'msg a', '<span style="color:var(--muted)">Thinking...</span>')
-    msgs.appendChild(thinking)
-    msgs.scrollTop = msgs.scrollHeight
-    btn.disabled = true; btn.textContent = '...'
-
-    try {
-      const res = await fetch('/api/ask', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: q, agentic: false }),
-      })
-      const data = await res.json()
-      thinking.remove()
-
-      if (data.error) {
-        msgs.appendChild(el('div', 'msg a', '<span style="color:var(--danger)">Error:</span> ' + esc(data.error)))
-      } else {
-        const answerDiv = el('div', 'msg a', '')
-        const answerText = data.answer.replace(/\\n/g, '<br>')
-        let sourcesHtml = '<div class="source"><strong>SOURCES</strong><br>'
-        for (const s of (data.sources || []).slice(0, 5)) {
-          sourcesHtml += '<a href="#" class="source-link" data-path="' + esc(s.documentPath) + '">' + esc(s.documentPath.split('/').pop() || s.documentPath) + '</a> <span style="color:var(--muted)">[' + s.score.toFixed(2) + ']</span><br>'
-        }
-        sourcesHtml += '</div>'
-        answerDiv.innerHTML = answerText + sourcesHtml
-        msgs.appendChild(answerDiv)
-      }
-    } catch (err) {
-      thinking.remove()
-      msgs.appendChild(el('div', 'msg a', '<span style="color:var(--danger)">Error:</span> ' + esc(err.message)))
-    }
-
-    msgs.scrollTop = msgs.scrollHeight
-    btn.disabled = false; btn.textContent = 'Ask'
-  }
-
-  document.getElementById('chatMessages').addEventListener('click', e => {
-    const link = e.target.closest('.source-link')
-    if (link) {
-      e.preventDefault()
-      document.getElementById('searchInput').value = link.getAttribute('data-path') || ''
-      search()
-    }
-  })
-
-  function viewResult(el) {
-    document.querySelectorAll('.result').forEach(r => r.style.borderColor = 'var(--border)');
-    el.style.borderColor = 'var(--lime)';
-    const file = el.querySelector('.r-file').textContent;
-    const ext = el.querySelector('.r-ext') ? el.querySelector('.r-ext').textContent : '';
-    const content = el.querySelector('.r-full').innerHTML;
-    document.getElementById('viewerEmpty').style.display = 'none';
-    document.getElementById('docViewer').style.display = 'block';
-    document.getElementById('viewerTitle').textContent = file;
-    document.getElementById('viewerExt').textContent = ext;
-    document.getElementById('viewerContent').innerHTML = content;
-  }
-
-  async function clearAll() {
-    if(!confirm('Clear all indexed documents?')) return
-    await fetch('/api/clear', { method: 'DELETE' })
-    document.getElementById('results').innerHTML = '<div id="emptyState" style="text-align:center;padding:40px;font-family:var(--mono);font-size:12px;color:var(--muted);">Awaiting query...</div>'
-    refreshStats()
-    refreshDocs()
-    toast('Index cleared')
-  }
-
-  function exportResults() {
-    const q = document.getElementById('searchInput').value.trim()
-    if(!q) { toast('Run a search first', true); return }
-    window.location.href = '/api/export?format=csv&q=' + encodeURIComponent(q)
-  }
-
-  async function refreshStats() {
-    const res = await fetch('/api/stats'); const data = await res.json()
-    document.getElementById('docCount').textContent = data.documents
-    document.getElementById('chunkCount').textContent = data.chunks
-  }
-
-  async function refreshDocs() {
-    const res = await fetch('/api/documents'); const docs = await res.json()
-    const empty = document.getElementById('docEmpty')
-    const items = document.getElementById('docItems')
-    if (docs.length === 0) {
-      empty.style.display = 'block'; items.innerHTML = ''
-    } else {
-      empty.style.display = 'none'
-      items.innerHTML = docs.map(d => {
-        const name = d.path.split('/').pop() || d.path
-        return '<div class="doc-item"><span class="name" title="' + esc(d.path) + '">' + esc(name) + '</span><span class="meta">' + d.chunkCount + ' ch</span></div>'
-      }).join('')
-    }
-  }
-
-  function toggleEmbedFields() {
-    const val = document.getElementById('cfgEmbedProvider').value
-    const grp = document.getElementById('embedBaseUrlGroup')
-    grp.style.display = (val === 'ollama' || val === 'openai-compatible') ? 'block' : 'none'
-  }
-
-  async function loadConfig() {
-    try {
-      const res = await fetch('/api/config'); const c = await res.json()
-      document.getElementById('cfgSearchMode').value = c.searchMode || 'bm25'
-      document.getElementById('engineMode').textContent = c.searchMode || 'bm25'
-      
-      if (c.embedProvider) document.getElementById('cfgEmbedProvider').value = c.embedProvider
-      if (c.embedModel) document.getElementById('cfgEmbedModel').value = c.embedModel
-      if (c.embedBaseUrl) document.getElementById('cfgEmbedBaseUrl').value = c.embedBaseUrl
-      toggleEmbedFields()
-
-      if (c.llmProvider && c.llmProvider !== 'none') {
-        document.getElementById('cfgLLMProvider').value = c.llmProvider
-      }
-      if (c.llmModel) document.getElementById('cfgLLMModel').value = c.llmModel
-      if (c.llmBaseUrl) document.getElementById('cfgLLMBaseUrl').value = c.llmBaseUrl
-    } catch(e){}
-  }
-
-  async function saveEmbedConfig() {
-    const embedProvider = document.getElementById('cfgEmbedProvider').value
-    const embedModel = document.getElementById('cfgEmbedModel').value
-    const embedBaseUrl = document.getElementById('cfgEmbedBaseUrl').value
-    await fetch('/api/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ embedProvider, embedModel, embedBaseUrl }) })
-    toast('Embed config saved')
-  }
-
-  async function saveSearchConfig() {
-    const mode = document.getElementById('cfgSearchMode').value
-    document.getElementById('engineMode').textContent = mode
-    await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ searchMode: mode }) })
-    toast('Search config saved')
-  }
-
-  async function saveLLMConfig() {
-    const provider = document.getElementById('cfgLLMProvider').value
-    const model = document.getElementById('cfgLLMModel').value
-    const baseUrl = document.getElementById('cfgLLMBaseUrl').value
-    await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ llmProvider: provider, llmModel: model, llmBaseUrl: baseUrl }) })
-    toast('LLM config saved')
-  }
-
-  function toast(msg, isError) { const t = document.getElementById('toast'); t.textContent = msg; t.className = 'toast' + (isError ? ' error' : ''); t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 3000) }
-  function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML }
-  function el(tag, cls, html) { const d = document.createElement(tag); d.className = cls; d.innerHTML = html; return d }
-  function highlight(text, query) {
-    const words = query.toLowerCase().split(/\\s+/).filter(w => w.length > 2)
-    if (!words.length) return text
-    const lower = text.toLowerCase()
-    const highlighted = new Array(text.length).fill(false)
-    for (const word of words) {
-      let idx = 0
-      while ((idx = lower.indexOf(word, idx)) !== -1) {
-        for (let i = idx; i < idx + word.length; i++) highlighted[i] = true
-        idx++
-      }
-    }
-    let result = ''; let inTag = false
-    for (let i = 0; i < text.length; i++) {
-      if (highlighted[i] && !inTag) { result += '<mark>'; inTag = true }
-      if (!highlighted[i] && inTag) { result += '</mark>'; inTag = false }
-      result += text[i]
-    }
-    if (inTag) result += '</mark>'
-    return result
-  }
-
-  refreshStats()
-  refreshDocs()
-  loadConfig()
-</script>
-</body>
-</html>`
+/** Validates the S3 form. Plain http is only for a store on this machine (a local MinIO): keys never cross a network unencrypted. */

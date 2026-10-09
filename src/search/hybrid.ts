@@ -1,4 +1,4 @@
-import type { SearchResult, Searcher, VectorStore } from '../types.js'
+import type { EmbeddingProvider, SearchResult, Searcher, VectorStore } from '../types.js'
 
 export function reciprocalRankFusion(
   bm25Results: SearchResult[],
@@ -7,7 +7,7 @@ export function reciprocalRankFusion(
   alpha: number,
 ): SearchResult[] {
   const seen = new Set<string>()
-  const fused = new Map<string, { chunk: SearchResult['chunk']; score: number }>()
+  const fused = new Map<string, SearchResult>()
 
   const maxRank = 60
 
@@ -19,9 +19,12 @@ export function reciprocalRankFusion(
       if (seen.has(key)) {
         const existing = fused.get(key)!
         existing.score += rrfScore
+        // Found both ways: keep the keyword snippet and say it also matched by meaning.
+        existing.snippet ??= r.snippet
+        existing.why = { words: [...(existing.why?.words ?? []), ...(r.why?.words ?? [])], ...(existing.why?.fileName || r.why?.fileName ? { fileName: true } : {}), ...(existing.why?.meaning || r.why?.meaning ? { meaning: true } : {}) }
       } else {
         seen.add(key)
-        fused.set(key, { chunk: r.chunk, score: rrfScore })
+        fused.set(key, { chunk: r.chunk, score: rrfScore, ...(r.snippet !== undefined ? { snippet: r.snippet } : {}), ...(r.why ? { why: r.why } : {}) })
       }
     })
   }
@@ -30,18 +33,21 @@ export function reciprocalRankFusion(
   addSet(vectorResults, alpha)
 
   const sorted = [...fused.values()].sort((a, b) => b.score - a.score)
-  return sorted.slice(0, topK).map(s => ({ chunk: s.chunk, score: s.score }))
+  return sorted.slice(0, topK)
 }
 
 export class HybridSearcher implements Searcher {
   private bm25: Searcher
   private vectorStore: VectorStore | null
   private alpha: number
+  private embedder: EmbeddingProvider | null
 
-  constructor(bm25: Searcher, vectorStore: VectorStore | null, alpha = 0.5) {
+  /** Without an embedder (or vector store) this is plain keyword search. */
+  constructor(bm25: Searcher, vectorStore: VectorStore | null, alpha = 0.5, embedder: EmbeddingProvider | null = null) {
     this.bm25 = bm25
     this.vectorStore = vectorStore
     this.alpha = alpha
+    this.embedder = embedder
   }
 
   setAlpha(alpha: number): void {
@@ -54,30 +60,10 @@ export class HybridSearcher implements Searcher {
 
   async search(query: string, topK = 10): Promise<SearchResult[]> {
     const bm25Results = await this.bm25.search(query, topK * 3)
+    if (!this.vectorStore || !this.embedder) return bm25Results.slice(0, topK)
 
-    if (!this.vectorStore) {
-      return bm25Results.slice(0, topK)
-    }
-
-    const { OpenAIEmbedder } = await import('../embed/openai.js')
-    const { GeminiEmbedder } = await import('../embed/gemini.js')
-
-    let embedder: import('../types.js').EmbeddingProvider | null = null
-    if (process.env['OPENAI_API_KEY']) {
-      embedder = new OpenAIEmbedder()
-    } else if (process.env['GEMINI_API_KEY']) {
-      embedder = new GeminiEmbedder()
-    }
-
-    if (!embedder) {
-      return this.alpha <= 0.5
-        ? bm25Results.slice(0, topK)
-        : await this.bm25.search(query, topK)
-    }
-
-    const [queryEmb] = await embedder.embed([query])
+    const [queryEmb] = await this.embedder.embed([query])
     const vectorResults = await this.vectorStore.search(queryEmb, topK * 3)
-
     return reciprocalRankFusion(bm25Results, vectorResults, topK, this.alpha)
   }
 

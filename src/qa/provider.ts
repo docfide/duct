@@ -1,3 +1,4 @@
+import { HostedLLM } from '../hosted.js'
 import type { LLMProvider } from '../types.js'
 
 export class OpenAILLM implements LLMProvider {
@@ -84,6 +85,7 @@ export function createLLMProvider(cfg: {
   geminiKey?: string
 }): LLMProvider | null {
   const p = cfg.provider || 'ollama'
+  if (p === 'tensflare') return new HostedLLM()
   if (p === 'openai' && cfg.openaiKey) {
     return new OpenAILLM(cfg.openaiKey, cfg.model || 'gpt-4o-mini', cfg.baseUrl)
   }

@@ -7,8 +7,9 @@ import { MistralEmbedder } from './mistral.js'
 import { JinaEmbedder } from './jina.js'
 import { OllamaEmbedder } from './ollama.js'
 import { OpenAICompatibleEmbedder } from './openai-compatible.js'
+import { HostedEmbedder } from '../hosted.js'
 
-export type EmbedProvider = 'openai' | 'gemini' | 'cohere' | 'voyage' | 'mistral' | 'jina' | 'ollama' | 'openai-compatible'
+export type EmbedProvider = 'openai' | 'gemini' | 'cohere' | 'voyage' | 'mistral' | 'jina' | 'ollama' | 'openai-compatible' | 'tensflare'
 
 export interface EmbedderConfig {
   provider?: EmbedProvider
@@ -42,6 +43,8 @@ export function createEmbedder(config?: EmbedderConfig): EmbeddingProvider | nul
       return new OllamaEmbedder(baseUrl, model)
     case 'openai-compatible':
       return new OpenAICompatibleEmbedder(baseUrl, model, apiKey)
+    case 'tensflare':
+      return new HostedEmbedder()
     default:
       return null
   }

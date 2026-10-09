@@ -26,8 +26,12 @@ const duct = new Duct(options?: DuctConfig)
 | `search.alpha` | `number` | `0.5` | Hybrid blend (0 = BM25, 1 = vector) |
 | `search.rerank` | `boolean` | `false` | Enable re-ranking |
 | `search.hyde` | `boolean` | `false` | Enable HyDE query expansion |
-| `ocr` | `boolean` | `false` | OCR for scanned PDFs |
-| `persistPath` | `string` | — | Directory for persistent index |
+| `ocr` | `boolean` | `false` | OCR for scanned PDFs and images. When off, image-only files are indexed with status `no-text` and `metadata.needsOcr` |
+| `persistPath` | `string` | — | Directory for the index (`duct.db`, SQLite). Without it the index lives in memory |
+| `embed` | `false` | — | Set `embed: false` to disable embeddings even when API keys are present |
+| `blockPrivateUrls` | `boolean` | `false` | Refuse URLs that resolve to private, loopback or link-local addresses |
+
+Settings changed with `configure()` are saved in the index and restored next time; values passed to the constructor take precedence. API keys are never written to disk. An index written by Duct 0.2 (`meta.json`, `bm25.json`, `vectors.json`) is imported automatically on first open.
 
 ### Examples
 
@@ -55,9 +59,9 @@ const duct = new Duct({
 
 ## Methods
 
-### `duct.index(paths, metadata?)`
+### `duct.index(paths, metadata?, options?)`
 
-Index files, directories, or URLs. Optionally attach metadata that propagates to every chunk of the document.
+Index files, directories, or URLs. Optionally attach metadata that propagates to every chunk of the document. Files whose timestamp and size, or bytes, haven't changed since they were last indexed are skipped. `options.source` and `options.displayName` are recorded on the document; `options.ocr: true` runs OCR for this call and `options.force: true` re-extracts unchanged files.
 
 ```typescript
 const result = await duct.index('./report.pdf')
@@ -93,8 +97,10 @@ const results = await duct.search('termination clause', 10)
 // Search scoped to metadata (exact match)
 const results = await duct.search('indemnification', 10, { tenant_id: 'acme' })
 const results = await duct.search('review', 10, { brand: 'apple', category: 'phone' })
-// [{ chunk: Chunk, score: number }, ...]
+// [{ chunk: Chunk, score: number, snippet?: string }, ...]
 ```
+
+`chunk.page` is the 1-based PDF page or PPTX slide the match is on. `snippet` is a short excerpt around the match with matched words wrapped in `\u0002` … `\u0003`; escape it, then replace the markers with your own highlighting. Queries support stemming (`terminate` finds `termination`), accent-insensitive matching and `"quoted phrases"`.
 
 | Param | Type | Description |
 |-------|------|-------------|
@@ -137,12 +143,12 @@ Best for questions that require synthesizing information from multiple documents
 
 ---
 
-### `duct.watch(directories, onIndex?)`
+### `duct.watch(directories, onChange?)`
 
-Watch directories for file changes and auto-index new/modified files.
+Indexes the folders' existing files, then keeps them in sync: new and changed files are indexed, deleted or moved files are removed. With `persistPath`, watched folders are remembered.
 
 ```typescript
-duct.watch(['./docs', './contracts'], () => {
+await duct.watch(['./docs', './contracts'], () => {
   const s = duct.stats()
   console.log(`Total: ${s.documents} docs, ${s.chunks} chunks`)
 })
@@ -150,13 +156,44 @@ duct.watch(['./docs', './contracts'], () => {
 
 ---
 
-### `duct.unwatch()`
+### `duct.restoreSources(onChange?)`
 
-Stop watching all directories.
+Re-watches every remembered folder and catches up on changes made while Duct wasn't running. Returns the folders now being watched.
 
 ```typescript
-duct.unwatch()
+const duct = new Duct({ persistPath: '.duct-data' })
+await duct.restoreSources()
 ```
+
+---
+
+### `duct.listSources()` / `duct.removeSource(path, { removeDocuments? })`
+
+List remembered folders, or stop watching one and forget it (its documents are removed from the index unless `removeDocuments: false`).
+
+---
+
+### `duct.activity()`
+
+What indexing is doing right now: `{ indexing, done, total, current, embedding }`. Useful for progress bars while a large folder is indexed.
+
+---
+
+### `duct.refreshStale()`
+
+Re-extracts documents imported from an older index format (for example, to add page numbers). `restoreSources()` calls it.
+
+---
+
+### `duct.unwatch()` / `duct.close()`
+
+`unwatch()` stops all watchers but keeps the folders remembered. `close()` also closes the database; call it when you're done with the instance.
+
+---
+
+### `addToLibrary(duct, libraryDir, file, options?)`
+
+`import { addToLibrary } from '@docfide/duct/library'`. Copies a file into a library folder under a safe version of its name and indexes the copy. Content that is already indexed is reported as `duplicateOf` instead of being stored twice.
 
 ---
 
@@ -295,6 +332,7 @@ Duct exports TypeScript interfaces for swapping core components:
 ```typescript
 interface EmbeddingProvider {
   embed(texts: string[]): Promise<number[][]>
+  embedQuery?(text: string): Promise<number[]>  // optional: models that encode queries differently
   readonly dimensions: number
 }
 ```

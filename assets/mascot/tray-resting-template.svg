@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 124 88">
+  <!-- Menu-bar silhouette while Duct watches folders: same head as tray-template.svg, eyes closed, "z z". -->
+  <defs>
+    <mask id="closed-eyes" maskUnits="userSpaceOnUse" x="0" y="0" width="124" height="88">
+      <rect width="124" height="88" fill="white"/>
+      <path d="M20 43 Q30 55 40 43" fill="none" stroke="black" stroke-width="6" stroke-linecap="round"/>
+      <path d="M48 43 Q58 55 68 43" fill="none" stroke="black" stroke-width="6" stroke-linecap="round"/>
+    </mask>
+  </defs>
+  <g mask="url(#closed-eyes)" fill="black">
+    <circle cx="17" cy="22" r="11"/>
+    <circle cx="71" cy="22" r="11"/>
+    <ellipse cx="44" cy="48" rx="38" ry="30"/>
+  </g>
+  <path d="M89 30 H105 L89 48 H105" fill="none" stroke="black" stroke-width="6.5" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M107 6 H119 L107 20 H119" fill="none" stroke="black" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"/>
+</svg>

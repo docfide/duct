@@ -1,0 +1,102 @@
+# Duct on Kubernetes. One replica: the index is a SQLite database on a persistent volume.
+#
+#   kubectl create namespace duct
+#   kubectl -n duct create secret generic duct --from-env-file=../.env      # see ../.env.example
+#   kubectl -n duct apply -f duct.yaml
+#
+# Replace duct.example.com below, and set ingressClassName / the cert-manager issuer for your cluster.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: duct-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: duct
+  labels: { app: duct }
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # never two writers on one index
+  selector:
+    matchLabels: { app: duct }
+  template:
+    metadata:
+      labels: { app: duct }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: duct
+          image: ghcr.io/docfide/duct:v1.0.0-alpha.1
+          args:
+            - serve
+            - --host=0.0.0.0
+            - --port=3456
+            - --persist=/data/index
+            - --library=/data/library
+            - --allowed-host=duct.example.com
+          envFrom:
+            - secretRef: { name: duct }
+          env:
+            - { name: DUCT_PUBLIC_URL, value: https://duct.example.com }
+            - { name: DUCT_TRUST_PROXY, value: "1" }
+          ports:
+            - containerPort: 3456
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 3456 }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: 3456 }
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { memory: 2Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: duct-data }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: duct
+spec:
+  selector: { app: duct }
+  ports:
+    - port: 80
+      targetPort: 3456
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: duct
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+    nginx.ingress.kubernetes.io/proxy-body-size: 60m
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [duct.example.com]
+      secretName: duct-tls
+  rules:
+    - host: duct.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: duct, port: { number: 80 } }

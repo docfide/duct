@@ -1,5 +1,11 @@
 # CLI Reference
 
+## Where the index lives
+
+Every command uses one index on disk, so `duct index ./docs` followed by `duct search "..."` works across runs. It's stored in `$DUCT_HOME`, or `~/.duct` if that isn't set; pass `--persist <dir>` to use another folder. Unchanged files are skipped when you index again.
+
+`duct serve` keeps uploaded files in `~/Duct Library` (change it with `--library <dir>`).
+
 ## `duct index`
 
 Index files, directories, or URLs for search.
@@ -102,7 +108,7 @@ duct watch ./inbox --ocr --embed openai --persist .duct-data
 | `--persist` | Persistent index directory |
 | `--embed` | Embedding provider (`openai`, `gemini`, `cohere`, `voyage`, `mistral`, `jina`, `ollama`, `openai-compatible`) |
 
-File changes are picked up via `fs.watch` with recursive mode. Stop with Ctrl+C.
+Existing files are indexed first. New, changed, renamed and deleted files are picked up via `fs.watch` (recursive), and watched folders are remembered in the index so `duct serve` and the desktop app resume them. Stop with Ctrl+C.
 
 ---
 
@@ -151,6 +157,54 @@ Output shows `+` for added lines and `-` for removed lines since the previous in
 
 ---
 
+## `duct account`
+
+Sign in with Tensflare. Optional: everything local works without an account; paid features need one.
+
+```bash
+duct account signin    # opens the sign-in page in your browser
+duct account status    # email, plan, and how long paid features work offline
+duct account signout
+```
+
+The session is kept in `account.json` in the index folder, readable only by you (the desktop app uses the system keychain).
+
+## `duct telemetry`
+
+Anonymous usage counts: a daily report of versions, features and library size in ranges, never document text, file names, paths or searches. They are off unless you turn them on.
+
+```bash
+duct telemetry show    # the exact report that would be sent
+duct telemetry on
+duct telemetry off     # no requests at all
+```
+
+`DO_NOT_TRACK=1` or `DUCT_TELEMETRY=0` turn them off whatever the setting, and they never run in CI. `duct serve` and the desktop app send at most one report a day; the command line never sends.
+
+## `duct keys`
+
+API keys for the [developer API](developer-api.md). A key is shown once; only its hash is stored in the index.
+
+```bash
+duct keys create --name "website search" --scopes search --collections help
+duct keys list
+duct keys revoke <id>
+```
+
+Scopes are `search`, `write` and `admin`.
+
+## `duct features`
+
+Shows which features are on, or switches them. Changes are saved with the index.
+
+```bash
+duct features                               # list
+duct features ask=off formats.image=off     # switch off
+duct features ask=on
+```
+
+See [`/api/features`](api.md#get-apifeatures--put-apifeatures) for what each switch does.
+
 ## `duct serve`
 
 Start the web server with the full UI (Search, Ask, Upload, Settings tabs).
@@ -174,6 +228,63 @@ duct serve --search-mode hybrid --alpha 0.3 --llm ollama
 | `--search-mode` | Search mode: `bm25`, `vector`, or `hybrid` |
 | `--alpha` | Hybrid search alpha (default: 0.5) |
 | `--llm` | Default LLM provider for Ask tab |
+| `--host` | Interface to listen on (default: `127.0.0.1`). Any other value requires `--auth-token` |
+| `--watch-root` | Directory the API may watch, including subfolders. Repeatable. Without it, `POST /api/watch` is disabled |
+| `--allowed-host` | Extra hostname accepted in the `Host` header, e.g. `duct.example.com`. Repeatable |
+| `--library` | Folder where uploaded files are kept (default: `~/Duct Library`) |
+| `--watch` | Watch this folder from startup, e.g. a mounted shared drive. Repeatable |
+| `--rescan` | Minutes between full rescans of watched folders, for network drives where file events are unreliable (default: 15, `0` = off) |
+| `--member-token` | Token for team members (repeatable; env `DUCT_MEMBER_TOKENS`, comma-separated). Requires `--auth-token` |
+| `--public-url` | This server's public address, e.g. `https://duct.example.com` (env `DUCT_PUBLIC_URL`). Needed for sign-in and for connecting cloud sources from a browser |
+| `--oidc-issuer` | Sign people in with your identity provider's OpenID Connect issuer (env `DUCT_OIDC_ISSUER`). Needs `--oidc-client-id`, `DUCT_OIDC_CLIENT_SECRET`, `--public-url` and an `--admin-email` |
+| `--oidc-client-id` | OIDC client id (env `DUCT_OIDC_CLIENT_ID`) |
+| `--admin-email` | Admin when signing in. Repeatable (env `DUCT_ADMIN_EMAILS`) |
+| `--allow-domain` | Anyone at this email domain may sign in as a member. Repeatable (env `DUCT_ALLOW_DOMAINS`) |
+| `--allow-email` | This person may sign in as a member. Repeatable (env `DUCT_ALLOW_EMAILS`) |
+| `--audit-queries` | Also record the search text in the audit log |
+| `--audit-days` | Days to keep audit entries (default: 365) |
+| `--no-audit` | Don't keep an audit log |
+| `--trust-proxy` | Behind a reverse proxy: the number of proxy hops to trust for client addresses and HTTPS (env `DUCT_TRUST_PROXY`) |
+
+### Security
+
+By default the server only listens on `127.0.0.1` and only accepts requests addressed to `localhost`, `127.0.0.1` or `::1`. To share it on a network, set a token:
+
+```bash
+duct serve --host 0.0.0.0 --auth-token "$(openssl rand -hex 24)" --watch-root /srv/shared-docs
+```
+
+Browsers are asked for the token once and then get an HttpOnly login cookie. When `serve` is running, URLs that resolve to private, loopback or link-local addresses are never fetched.
+
+### Team server
+
+Index a shared folder once and let colleagues search it from their browsers:
+
+```bash
+duct serve --host 0.0.0.0 \
+  --auth-token "$ADMIN_TOKEN" \
+  --member-token "$TEAM_TOKEN" \
+  --watch /mnt/shared/contracts \
+  --library /srv/duct-library
+```
+
+- **Admins** (`--auth-token`) can do everything.
+- **Members** (`--member-token`) can search, ask, open documents, upload to the library and run OCR. They can't change settings, delete documents, clear the index or change watched folders, and the UI hides those controls.
+- Everyone who can log in can search everything that's indexed. Duct doesn't apply the share's own file permissions, so only watch folders that the whole team may read.
+- Network drives often don't report file changes, so watched folders are also rescanned every `--rescan` minutes.
+
+### Sign-in with your identity provider
+
+Instead of sharing tokens, people can sign in with Google Workspace, Microsoft Entra ID, Okta or any OpenID Connect provider:
+
+```bash
+DUCT_OIDC_CLIENT_SECRET=… DUCT_SESSION_SECRET="$(openssl rand -hex 32)" \
+duct serve --host 0.0.0.0 --public-url https://duct.example.com \
+  --oidc-issuer https://accounts.google.com --oidc-client-id … \
+  --admin-email it@example.com --allow-domain example.com
+```
+
+Every sign-in, search, open, export and admin change is recorded in the audit log. For a complete setup with HTTPS, see [deploy.md](deploy.md).
 
 ### Rate Limiting
 
