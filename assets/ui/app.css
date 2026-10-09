@@ -211,8 +211,8 @@ body.no-mascot .mascot-slot { display: none; }
 .seg-item.active { background: var(--s3); color: var(--text); }
 .doc-row { display: grid; grid-template-columns: 38px minmax(0, 2fr) minmax(0, 1.4fr) 110px auto; gap: 12px; align-items: center; padding: 9px 10px; border-bottom: 1px solid var(--border); font-size: 13px; }
 .doc-row.head { font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); border-bottom-color: var(--border2); }
-.doc-row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
-.doc-row .folder { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+.doc-row .name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.doc-row .folder { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
 .doc-row .err { grid-column: 2 / -1; font-size: 12px; color: var(--muted); margin-top: -4px; }
 .doc-row .row-actions { display: flex; gap: 6px; justify-content: flex-end; }
 .status { font-family: var(--mono); font-size: 11px; border-radius: 5px; padding: 2px 7px; border: 1px solid; white-space: nowrap; justify-self: start; }
@@ -300,7 +300,7 @@ dialog::backdrop { background: rgba(0,0,0,.55); }
 .tag-editor { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0 0 16px; }
 .tag-editor input { background: var(--bg); color: var(--text); border: 1px solid var(--border2); border-radius: 99px; padding: 2px 10px; font: inherit; font-size: 12px; width: 150px; outline: none; }
 .tag-editor input:focus { border-color: var(--lime); }
-.doc-row .name-cell { min-width: 0; }
+.doc-row .name-cell { display: block; min-width: 0; overflow: hidden; }
 .doc-row .name-cell .tags { margin-top: 2px; }
 .cite-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 12px 0 0; }
 .collect-dialog { width: min(720px, calc(100vw - 32px)); max-height: min(80vh, 760px); }

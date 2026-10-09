@@ -1,6 +1,7 @@
 // Duct's workspace: two documents side by side, with a notebook beside them.
 // Opened as /workspace?left=<path>&right=<path>&notebook=<id>. Optional: lpage, lterms, rpage, rterms (terms is a JSON array
-// of words to highlight in a PDF). `page` and `terms` are aliases for the left pane.
+// of words to highlight in a PDF), and layout=one|cols|rows. `page` and `terms` are aliases for the left pane. "Open" in
+// the app shows one document (layout=one); closing either pane of two leaves the other on its own.
 //
 // PDFs are drawn with pdf.js (served locally, see the /vendor/pdfjs routes in server.ts). Every other format is shown as the
 // text Duct extracted, in sections (a page, slide, sheet or chapter each), so text can be selected in any of them. Selecting
@@ -127,7 +128,11 @@ main { flex: 1; min-height: 0; display: flex; }
 .note .by { font-family: var(--mono); font-size: 10.5px; color: var(--muted); margin-top: -4px; }
 .note textarea[readonly] { border-color: transparent; background: transparent; padding-left: 0; resize: none; min-height: 0; }
 .add-pop { position: fixed; z-index: 50; display: none; }
-.add-pop.show { display: block; }
+.add-pop.show { display: flex; gap: 1px; }
+.add-pop .go { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 6px 0 0 6px; }
+.add-pop .more { border-radius: 0 6px 6px 0; padding: 4px 7px; }
+.add-pop .menu-pop { left: 0; right: auto; max-height: 280px; overflow: auto; min-width: 220px; }
+.add-pop .menu-pop .hint { color: var(--subtle); font-size: 11px; padding: 6px 10px 2px; }
 .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--s2); border: 1px solid var(--border2); border-radius: 8px; padding: 8px 14px; font-family: var(--mono); font-size: 12px; z-index: 60; }
 .toast.bad { border-color: var(--red); color: var(--red); }
 .toast[hidden] { display: none; }
@@ -139,6 +144,7 @@ main { flex: 1; min-height: 0; display: flex; }
   <span style="color:var(--subtle)">Workspace</span>
   <span class="spacer"></span>
   <div class="seg" role="group" aria-label="Layout">
+    <button id="layoutOne" aria-pressed="false" title="One document">One</button>
     <button id="layoutCols" aria-pressed="true" title="Documents side by side">Side by side</button>
     <button id="layoutRows" aria-pressed="false" title="One document above the other">Stacked</button>
   </div>
@@ -169,7 +175,10 @@ main { flex: 1; min-height: 0; display: flex; }
     <div class="notes-list" id="notesList"></div>
   </aside>
 </main>
-<button class="primary add-pop" id="addPop">Add to notes</button>
+<div class="add-pop" id="addPop" role="group" aria-label="Add the selected text to a notebook">
+  <button class="primary go" id="addPopGo">Add to notes</button><button class="primary more" id="addPopMore" aria-haspopup="true" aria-expanded="false" title="Choose a notebook" aria-label="Choose a notebook">▾</button>
+  <div class="menu-pop" id="addPopMenu" hidden></div>
+</div>
 <div class="toast" id="toast" hidden></div>
 <script type="module">
   const $ = id => document.getElementById(id)
@@ -248,10 +257,12 @@ main { flex: 1; min-height: 0; display: flex; }
       this.zoomOut = h('button', { class: 'ghost', title: 'Zoom out', text: '−', hidden: true, onclick: () => this.zoom(1 / 1.2) })
       this.zoomIn = h('button', { class: 'ghost', title: 'Zoom in', text: '+', hidden: true, onclick: () => this.zoom(1.2) })
       this.modeBtn = h('button', { class: 'ghost', hidden: true, onclick: () => this.toggleMode() })
-      this.closeBtn = h('button', { class: 'ghost', title: 'Close this document', text: '✕', hidden: true, onclick: () => this.clear() })
+      this.closeBtn = h('button', { class: 'ghost', title: 'Close this document', 'aria-label': 'Close this document', text: '✕', hidden: true, onclick: () => closePane(this) })
+      // The desktop app can open the file in the app it belongs to (Word, Pages, Preview…).
+      this.appBtn = h('button', { class: 'ghost', title: 'Open in its usual app', text: 'Open in app', hidden: true, onclick: () => window.ductWorkspace.openInApp(this.path) })
       this.body = h('div', { class: 'pane-body' })
       this.el = h('section', { class: 'pane', 'aria-label': side + ' document' },
-        h('div', { class: 'pane-head' }, this.nameBtn, this.pageInput, this.pageCount, this.zoomOut, this.zoomIn, this.modeBtn, this.closeBtn),
+        h('div', { class: 'pane-head' }, this.nameBtn, this.pageInput, this.pageCount, this.zoomOut, this.zoomIn, this.modeBtn, this.appBtn, this.closeBtn),
         this.body)
       this.togglePicker(true)
     }
@@ -267,7 +278,7 @@ main { flex: 1; min-height: 0; display: flex; }
       this.reset()
       this.path = ''
       this.nameBtn.textContent = 'Choose a document ▾'
-      this.closeBtn.hidden = true
+      this.closeBtn.hidden = this.appBtn.hidden = true
       this.togglePicker(true)
       syncUrl()
     }
@@ -302,7 +313,9 @@ main { flex: 1; min-height: 0; display: flex; }
       this.page = page || 1
       this.terms = terms || []
       this.nameBtn.textContent = (doc.displayName || fileName(path)) + ' ▾'
+      this.nameBtn.title = (doc.displayName || fileName(path)) + ' (choose another document)'
       this.closeBtn.hidden = false
+      this.appBtn.hidden = !window.ductWorkspace
       this.pickerOpen = false
       syncUrl()
       await this.render()
@@ -440,13 +453,20 @@ main { flex: 1; min-height: 0; display: flex; }
   // ---------- layout: side by side or stacked, with a divider you can drag ----------
   const divider = h('div', { class: 'divider', role: 'separator', tabindex: 0, title: 'Drag to resize. Double-click to reset.' })
   $('panes').append(panes[0].el, divider, panes[1].el)
-  let layout = ['cols', 'rows'].includes(params.get('layout')) ? params.get('layout') : (store.get('duct.layout') === 'rows' ? 'rows' : 'cols')
+  // "one" shows a single pane (panes[solo]); "cols" and "rows" show both, and only those are remembered as a preference.
+  let layout = ['one', 'cols', 'rows'].includes(params.get('layout')) ? params.get('layout') : (store.get('duct.layout') === 'rows' ? 'rows' : 'cols')
+  let solo = 0
   let split = Math.min(0.85, Math.max(0.15, parseFloat(store.get('duct.split') || '0.5') || 0.5))
 
   function applyLayout() {
-    $('panes').dataset.layout = layout
-    panes[0].el.style.flex = split + ' 1 0'
-    panes[1].el.style.flex = (1 - split) + ' 1 0'
+    const one = layout === 'one'
+    $('panes').dataset.layout = one ? 'cols' : layout
+    panes.forEach((p, i) => {
+      p.el.hidden = one && i !== solo
+      p.el.style.flex = one ? '1 1 0' : (i ? 1 - split : split) + ' 1 0'
+    })
+    divider.hidden = one
+    $('layoutOne').setAttribute('aria-pressed', String(one))
     divider.setAttribute('aria-orientation', layout === 'cols' ? 'vertical' : 'horizontal')
     divider.setAttribute('aria-valuemin', '15'); divider.setAttribute('aria-valuemax', '85')
     divider.setAttribute('aria-valuenow', String(Math.round(split * 100)))
@@ -460,11 +480,20 @@ main { flex: 1; min-height: 0; display: flex; }
     if (save) store.set('duct.split', String(split))
   }
   function setLayout(next) {
+    // One document: keep the one with something in it (the left, if both have).
+    if (next === 'one' && layout !== 'one') solo = panes[0].path || !panes[1].path ? 0 : 1
     layout = next
-    store.set('duct.layout', next)
+    if (next !== 'one') store.set('duct.layout', next)
     applyLayout()
     syncUrl()
   }
+  /** Closing one of two documents leaves the other on its own; closing the only one offers the document list. */
+  function closePane(pane) {
+    const i = panes.indexOf(pane), other = panes[1 - i]
+    pane.clear()
+    if (layout !== 'one' && other.path) { solo = 1 - i; layout = 'one'; applyLayout(); syncUrl() }
+  }
+  $('layoutOne').addEventListener('click', () => setLayout('one'))
   $('layoutCols').addEventListener('click', () => setLayout('cols'))
   $('layoutRows').addEventListener('click', () => setLayout('rows'))
   divider.addEventListener('pointerdown', e => {
@@ -590,8 +619,8 @@ main { flex: 1; min-height: 0; display: flex; }
     list.replaceChildren()
     if (!notes.length) {
       list.append(h('p', { class: 'notes-empty', text: nb
-        ? 'Select text in either document, then choose “Add to notes”. Each note keeps its document and page.'
-        : 'Select text in either document and choose “Add to notes”. Duct will start a notebook for you, or make one with “+ New”.' }))
+        ? 'Select text in a document, then choose where to add it. Each note keeps its document and page.'
+        : 'Select text in a document and choose where to add it. Duct will start a notebook for you, or make one with “+ New”.' }))
       return
     }
     const editable = canEdit()
@@ -905,9 +934,12 @@ main { flex: 1; min-height: 0; display: flex; }
   }
 
   // ---------- selecting text ----------
-  const addPop = $('addPop')
+  // Selecting text shows "Add to <notebook>", and ▾ lists every notebook you can add to, or starts a new one.
+  const addPop = $('addPop'), addGo = $('addPopGo'), addMore = $('addPopMore'), addMenu = $('addPopMenu')
   let pending = null
-  function hidePop() { addPop.classList.remove('show'); pending = null }
+  const writable = () => notebooks.filter(b => b.role !== 'view')
+  function closeAddMenu() { addMenu.hidden = true; addMore.setAttribute('aria-expanded', 'false') }
+  function hidePop() { addPop.classList.remove('show'); closeAddMenu(); pending = null }
   function checkSelection() {
     const sel = getSelection()
     if (!sel || sel.isCollapsed || !sel.rangeCount) { hidePop(); return }
@@ -918,19 +950,47 @@ main { flex: 1; min-height: 0; display: flex; }
     const rects = range.getClientRects()
     const r = rects.length ? rects[rects.length - 1] : range.getBoundingClientRect()
     pending = { pane, quote, page: pane.pageOf(range.startContainer) }
-    addPop.style.left = Math.max(8, Math.min(innerWidth - 130, r.right - 20)) + 'px'
-    addPop.style.top = Math.min(innerHeight - 40, r.bottom + 6) + 'px'
+    const target = current() && canEdit() ? current() : writable()[0]
+    addGo.textContent = target ? 'Add to “' + target.name + '”' : 'Add to a new notebook'
+    addGo.dataset.target = target ? target.id : 'new'
+    closeAddMenu()
     addPop.classList.add('show')
+    addPop.style.left = Math.max(8, Math.min(innerWidth - addPop.offsetWidth - 8, r.right - 20)) + 'px'
+    addPop.style.top = Math.min(innerHeight - 40, r.bottom + 6) + 'px'
+  }
+  function drawAddMenu() {
+    const items = writable().map(b => h('button', { role: 'menuitem', 'data-target': b.id, text: b.name + (b.id === nb ? '  ✓' : '') }))
+    addMenu.replaceChildren(
+      ...(items.length ? [h('div', { class: 'hint', text: 'Add to' }), ...items] : []),
+      h('button', { role: 'menuitem', 'data-target': 'new', text: '+ New notebook' }))
+    addMenu.setAttribute('role', 'menu')
   }
   document.addEventListener('mouseup', e => { if (!addPop.contains(e.target)) setTimeout(checkSelection, 0) })
   document.addEventListener('keyup', e => { if (e.key.startsWith('Arrow') && e.shiftKey) checkSelection(); if (e.key === 'Escape') hidePop() })
   addPop.addEventListener('mousedown', e => e.preventDefault())  // keep the selection while clicking
-  addPop.addEventListener('click', async () => {
+  addGo.addEventListener('click', () => addPending(addGo.dataset.target))
+  addMore.addEventListener('click', () => {
+    const open = addMenu.hidden
+    if (open) drawAddMenu()
+    addMenu.hidden = !open
+    addMore.setAttribute('aria-expanded', String(open))
+    if (open) addMenu.querySelector('button')?.focus({ preventScroll: true })
+  })
+  addMenu.addEventListener('click', e => { const t = e.target.closest('[data-target]'); if (t) addPending(t.dataset.target) })
+
+  /** Adds the selected text to notebook target (an id, or "new" to start one named after the document). */
+  async function addPending(target) {
     const p = pending
     if (!p) return
     hidePop()
-    if (nb && !canEdit()) { toast('You can read “' + current().name + '” but not add to it. Pick one of your notebooks, or start one with “+ New”.', true); return }
     try {
+      if (target === 'new') {
+        const doc = docOf(p.pane.path)
+        await createNotebook('Notes on ' + (doc?.displayName || fileName(p.pane.path)).replace(/\\.[a-z0-9]{1,5}$/i, '').slice(0, 100))
+      } else if (target && target !== nb) {
+        nb = target; showShare(false); drawNotebookSelect(); await loadNotes(); syncUrl()
+      }
+      if (nb && !canEdit()) { toast('You can read “' + current().name + '” but not add to it. Pick one of your notebooks, or start one with “+ New”.', true); return }
       if (!nb) await createNotebook('My notes')
       const { note } = await (await api('/api/notebooks/' + encodeURIComponent(nb) + '/notes', json('POST', { path: p.pane.path, quote: p.quote, page: p.page || undefined }))).json()
       notes.push(note)
@@ -938,9 +998,10 @@ main { flex: 1; min-height: 0; display: flex; }
       drawNotebookSelect()
       if ($('notes').hidden) $('toggleNotes').click()
       drawNotes(note.id)
+      toast('Added to “' + (current()?.name || 'notes') + '”')
       getSelection()?.removeAllRanges()
     } catch (err) { toast("Couldn't add the note: " + err.message, true) }
-  })
+  }
 
   // ---------- start ----------
   try {
