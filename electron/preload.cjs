@@ -15,5 +15,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getVersion: () => ipcRenderer.invoke('app:version'),
   getPrefs: () => ipcRenderer.invoke('prefs:get'),
   setPref: (name, on) => ipcRenderer.invoke('prefs:set', name, on),
+  getShortcut: () => ipcRenderer.invoke('shortcut:get'),
+  setShortcut: (key) => ipcRenderer.invoke('shortcut:set', key),
   platform: process.platform,
 })

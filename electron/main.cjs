@@ -16,6 +16,8 @@ let telemetry = null   // src/telemetry.ts: anonymous usage counts
 let ledger = null      // src/ledger.ts: what left this computer
 
 const SEARCH_SHORTCUT = 'CommandOrControl+Shift+Space'
+// Shortcuts people can pick for quick search when the default is taken by another app (Settings › Features).
+const SHORTCUT_CHOICES = ['CommandOrControl+Shift+Space', 'Alt+Space', 'CommandOrControl+Alt+Space', 'CommandOrControl+Shift+K', 'CommandOrControl+Shift+D']
 
 // Desktop-only preferences (the index's own settings live in its database).
 function prefsPath() { return path.join(app.getPath('userData'), 'desktop-settings.json') }
@@ -65,12 +67,48 @@ function shortcutEnabled() {
 
 function setShortcutEnabled(on) {
   writePrefs({ ...readPrefs(), shortcut: on })
-  if (on) registerShortcut()
-  else globalShortcut.unregister(SEARCH_SHORTCUT)
+  registerShortcut()
 }
 
+function chosenShortcut() {
+  const key = readPrefs().shortcutKey
+  return SHORTCUT_CHOICES.includes(key) ? key : SEARCH_SHORTCUT
+}
+
+/** How a shortcut reads on this platform: "⌘⇧Space" on a Mac, "Ctrl+Shift+Space" elsewhere. */
+function shortcutLabel(key) {
+  if (process.platform !== 'darwin') return key.replace('CommandOrControl', 'Ctrl')
+  const mac = { CommandOrControl: '⌘', Control: '⌃', Alt: '⌥', Shift: '⇧' }
+  return key.split('+').map(k => mac[k] ?? k).join('')
+}
+
+let registeredShortcut = null   // the accelerator registered now
+let shortcutTaken = false       // the chosen one belongs to another app
+
+/** (Re)registers quick search on the chosen shortcut, if it's switched on. Another app may own it already. */
 function registerShortcut() {
-  if (shortcutEnabled()) registerShortcut()
+  if (registeredShortcut) globalShortcut.unregister(registeredShortcut)
+  registeredShortcut = null
+  shortcutTaken = false
+  if (shortcutEnabled()) {
+    const key = chosenShortcut()
+    let ok = false
+    try { ok = globalShortcut.register(key, openQuickSearch) } catch { ok = false }
+    if (ok) registeredShortcut = key
+    else { shortcutTaken = true; console.error(`Could not register ${key}; another app may use it.`) }
+  }
+  island?.setShortcut(shortcutEnabled() && registeredShortcut ? shortcutLabel(registeredShortcut) : '')
+  createAppMenu()
+}
+
+function shortcutStatus() {
+  return {
+    on: shortcutEnabled(),
+    key: chosenShortcut(),
+    label: shortcutLabel(chosenShortcut()),
+    taken: shortcutTaken,
+    choices: SHORTCUT_CHOICES.map(key => ({ key, label: shortcutLabel(key) })),
+  }
 }
 
 // Desktop-only switches shown in the page's Settings > Features (the rest live in the index's settings).
@@ -89,10 +127,12 @@ function startIsland() {
     serverUrl,
     sound: soundsEnabled(),
     hello: !prefs.greeted,
-    onShowMain: view => {
+    shortcut: shortcutEnabled() && registeredShortcut ? shortcutLabel(registeredShortcut) : '',
+    onShowMain: (view, query) => {
       mainWindow?.show()
       mainWindow?.focus()
       if (view === 'failed') callPage('showFailed')
+      else if (query) callPage('search', query)
     },
     isSupportedFile: p => formats.isSupportedFile(p),
     isPackage: p => formats.PACKAGE_EXTENSIONS.has(path.extname(p).toLowerCase()),
@@ -243,9 +283,11 @@ async function startServer() {
 }
 
 /** Calls one of the page's window.duct functions (assets/ui/app.js). */
-function callPage(name) {
-  if (!['refresh', 'showFailed', 'focusSearch', 'openSettings', 'exportResults', 'openFeedback', 'copyDiagnostics'].includes(name)) return
-  mainWindow?.webContents.executeJavaScript(`window.duct && window.duct.${name}()`).catch(() => {})
+function callPage(name, arg) {
+  if (!['refresh', 'showFailed', 'focusSearch', 'openSettings', 'exportResults', 'openFeedback', 'copyDiagnostics', 'search'].includes(name)) return
+  // The argument goes in as a JSON string literal, never as code.
+  const args = typeof arg === 'string' ? JSON.stringify(arg.slice(0, 500)) : ''
+  mainWindow?.webContents.executeJavaScript(`window.duct && window.duct.${name} && window.duct.${name}(${args})`).catch(() => {})
 }
 
 // Asks the page to refresh its counts, document list and mascot after background changes.
@@ -394,7 +436,7 @@ function createAppMenu() {
       label: 'View',
       submenu: [
         { label: process.platform === 'darwin' ? 'Show Duct in the Menu Bar Notch' : 'Show Duct at the Top of the Screen', type: 'checkbox', checked: islandEnabled(), click: item => setIslandEnabled(item.checked) },
-        { label: 'Quick Search', accelerator: SEARCH_SHORTCUT, registerAccelerator: false, click: openQuickSearch },
+        { label: 'Quick Search', accelerator: registeredShortcut ?? undefined, registerAccelerator: false, click: openQuickSearch },
         { label: 'Play Sounds', type: 'checkbox', checked: soundsEnabled(), click: item => setSoundsEnabled(item.checked) },
         { type: 'separator' },
         { label: 'Reload', accelerator: 'Cmd+R', role: 'reload' },
@@ -583,6 +625,13 @@ ipcMain.handle('notification:show', (_event, title, body) => {
 ipcMain.handle('app:version', () => app.getVersion())
 
 ipcMain.handle('prefs:get', () => Object.fromEntries(Object.entries(DESKTOP_PREFS).map(([k, p]) => [k, p.get()])))
+ipcMain.handle('shortcut:get', () => shortcutStatus())
+ipcMain.handle('shortcut:set', (_event, key) => {
+  if (!SHORTCUT_CHOICES.includes(key)) return shortcutStatus()
+  writePrefs({ ...readPrefs(), shortcutKey: key, shortcut: true })
+  registerShortcut()
+  return shortcutStatus()
+})
 ipcMain.handle('prefs:set', (_event, name, on) => {
   const pref = DESKTOP_PREFS[name]
   if (!pref || typeof on !== 'boolean') return false
@@ -601,7 +650,7 @@ app.whenReady().then(async () => {
   createWindow()
   createTray()
   if (islandEnabled()) startIsland()
-  if (!globalShortcut.register(SEARCH_SHORTCUT, openQuickSearch)) console.error(`Could not register ${SEARCH_SHORTCUT}; it may be used by another app.`)
+  registerShortcut()
 
   // Catch up on watched folders (files added, changed or deleted while Duct was closed), then keep watching.
   duct.restoreSources(refreshPage).then(refreshPage).catch(err => console.error('Could not restore watched folders:', err))

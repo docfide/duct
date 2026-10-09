@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Quick search from anywhere (⌘⇧Space, Ctrl+Shift+Space) got better. With nothing typed it shows your recent searches and the documents you opened from it, so the shortcut takes you back to what you were doing. Results show documents by the names you know them by (an upload's original name, "Contract.pdf · from Ada"). A search that finds nothing says why and offers "Did you mean", as the main window does. ⌘↵ (Ctrl+↵) shows the file in its folder and ⇧↵ opens every result in Duct. Results arrive faster: the pause before searching is 60 ms instead of 140.
+- Choose the quick-search keys in Settings › Features. If another app already uses them, Duct says so there instead of the shortcut silently doing nothing.
 - The workspace: open two documents side by side (**Side by side** on a result or in the document list). PDFs are drawn as they are, with search words highlighted; Word, Excel, PowerPoint, OpenDocument, EPUB, email, Markdown, code, text and every other format show the text Duct read, a page, slide, sheet or chapter at a time, and images can switch to the text read from them (OCR). Pick or change either document from the pane's title. Switch between side by side and stacked, drag the divider to resize (arrow keys work too; double-click resets to half and half), and Duct remembers your choice.
 - Shared notebooks. On a server where people sign in, a notebook belongs to whoever made it and is private until they share it, from **Share** in the workspace: with people, a whole domain or everyone on the server, to read or to edit. Notes show who added them, open notebooks pick up others' changes within seconds, and **Notebooks** in the sidebar lists yours and the ones shared with you. Sharing a notebook never shares the documents it quotes: people only see notes from documents they can open. Notebooks made before this stay everyone's. `PUT /api/notebooks/:id/sharing`.
 - Send a notebook as a page: one .html file anyone can open in a browser, on a phone too, with no Duct and no account. It holds the quotes, document names, pages and comments, never file paths, and runs no scripts. Someone with Duct can add it to their notebooks with **Import a shared notebook** (`POST /api/notebooks/import`), which also reads Duct's JSON exports.
@@ -22,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - "Why this result?": each result can show the words that matched as written in the passage (including other forms, such as "termination" for "terminate"), a file-name match, or a match by meaning (`why` in the API).
 
 ### Fixed
+- Turning the quick-search shortcut off and on again in Settings crashed the desktop app, and turning it off didn't last past a restart.
 - With search by meaning on, results lost their highlighted excerpt.
 
 ## [1.0.0-alpha.1] - 2026-10-08

@@ -234,6 +234,9 @@ dialog::backdrop { background: rgba(0,0,0,.55); }
 .check { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 14px; cursor: pointer; }
 .check input { margin-top: 3px; accent-color: var(--lime); }
 .check small { display: block; color: var(--subtle); font-size: 12px; margin-top: 2px; }
+.shortcut-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: -6px 0 16px 26px; font-size: 13px; color: var(--subtle); }
+.shortcut-row select { min-width: 140px; }
+.shortcut-warn { flex-basis: 100%; margin: 2px 0 0; color: var(--warn); font-size: 12px; }
 .notice { background: var(--warn-bg); border: 1px solid #4a3008; color: var(--warn); border-radius: var(--r); padding: 9px 12px; font-size: 12.5px; }
 .kv { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
 .kv > span { font-size: 12.5px; color: var(--subtle); }

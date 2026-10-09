@@ -36,6 +36,16 @@ afterAll(async () => {
   rmSync(work, { recursive: true, force: true })
 })
 
+describe('GET /api/search', () => {
+  it('gives each result its document’s name as people know it', async () => {
+    const file = join(work, '00000013-Contract.txt')
+    writeFileSync(file, 'The zebracorn clause applies.')
+    await duct.index(file, {}, { displayName: 'Contract.txt · from Ada' })
+    const [hit] = (await (await fetch(`${base}/api/search?q=zebracorn`)).json()).results
+    expect(hit.name).toBe('Contract.txt · from Ada')
+  })
+})
+
 describe('GET /api/file', () => {
   it('serves indexed PDFs inline so the browser can open them at a page', async () => {
     await duct.index(pdf)

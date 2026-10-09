@@ -62,6 +62,15 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
 .r-snip { font-size: 11.5px; color: var(--body); margin-top: 3px; line-height: 1.45; max-height: 3em; overflow: hidden; }
 .r-snip mark { background: #1E2A06; color: var(--lime); border-radius: 2px; padding: 0 1px; }
 .empty { font-family: var(--mono); font-size: 11px; color: var(--muted); padding: 16px 10px; text-align: center; }
+.help { padding: 12px 10px 6px; font-size: 12px; color: var(--body); line-height: 1.5; }
+.help p { margin: 0 0 6px; }
+.help .dym { font-family: var(--sans); font-size: 12px; background: transparent; color: var(--lime); border: 0; padding: 0; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.group { font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); padding: 8px 10px 4px; }
+.r.recent { display: flex; align-items: baseline; gap: 8px; padding: 6px 10px; }
+.r.recent .r-name { font-weight: 500; }
+.r.recent .r-kind { font-size: 13px; line-height: 1; color: var(--muted); flex-shrink: 0; width: 16px; text-align: center; }
+.keys { color: var(--muted); }
+.keys kbd { font-family: var(--mono); font-size: 10px; color: var(--subtle); }
 .foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 2px 12px; border-top: 1px solid var(--border); font-family: var(--mono); font-size: 10.5px; color: var(--subtle); }
 .foot button { font-family: var(--mono); font-size: 10.5px; background: transparent; color: var(--text); border: 1px solid var(--border2); border-radius: 6px; padding: 3px 9px; cursor: pointer; }
 .foot button:hover { border-color: var(--lime); }
@@ -86,7 +95,7 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
       <input id="q" type="text" placeholder="Search your documents" autocomplete="off" spellcheck="false">
     </div>
     <div id="results"></div>
-    <div class="foot"><span id="footStatus"></span><button id="openMain">Open Duct</button></div>
+    <div class="foot"><span id="footStatus"></span><span class="keys" id="footKeys" hidden><kbd>↵</kbd> open · <kbd id="revealKey"></kbd> show in folder · <kbd>⇧↵</kbd> all results</span><button id="openMain">Open Duct</button></div>
   </div>
 </div>
 <script>
@@ -95,6 +104,7 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
   const NOTCH = Math.max(0, parseInt(params.get('notch') || '0', 10) || 0)
   const BAR = Math.max(0, parseInt(params.get('bar') || '0', 10) || 0)
   const isMac = params.get('platform') === 'darwin'
+  let shortcut = params.get('shortcut') || ''   // the quick-search shortcut as people see it; '' when there is none
   const COMPACT = 104   // compact pill width when there is no notch
   const WING = 84       // live wings on each side of the notch or pill
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -170,6 +180,7 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
   let sources = []
   let activity = { indexing: false }
   let results = []
+  let listHeight = 50   // how tall the search list's content is, for the window's size
   let selected = 0
   let lastQuery = ''
   let indexingSince = 0
@@ -189,9 +200,8 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
     }
     if (s === 'live') return { w: (NOTCH || COMPACT) + (liveKind === 'needsHand' ? WING + 70 : WING) * 2, h: Math.max(top, 30), cls: '' }
     if (s === 'peek' || s === 'drop') return { w: Math.max((NOTCH || COMPACT) + WING * 2, 380), h: top + 100, cls: 'large' }
-    // Search grows with its results: search row, one row per result (at least one line of text), footer.
-    const rows = lastQuery ? Math.max(1, results.length) : 1
-    return { w: 520, h: Math.min(top + 420, top + 8 + 52 + 12 + rows * 62 + 48), cls: 'large' }
+    // Search grows with what it shows (listHeight, set by whatever drew the list): search row, list, footer.
+    return { w: 520, h: Math.min(top + 420, top + 8 + 52 + 12 + listHeight + 48), cls: 'large' }
   }
 
   function setState(next) {
@@ -318,7 +328,10 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
     if (!soundOn) return
     try { SOUNDS[name]() } catch {}
   }
-  api.onSettings(settings => { soundOn = !!settings.sound })
+  api.onSettings(settings => {
+    if ('sound' in settings) soundOn = !!settings.sound
+    if ('shortcut' in settings) { shortcut = settings.shortcut || ''; renderText() }
+  })
 
   // Click the mascot: a happy hop. Click it three times quickly and it gets dizzy.
   let clicks = []
@@ -358,10 +371,10 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
       sub.textContent = failures.names.slice(0, 2).join(', ') + (failures.count > 2 ? ' and ' + (failures.count - 2) + ' more' : '') + '. Click to see them.'
     } else if (greeting) {
       title.textContent = 'Hi! I can find anything in your documents.'
-      sub.innerHTML = 'Hover here anytime, or press <kbd>' + (isMac ? '⌘⇧Space' : 'Ctrl+Shift+Space') + '</kbd>'
+      sub.innerHTML = shortcut ? 'Hover here anytime, or press <kbd>' + esc(shortcut) + '</kbd> from any app' : 'Hover here anytime to search'
     } else {
       title.textContent = activity.indexing ? 'Reading your documents…' : (sources.length ? 'Keeping an eye on your folders' : 'Ready when you are')
-      sub.innerHTML = esc(statusLine()) + '<br>Click to search · <kbd>' + (isMac ? '⌘⇧Space' : 'Ctrl+Shift+Space') + '</kbd>'
+      sub.innerHTML = esc(statusLine()) + '<br>Click to search' + (shortcut ? ' · <kbd>' + esc(shortcut) + '</kbd>' : '')
     }
     document.getElementById('footStatus').textContent = statusLine()
     const live = document.getElementById('liveText')
@@ -476,18 +489,68 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
     return [...new Set([...phrases, ...marked, ...words])].slice(0, 12)
   }
 
-  function showResults(list) {
+  // Recent searches and documents opened from here, kept in this window's storage on this computer only.
+  const recent = {
+    read(key) { try { return JSON.parse(localStorage.getItem(key) || '[]') } catch { return [] } },
+    add(key, item, same) {
+      const list = [item, ...recent.read(key).filter(x => !same(x))].slice(0, 5)
+      try { localStorage.setItem(key, JSON.stringify(list)) } catch {}
+    },
+  }
+  const docName = r => r.name || fileName(r.chunk.documentPath)
+  const pageText = (format, page) => (PAGE_LABELS[format] || 'p.') + ' ' + page
+
+  /** With nothing typed: recent searches and documents, so the shortcut also takes you back to what you were doing. */
+  function showRecent() {
+    const searches = recent.read('duct.island.searches'), opened = recent.read('duct.island.opened')
+    results = [...searches.map(q => ({ recentQuery: q })), ...opened.map(d => ({ recentDoc: d }))]
+    selected = 0
+    document.getElementById('footKeys').hidden = true
+    document.getElementById('footStatus').hidden = false
+    const box = document.getElementById('results')
+    if (!results.length) { box.innerHTML = '<div class="empty">Type to search ' + fmt(stats.documents) + ' documents</div>'; listHeight = 50; resize(); return }
+    const row = (i, kind, name, extra) => '<div class="r recent' + (i === 0 ? ' sel' : '') + '" data-i="' + i + '"><span class="r-kind">' + kind + '</span><span class="r-name">' + esc(name) + (extra || '') + '</span></div>'
+    let i = 0, html = ''
+    if (searches.length) html += '<div class="group">Recent searches</div>' + searches.map(q => row(i++, '↺', q)).join('')
+    if (opened.length) html += '<div class="group">Recently opened</div>' + opened.map(d => row(i++, '↗', d.name, d.page ? '<span class="r-page">' + esc(pageText(d.format, d.page)) + '</span>' : '')).join('')
+    box.innerHTML = html
+    listHeight = (searches.length ? 24 : 0) + (opened.length ? 24 : 0) + results.length * 27
+    resize()
+  }
+  function resize() { if (state === 'search') setState('search') }
+
+  function showResults(list, help) {
+    if (!lastQuery) { showRecent(); return }
     results = list
     selected = 0
-    if (state === 'search') setState('search')
+    document.getElementById('footKeys').hidden = !list.length
+    document.getElementById('footStatus').hidden = !!list.length
     const box = document.getElementById('results')
-    if (!lastQuery) { box.innerHTML = '<div class="empty">Type to search ' + fmt(stats.documents) + ' documents</div>'; return }
-    if (!list.length) { box.innerHTML = '<div class="empty">No matches. Try fewer or different words.</div>'; return }
+    if (!list.length) {
+      box.innerHTML = helpHtml(help)
+      listHeight = box.querySelectorAll('p').length * 25 + 20
+      resize()
+      return
+    }
     box.innerHTML = list.map((r, i) =>
       '<div class="r' + (i === 0 ? ' sel' : '') + '" data-i="' + i + '">' +
-        '<div class="r-name">' + esc(fileName(r.chunk.documentPath)) + (r.chunk.page ? '<span class="r-page">' + esc((PAGE_LABELS[r.chunk.documentFormat] || 'p.') + ' ' + r.chunk.page) + '</span>' : '') + '</div>' +
+        '<div class="r-name">' + esc(docName(r)) + (r.chunk.page ? '<span class="r-page">' + esc(pageText(r.chunk.documentFormat, r.chunk.page)) + '</span>' : '') + '</div>' +
         '<div class="r-snip">' + (r.snippet ? markSnippet(r.snippet) : esc(r.chunk.content.slice(0, 160))) + '</div>' +
       '</div>').join('')
+    listHeight = list.length * 62
+    resize()
+  }
+
+  /** No dead ends: what Duct searched, what it couldn't look inside, and a spelling from the documents. */
+  function helpHtml(help) {
+    if (!help) return '<div class="empty">Nothing found for that.</div>'
+    const lines = []
+    if (help.didYouMean) lines.push('Did you mean <button class="dym" data-dym="' + esc(help.didYouMean) + '">' + esc(help.didYouMean) + '</button>?')
+    lines.push('Nothing in ' + fmt(help.documents) + ' document' + (help.documents === 1 ? '' : 's') + ' matches every word.' + (help.didYouMean ? '' : ' Fewer words, or another way of saying it, may find it.'))
+    if (help.indexing) lines.push('I’m still reading files (' + fmt(help.indexing.done) + ' of ' + fmt(help.indexing.total) + '), so it may turn up soon.')
+    if (help.needsOcr) lines.push(fmt(help.needsOcr) + ' scan' + (help.needsOcr === 1 ? ' has' : 's have') + ' no text yet. Read ' + (help.needsOcr === 1 ? 'it' : 'them') + ' with OCR in Duct to search inside.')
+    if (help.passwordProtected) lines.push(fmt(help.passwordProtected) + ' file' + (help.passwordProtected === 1 ? ' is' : 's are') + ' locked with a password, so I can’t look inside.')
+    return '<div class="help">' + lines.map(l => '<p>' + l + '</p>').join('') + '</div>'
   }
   function select(i) {
     selected = Math.max(0, Math.min(results.length - 1, i))
@@ -495,36 +558,63 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
     const el = document.querySelector('.r.sel')
     if (el) el.scrollIntoView({ block: 'nearest' })
   }
-  async function open(i) {
+  function runQuery(q) {
+    const input = document.getElementById('q')
+    input.value = q
+    input.focus()
+    search(q)
+  }
+  async function open(i, how) {
     const r = results[i]
     if (!r) return
-    await api.openDocument(r.chunk.documentPath, r.chunk.page, highlightTerms(r))
+    if (r.recentQuery) { runQuery(r.recentQuery); return }
+    const path = r.recentDoc ? r.recentDoc.path : r.chunk.documentPath
+    const page = r.recentDoc ? r.recentDoc.page : r.chunk.page
+    if (!r.recentDoc) {
+      recent.add('duct.island.searches', lastQuery, q => q.toLowerCase() === lastQuery.toLowerCase())
+      recent.add('duct.island.opened', { path, name: docName(r), page: page || null, format: r.chunk.documentFormat }, d => d.path === path && d.page === (page || null))
+    }
+    const ok = how === 'reveal' ? await api.revealDocument(path) : await api.openDocument(path, page, r.recentDoc ? [] : highlightTerms(r))
+    if (ok === false) { showNotice({ pose: 'needsHand', title: 'I couldn’t open that', sub: 'It may have moved or been deleted since I read it.' }); return }
+    collapse()
+  }
+  function openAllInDuct() {
+    if (lastQuery) recent.add('duct.island.searches', lastQuery, q => q.toLowerCase() === lastQuery.toLowerCase())
+    api.showMain(null, lastQuery)
     collapse()
   }
 
   let searchTimer = null
-  document.getElementById('q').addEventListener('input', e => {
+  function search(q) {
     clearTimeout(searchTimer)
-    const q = e.target.value.trim()
+    lastQuery = q
+    if (!q) { showResults([]); return }
+    // A short pause so each keystroke doesn't start a search; results for an older query are dropped.
     searchTimer = setTimeout(async () => {
-      lastQuery = q
-      if (!q) { showResults([]); return }
       try {
         const data = await (await fetch('/api/search?q=' + encodeURIComponent(q) + '&topK=8')).json()
-        if (q === lastQuery) showResults(data.results || [])
-      } catch { showResults([]) }
-    }, 140)
-  })
+        if (q === lastQuery) showResults(data.results || [], data.help)
+      } catch { if (q === lastQuery) showResults([]) }
+    }, 60)
+  }
+  document.getElementById('q').addEventListener('input', e => search(e.target.value.trim()))
   document.getElementById('q').addEventListener('keydown', e => {
     if (e.key === 'ArrowDown') { e.preventDefault(); select(selected + 1) }
     if (e.key === 'ArrowUp') { e.preventDefault(); select(selected - 1) }
-    if (e.key === 'Enter') { e.preventDefault(); open(selected) }
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      if (e.shiftKey && lastQuery) openAllInDuct()
+      else open(selected, (isMac ? e.metaKey : e.ctrlKey) ? 'reveal' : 'open')
+    }
   })
+  document.getElementById('revealKey').textContent = isMac ? '⌘↵' : 'Ctrl+↵'
   document.getElementById('results').addEventListener('click', e => {
+    const dym = e.target.closest('[data-dym]')
+    if (dym) { e.stopPropagation(); runQuery(dym.dataset.dym); return }
     const row = e.target.closest('.r')
-    if (row) { e.stopPropagation(); open(Number(row.dataset.i)) }
+    if (row) { e.stopPropagation(); open(Number(row.dataset.i), (isMac ? e.metaKey : e.ctrlKey) ? 'reveal' : 'open') }
   })
-  document.getElementById('openMain').addEventListener('click', e => { e.stopPropagation(); api.showMain(); collapse() })
+  document.getElementById('openMain').addEventListener('click', e => { e.stopPropagation(); if (lastQuery) openAllInDuct(); else { api.showMain(); collapse() } })
 
   // ---------- drop files to add them to the Library ----------
   let dragDepth = 0

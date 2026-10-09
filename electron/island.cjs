@@ -21,7 +21,7 @@ function screenMetrics(display) {
   return { bar: isMac ? menuBar : 0, notch: hasNotch ? NOTCH_WIDTH : 0 }
 }
 
-function createIsland({ serverUrl, onShowMain, onAddFiles, onWatchFolders, isSupportedFile, isPackage, sound = true, hello = false }) {
+function createIsland({ serverUrl, onShowMain, onAddFiles, onWatchFolders, isSupportedFile, isPackage, sound = true, hello = false, shortcut = '' }) {
   let win = null
   let shape = null
   let inside = false
@@ -36,7 +36,7 @@ function createIsland({ serverUrl, onShowMain, onAddFiles, onWatchFolders, isSup
   function load() {
     const display = screen.getPrimaryDisplay()
     metrics = screenMetrics(display)
-    win.loadURL(`${serverUrl}/island?notch=${metrics.notch}&bar=${metrics.bar}&platform=${process.platform}&sound=${sound ? 1 : 0}&hello=${hello ? 1 : 0}`)
+    win.loadURL(`${serverUrl}/island?notch=${metrics.notch}&bar=${metrics.bar}&platform=${process.platform}&sound=${sound ? 1 : 0}&hello=${hello ? 1 : 0}&shortcut=${encodeURIComponent(shortcut)}`)
     hello = false
   }
 
@@ -121,7 +121,7 @@ function createIsland({ serverUrl, onShowMain, onAddFiles, onWatchFolders, isSup
     },
     'island:focus': event => { if (fromIsland(event)) win.focus() },
     'island:blur': event => { if (fromIsland(event)) win.blur() },
-    'island:show-main': (event, view) => { if (fromIsland(event)) onShowMain(view === 'failed' ? 'failed' : null) },
+    'island:show-main': (event, view, query) => { if (fromIsland(event)) onShowMain(view === 'failed' ? 'failed' : null, typeof query === 'string' ? query.slice(0, 500) : '') },
   }
   for (const [channel, handler] of Object.entries(handlers)) ipcMain.on(channel, handler)
   ipcMain.handle('island:add-files', async (event, paths) => {
@@ -151,6 +151,11 @@ function createIsland({ serverUrl, onShowMain, onAddFiles, onWatchFolders, isSup
     setSound(on) {
       sound = on
       if (win && !win.isDestroyed()) win.webContents.send('island:settings', { sound: on })
+    },
+    /** The quick-search shortcut as shown to people ("⌘⇧Space"), or '' when there is none. */
+    setShortcut(label) {
+      shortcut = label
+      if (win && !win.isDestroyed()) win.webContents.send('island:settings', { shortcut: label })
     },
     /** Opens the quick search (used by the global shortcut). */
     openSearch() {

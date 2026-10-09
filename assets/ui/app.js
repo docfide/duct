@@ -193,7 +193,7 @@ const KIND_LABELS = { document: 'Documents (PDF, Word, Pages, Markdown, HTML…)
 const DESKTOP_PREFS = [
   ['island', 'Notch companion', 'Duct at the top of the screen: progress, quick search and a drop zone.'],
   ['sounds', 'Sounds', 'Short sounds when a job finishes or needs you.'],
-  ['shortcut', 'Quick search shortcut', '⌘⇧Space (Ctrl+Shift+Space) from any app.'],
+  ['shortcut', 'Quick search shortcut', 'Search from any app, without switching to Duct.'],
 ]
 
 const feature = name => !state.info || !state.info.features || state.info.features[name] !== false
@@ -211,14 +211,22 @@ function applyFeatures() {
   $('#welcome .hint').hidden = !feature('uploads')
 }
 
-function renderFeatureList(prefs) {
+/** The quick-search shortcut: which keys, and a warning when another app already uses them. */
+function shortcutRow(s) {
+  if (!s) return ''
+  return '<div class="shortcut-row"><label for="shortcutKey">Keys</label><select id="shortcutKey" data-shortcut' + (s.on ? '' : ' disabled') + '>' +
+    s.choices.map(c => '<option value="' + esc(c.key) + '"' + (c.key === s.key ? ' selected' : '') + '>' + esc(c.label) + '</option>').join('') + '</select>' +
+    (s.on && s.taken ? '<p class="shortcut-warn">Another app is using ' + esc(s.label) + ', so it doesn’t reach Duct. Pick different keys.</p>' : '') + '</div>'
+}
+
+function renderFeatureList(prefs, shortcut) {
   const admin = isAdmin()
   const check = (attr, on, label, help, disabled) =>
     '<label class="check"><input type="checkbox" ' + attr + (on ? ' checked' : '') + (disabled ? ' disabled' : '') + '> <span><strong>' + esc(label) + '</strong><small>' + esc(help) + '</small></span></label>'
   let html = FEATURE_GROUPS.map(g => '<h3>' + esc(g.title) + '</h3>' + g.items.map(([name, label, help]) => check('data-feature="' + name + '"', feature(name), label, help, !admin)).join('')).join('')
   html += '<h3>File types Duct reads</h3><p class="hint">Switched-off types are skipped when indexing and hidden from search. Turning one back on rescans watched folders.</p>'
   html += Object.keys(KIND_LABELS).map(kind => check('data-format-kind="' + kind + '"', kindOn(kind), KIND_LABELS[kind], '', !admin)).join('')
-  if (prefs) html += '<h3>This computer</h3>' + DESKTOP_PREFS.map(([name, label, help]) => check('data-pref="' + name + '"', prefs[name] !== false, label, help, false)).join('')
+  if (prefs) html += '<h3>This computer</h3>' + DESKTOP_PREFS.map(([name, label, help]) => check('data-pref="' + name + '"', prefs[name] !== false, label, help, false) + (name === 'shortcut' ? shortcutRow(shortcut) : '')).join('')
   $('#featureList').innerHTML = html
   $('#featuresHint').textContent = admin ? 'Turn off anything you don’t use. Switched-off features disappear from Duct and its API.' : 'Only an admin can change these.'
 }
@@ -1317,7 +1325,7 @@ async function openSettings(tab = 'general') {
   }
   $('#mascotToggle').checked = mascotEnabled()
   try { state.info.features = (await json('/api/features')).features } catch {}
-  renderFeatureList(desktop && desktop.getPrefs ? await desktop.getPrefs().catch(() => null) : null)
+  renderFeatureList(desktop && desktop.getPrefs ? await desktop.getPrefs().catch(() => null) : null, desktop && desktop.getShortcut ? await desktop.getShortcut().catch(() => null) : null)
   renderTelemetry()
   $('#libraryDir').textContent = state.info.libraryDir
   $('#keyStorage').textContent = desktop ? 'Keys are stored in your system keychain and never written to disk in plain text.' : 'Keys are kept in memory until the server restarts. They are never written to disk.'
@@ -1664,7 +1672,21 @@ $('#settings').addEventListener('change', async e => {
   }
   if (el.dataset.pref) {
     const ok = await desktop.setPref(el.dataset.pref, el.checked).catch(() => false)
-    if (!ok) { el.checked = !el.checked; toast('Not saved', true) } else toast('Saved')
+    if (!ok) { el.checked = !el.checked; toast('Not saved', true); return }
+    if (el.dataset.pref === 'shortcut' && desktop.getShortcut) {
+      const s = await desktop.getShortcut().catch(() => null)
+      $('.shortcut-row')?.replaceWith(...(s ? [document.createRange().createContextualFragment(shortcutRow(s))] : []))
+      if (s && s.on && s.taken) { toast('Another app is using ' + s.label + '. Pick different keys below.', true); return }
+    }
+    toast('Saved')
+    return
+  }
+  if (el.dataset.shortcut !== undefined && desktop && desktop.setShortcut) {
+    const s = await desktop.setShortcut(el.value).catch(() => null)
+    if (!s) { toast('Not saved', true); return }
+    $('.shortcut-row').replaceWith(document.createRange().createContextualFragment(shortcutRow(s)))
+    if (s.taken) toast('Another app is using ' + s.label + ' too. Try other keys.', true)
+    else toast('Quick search is now ' + s.label)
     return
   }
   const body = {}
@@ -1876,6 +1898,8 @@ window.duct = {
   refresh: () => refreshAll(),
   showFailed: () => { showApp(); state.docFilter = 'attention'; setView('documents') },
   focusSearch: () => { showApp(); setMode('search'); focusSearch() },
+  /** Runs a search here (quick search's "all results"). */
+  search: q => { showApp(); setMode('search'); $('#q').value = String(q || ''); state.query = $('#q').value.trim(); if (state.query) runSearch(); else focusSearch() },
   openSettings: () => openSettings(),
   exportResults,
   openFeedback: () => { showApp(); openFeedback() },
