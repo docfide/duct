@@ -72,6 +72,10 @@ mark { background: var(--lime-mark); color: var(--lime); border-radius: 3px; pad
 .mascot-xl { width: 200px; height: 200px; }
 .mascot-lg { width: 150px; height: 150px; }
 .mascot-md { width: 120px; height: 120px; }
+.mascot-sm { width: 64px; height: 64px; flex: none; }
+.attention-note { display: flex; gap: 14px; align-items: center; background: var(--s1); border: 1px solid var(--border); border-radius: var(--rl); padding: 12px 16px; margin: 0 0 14px; color: var(--body); font-size: 13.5px; line-height: 1.55; }
+.attention-note p { margin: 0; }
+.attention-note strong { color: var(--text); }
 body.no-mascot .mascot-slot { display: none; }
 
 /* ---------- app shell ---------- */

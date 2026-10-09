@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - With search by meaning on, results lost their highlighted excerpt.
 
 ### Changed
+- Plainer, kinder messages. Errors from the system (no connection to Duct's engine, a full disk, a file that moved, a folder Duct may not read) are said in words with what to do next, instead of raw codes; "X failed" messages now say what Duct couldn't do and how to try again. Files Duct couldn't read say why in plain words (locked with a password, damaged, moved), with the original message in the tooltip.
+- The mascot celebrates when the first read is done, and keeps you company where things need you: files Duct couldn't read, an empty library and an empty Needs attention list.
 - Search is about four times faster on big libraries. With 30,000 documents a common word takes about 30 ms instead of 115, a long query 60 ms instead of 155, and a search that finds nothing about 25 ms (measured on a synthetic library; real libraries vary). Duct now ranks in the full-text index first and builds excerpts only for the results it shows, and file names are matched without reading every passage.
 - "Did you mean" catches more everyday misspellings ("tarriff", "shedule") and answers faster, since the words it compares against are kept until the index changes.
 

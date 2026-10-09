@@ -67,10 +67,32 @@ async function api(path, options = {}) {
 }
 
 async function json(path, options) {
-  const res = await api(path, options)
+  let res
+  try { res = await api(path, options) } catch (err) { throw new Error(plainError(0, err && err.message)) }
   const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status)
+  if (!res.ok) throw new Error(plainError(res.status, data.error))
   return data
+}
+
+/**
+ * What went wrong, in words people can act on. Duct's own messages are already written that way and pass through;
+ * what comes from the system (no connection, a full disk, a file that moved) is put plainly instead of shown raw.
+ */
+function plainError(status, message) {
+  const m = String(message || '')
+  if (status === 0 || /failed to fetch|networkerror|load failed|econnrefused|fetch failed/i.test(m)) return desktop ? 'Duct’s search engine isn’t answering. Quit Duct and open it again; your index is safe.' : 'Duct isn’t answering. Check that it’s still running, then try again.'
+  if (/enospc|no space left/i.test(m)) return 'Your disk is full, so Duct can’t save that. Free up some space and try again.'
+  if (/eacces|eperm|permission denied|operation not permitted/i.test(m)) return 'Duct isn’t allowed to read that. On a Mac, check System Settings › Privacy & Security › Files and Folders.'
+  if (/enoent|no such file/i.test(m)) return 'That file isn’t where it was. It may have been moved, renamed or deleted.'
+  if (/^document not found$/i.test(m)) return 'That document isn’t in Duct any more. It may have been moved or removed since Duct read it.'
+  if (/^only an admin can do this/i.test(m)) return 'Only an admin can change this. Ask whoever set up Duct here.'
+  if (/sqlite_busy|database is locked/i.test(m)) return 'Duct is busy saving. Try again in a moment.'
+  if (/sqlite|sql logic|malformed/i.test(m)) return 'Something went wrong inside Duct’s index. Try again; if it keeps happening, send us a note from Settings › Help.'
+  if (status === 413 || /too large|entity too large/i.test(m)) return 'That’s too big to add in one go. Try fewer or smaller files.'
+  if (status === 429) return 'That was a lot at once. Wait a minute and try again.'
+  if (status === 401) return 'You’ve been signed out. Sign in again to carry on.'
+  if (m && !/^HTTP \d+$/.test(m) && !/^(internal server error|bad request|error)$/i.test(m)) return m
+  return status >= 500 ? 'Something went wrong on Duct’s side. Try again; if it keeps happening, send us a note from Settings › Help.' : 'That didn’t work. Try again?'
 }
 
 const send = (method, path, body) => json(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
@@ -274,7 +296,7 @@ function citation(c, style) {
 }
 
 async function copyText(text, done) {
-  try { await navigator.clipboard.writeText(text); toast(done) } catch { toast("Couldn't copy", true) }
+  try { await navigator.clipboard.writeText(text); toast(done) } catch { toast('Couldn’t copy that. Select it and copy it yourself?', true) }
 }
 
 function collect(r) {
@@ -318,7 +340,7 @@ async function exportCollected(format) {
   try {
     const res = await api('/api/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ format, title, items: state.collected }) })
     await downloadExport(res, 'duct-collected.' + format)
-  } catch (err) { toast('Export failed: ' + err.message, true) }
+  } catch (err) { toast('Couldn’t export. ' + err.message, true) }
 }
 
 function renderTagEditor(path) {
@@ -337,7 +359,7 @@ async function saveTags(path, tags) {
     state.allTags = (await json('/api/tags')).tags || []
     renderSidebar()
     return data.tags
-  } catch (err) { toast('Tags not saved: ' + err.message, true); return null }
+  } catch (err) { toast('Couldn’t save the tags. ' + err.message, true); return null }
 }
 
 function pageRef(chunk) {
@@ -592,7 +614,7 @@ async function runSearch() {
   const params = addScopeParams(new URLSearchParams({ q, topK: '40' }))
   const seq = ++searchSeq
   let data
-  try { data = await json('/api/search?' + params) } catch (err) { if (seq === searchSeq) toast('Search failed: ' + err.message, true); return }
+  try { data = await json('/api/search?' + params) } catch (err) { if (seq === searchSeq) toast('Couldn’t search just now. ' + err.message, true); return }
   if (seq !== searchSeq) return
   state.results = data.results || []
   state.help = data.help || null
@@ -795,7 +817,7 @@ document.addEventListener('keydown', async e => {
 /** Opens the workspace: documents side by side with a notebook for notes. */
 async function openWorkspace(left, right, page, highlightTerms = [], notebook = '') {
   if (desktop && desktop.openWorkspace) {
-    if (!(await desktop.openWorkspace(left, right, page, highlightTerms, notebook))) toast("Couldn't open the workspace", true)
+    if (!(await desktop.openWorkspace(left, right, page, highlightTerms, notebook))) toast('Couldn’t open the workspace. Try again?', true)
     return
   }
   const q = new URLSearchParams()
@@ -980,11 +1002,18 @@ function renderDocuments() {
   if (attention) $('#docScopeChips').innerHTML = ''
   else renderScopeChips('#docScopeChips')
   if (!docs.length) {
-    $('#docTable').innerHTML = '<div class="empty">' + (state.docFilter === 'attention' ? 'Every file was read. Nothing needs attention.' : 'No documents here yet.') + '</div>'
+    $('#docTable').innerHTML = state.docFilter === 'attention'
+      ? '<div class="empty"><div class="mascot-slot mascot-md" data-mascot="done" aria-hidden="true"></div><p>Every file was read. Nothing needs you.</p></div>'
+      : '<div class="empty"><div class="mascot-slot mascot-md" data-mascot="idle" aria-hidden="true"></div><p>Nothing here yet. Add files or watch a folder, and they’ll show up here as Duct reads them.</p></div>'
+    renderMascots()
     return
   }
+  // Files Duct couldn't read: say so kindly, and what can be done, above the list.
+  const attentionNote = attention ? '<div class="attention-note"><div class="mascot-slot mascot-sm" data-mascot="needsHand" aria-hidden="true"></div><p><strong>' +
+    (docs.length === 1 ? 'Duct couldn’t read this file.' : 'Duct couldn’t read these ' + fmt(docs.length) + ' files.') + '</strong> ' +
+    'Under each one is why, and what usually fixes it. Everything else is searchable meanwhile.</p></div>' : ''
   const statusOf = d => d.status === 'failed' ? '<span class="status bad">Couldn’t read</span>' : d.status === 'no-text' ? '<span class="status warn">No text (scan?)</span>' : '<span class="status ok">Indexed</span>'
-  $('#docTable').innerHTML = '<div class="doc-row head" role="row"><span></span><span>Name</span><span class="folder-col">Folder</span><span>Status</span><span></span></div>' +
+  $('#docTable').innerHTML = attentionNote + '<div class="doc-row head" role="row"><span></span><span>Name</span><span class="folder-col">Folder</span><span>Status</span><span></span></div>' +
     docs.slice(0, 2000).map(d => {
       const link = isLink(d.path)
       const actions = []
@@ -998,8 +1027,21 @@ function renderDocuments() {
         ((d.tags || []).length ? '<span class="tags">' + d.tags.map(t => '<span class="tag">' + esc(t) + '</span>').join('') + '</span>' : '') + '</span>' +
         '<span class="folder">' + esc(link ? d.path : d.source === 'library' ? 'Duct Library' : folderOf(d.path)) + '</span>' +
         statusOf(d) + '<span class="row-actions">' + actions.join('') + '</span>' +
-        (d.status === 'failed' && d.error ? '<span class="err">' + esc(d.error) + '</span>' : '') + '</div>'
+        (d.status === 'failed' && d.error ? '<span class="err" title="' + esc(d.error) + '">' + esc(fileProblem(d.error)) + '</span>' : '') + '</div>'
     }).join('')
+  if (attention) renderMascots()
+}
+
+/** Why a file couldn't be read, in plain words (the original message stays in the tooltip). */
+function fileProblem(error) {
+  const e = String(error || '')
+  if (/password|encrypt/i.test(e)) return 'Locked with a password. Remove the password, or save an unlocked copy, and Duct will read it.'
+  if (/eacces|eperm|permission/i.test(e)) return 'Duct isn’t allowed to open it. Check the file’s permissions, or the folder access Duct has.'
+  if (/enoent|no such file/i.test(e)) return 'It was moved or deleted after Duct found it.'
+  if (/too large|exceeds|size limit/i.test(e)) return 'It’s larger than Duct reads.'
+  if (/invalid|corrupt|malformed|unexpected end|bad xref|not a valid|zip/i.test(e)) return 'The file looks damaged. Opening it and saving it again from the app that made it often fixes this.'
+  if (/timeout|timed out/i.test(e)) return 'It took too long to read. Duct will try again when the file changes.'
+  return e
 }
 
 $$('.seg-item').forEach(b => b.addEventListener('click', () => { state.docFilter = b.dataset.docFilter; renderDocuments(); renderSidebar() }))
@@ -1018,8 +1060,8 @@ $('#docTable').addEventListener('click', async e => {
     act.textContent = 'Reading…'
     try {
       const data = await send('POST', '/api/ocr', { path })
-      toast(data.chunks > 0 ? 'Text found and indexed' : 'OCR found no readable text', data.chunks === 0)
-    } catch (err) { toast('OCR failed: ' + err.message, true) }
+      toast(data.chunks > 0 ? 'Read it. Its words are searchable now.' : 'I looked, but found no words I could read in that scan. A clearer copy may work.', data.chunks === 0)
+    } catch (err) { toast('Couldn’t read the text in that scan. ' + err.message, true) }
     refreshAll()
   }
   if (act.dataset.docAct === 'remove') {
@@ -1051,7 +1093,7 @@ async function uploadFiles(files) {
       const data = await res.json().catch(() => ({}))
       if (!res.ok) { if (/Unsupported/.test(data.error || '')) unsupported += Math.min(10, list.length - start); else throw new Error(data.error || 'HTTP ' + res.status); continue }
       for (const r of data.results || []) { if (r.duplicateOf) duplicates++; else if (r.failed) failed++; else added += r.documents || 0 }
-    } catch (err) { toast('Upload failed: ' + err.message, true); failed += Math.min(10, list.length - start) }
+    } catch (err) { toast('Couldn’t add those files. ' + err.message, true); failed += Math.min(10, list.length - start) }
   }
   setProgress(list.length, list.length, '')
   const parts = [plural(added, 'file') + ' added']
@@ -1127,7 +1169,7 @@ $('#urlForm').addEventListener('submit', async e => {
   try {
     const data = await send('POST', '/api/index', { url })
     const r = (data.results || [])[0] || {}
-    toast(r.failed ? "Couldn't read that page" : 'Added ' + url, !!r.failed)
+    toast(r.failed ? 'Couldn’t read that page. It may need a sign-in, or block apps like Duct.' : 'Added ' + url, !!r.failed)
   } catch (err) { toast(err.message, true) }
   refreshAll()
 })
@@ -1156,6 +1198,7 @@ function showWelcome() {
   $('#welcomeStart').hidden = false
   $('#welcomeProgress').hidden = true
   $('#welcomeReady').hidden = true
+  $('#welcome [data-mascot]').dataset.mascot = 'welcome'
   $('[data-action="watch-folder"]', $('#welcome')).hidden = !state.canWatch || !feature('watchedFolders')
   renderMascots()
 }
@@ -1280,6 +1323,8 @@ async function showReady() {
   $('#welcomeStart').hidden = true
   $('#welcomeProgress').hidden = true
   $('#welcomeReady').hidden = false
+  $('#welcome [data-mascot]').dataset.mascot = 'done'
+  renderMascots()
   const n = d ? d.documents : readyDocs().length
   const found = foundText(d)
   $('#welcomeReadyFound').textContent = 'Duct read ' + plural(n, 'document') + (found ? ' and found ' + found + '.' : '.') + ' All of it stayed on this computer.'
@@ -1667,12 +1712,12 @@ $('#settings').addEventListener('change', async e => {
       renderSidebar()
       if (state.query && state.view === 'results') runSearch()
       toast('Saved')
-    } catch (err) { el.checked = !el.checked; toast('Not saved: ' + err.message, true) }
+    } catch (err) { el.checked = !el.checked; toast('Couldn’t save that. ' + err.message, true) }
     return
   }
   if (el.dataset.pref) {
     const ok = await desktop.setPref(el.dataset.pref, el.checked).catch(() => false)
-    if (!ok) { el.checked = !el.checked; toast('Not saved', true); return }
+    if (!ok) { el.checked = !el.checked; toast('Couldn’t save that. Try again?', true); return }
     if (el.dataset.pref === 'shortcut' && desktop.getShortcut) {
       const s = await desktop.getShortcut().catch(() => null)
       $('.shortcut-row')?.replaceWith(...(s ? [document.createRange().createContextualFragment(shortcutRow(s))] : []))
@@ -1683,7 +1728,7 @@ $('#settings').addEventListener('change', async e => {
   }
   if (el.dataset.shortcut !== undefined && desktop && desktop.setShortcut) {
     const s = await desktop.setShortcut(el.value).catch(() => null)
-    if (!s) { toast('Not saved', true); return }
+    if (!s) { toast('Couldn’t save that. Try again?', true); return }
     $('.shortcut-row').replaceWith(document.createRange().createContextualFragment(shortcutRow(s)))
     if (s.taken) toast('Another app is using ' + s.label + ' too. Try other keys.', true)
     else toast('Quick search is now ' + s.label)
@@ -1699,7 +1744,7 @@ $('#settings').addEventListener('change', async e => {
     state.config = data.config || state.config
     if (el.dataset.key) { el.value = ''; el.placeholder = 'Saved'; el.nextElementSibling.textContent = '✓ set' }
     toast('Saved')
-  } catch (err) { toast('Not saved: ' + err.message, true) }
+  } catch (err) { toast('Couldn’t save that. ' + err.message, true) }
 })
 
 // ---------- status ----------
@@ -1856,10 +1901,10 @@ document.addEventListener('click', e => {
 
 async function exportResults(format = 'csv') {
   if (!feature('export')) return
-  if (!state.query) { toast('Search for something first', true); return }
+  if (!state.query) { toast('Search for something first, then export what it finds.', true); return }
   try {
     await downloadExport(await api('/api/export?' + addScopeParams(new URLSearchParams({ q: state.query, format, topK: '200' }))), 'duct-export.' + format)
-  } catch (err) { toast('Export failed: ' + err.message, true) }
+  } catch (err) { toast('Couldn’t export. ' + err.message, true) }
 }
 
 // ---------- start ----------
