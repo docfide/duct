@@ -9,6 +9,7 @@
   <script type="module" src="/ui/app.js"></script>
 </head>
 <body>
+  <a class="skip-link" href="#content">Skip to content</a>
   <div class="offline-note" id="offlineNote" role="status" hidden>You’re offline. Everything in Duct is still searchable.</div>
   <!-- First run: shown until something has been added (or the person skips it). -->
   <section id="welcome" class="welcome" hidden aria-labelledby="welcomeTitle">
@@ -116,7 +117,7 @@
         </div>
       </aside>
 
-      <main class="content" id="content">
+      <main class="content" id="content" tabindex="-1">
         <section id="viewHome" class="view" aria-label="Home">
           <div class="home">
             <div class="mascot-slot mascot-lg" data-mascot="idle" aria-hidden="true"></div>
@@ -405,7 +406,7 @@
     <div class="collect-body">
       <p class="hint">Tell us what worked, what didn’t, or what you expected. It goes to the Duct team at Tensflare.</p>
       <label class="field"><span>Your message</span><textarea id="feedbackMessage" rows="6" maxlength="5000" placeholder="What happened? What did you expect?"></textarea></label>
-      <label class="field"><span>Email <small>optional, if you’d like a reply</small></span><input type="email" id="feedbackEmail" maxlength="254"></label>
+      <label class="field"><span>Email <small>optional, if you’d like a reply</small></span><input type="email" id="feedbackEmail" maxlength="254" autocomplete="email"></label>
       <label class="check"><input type="checkbox" id="feedbackDiag" checked> <span><strong>Include diagnostics</strong><small>Version, operating system, settings and error codes. Never your documents, file names, paths or searches.</small></span></label>
       <details class="telemetry-details"><summary>See exactly what’s included</summary><pre id="feedbackDiagPreview"></pre></details>
       <label class="check" id="feedbackCrashRow" hidden><input type="checkbox" id="feedbackCrashes"> <span><strong>Include crash reports (<span id="feedbackCrashCount">0</span>)</strong><small>The type of error and the place in Duct’s code where it happened. No messages, documents or paths.</small></span></label>

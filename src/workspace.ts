@@ -18,7 +18,7 @@ export const workspaceHtml = `<!DOCTYPE html>
 <style>
 :root {
   --black: #0C0C0B; --s1: #111110; --s2: #181816; --border: #252522; --border2: #333330;
-  --muted: #555552; --subtle: #888883; --text: #F0EFE8; --lime: #A3E635; --lime-bg: #141A06; --red: #F87171;
+  --field-border: #6a6a65; --muted: #888883; --subtle: #9a9a93; --text: #F0EFE8; --lime: #A3E635; --lime-bg: #141A06; --red: #F87171;
   --mono: 'SF Mono','Fira Code','Cascadia Code','Consolas',monospace;
   --sans: -apple-system,BlinkMacSystemFont,'Inter',sans-serif;
 }
@@ -34,7 +34,7 @@ button:disabled { opacity: .4; cursor: default; }
 button.primary { background: var(--lime); border-color: var(--lime); color: #0C0C0B; font-weight: 600; }
 button.ghost { border-color: transparent; color: var(--subtle); padding: 4px 6px; }
 button.ghost:hover:not(:disabled) { color: var(--text); border-color: transparent; }
-select, input, textarea { background: var(--black); border: 1px solid var(--border2); border-radius: 6px; padding: 4px 8px; }
+select, input, textarea { background: var(--black); border: 1px solid var(--field-border); border-radius: 6px; padding: 4px 8px; }
 :focus-visible { outline: 2px solid var(--lime); outline-offset: 1px; }
 
 .top { height: 44px; flex: none; display: flex; align-items: center; gap: 10px; padding: 0 14px; background: var(--s1); border-bottom: 1px solid var(--border); font-family: var(--mono); font-size: 12px; }
@@ -112,6 +112,9 @@ mark.ws-find.current { background: var(--lime); outline: 2px solid var(--lime); 
 .transcript .line .time { flex: none; font-family: var(--mono); font-size: 11px; color: var(--lime); padding: 0 4px; }
 .transcript .line.playing { background: var(--lime-bg); border-radius: 4px; }
 .text-view { padding: 24px clamp(16px, 4vw, 48px) 60px; background: var(--black); min-height: 100%; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+.text-view .para { margin: 0 0 .8em; white-space: pre-wrap; }
+.scroller:focus-visible { outline: 2px solid var(--lime); outline-offset: -2px; }
 .text-view .sec { max-width: 78ch; margin: 0 auto 26px; }
 .text-view .sec-label { user-select: none; -webkit-user-select: none; font-family: var(--mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--lime); margin: 0 0 8px; padding-top: 8px; border-top: 1px solid var(--border); }
 .text-view .sec-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; font-size: 14px; }
@@ -124,6 +127,14 @@ mark.ws-find.current { background: var(--lime); outline: 2px solid var(--lime); 
 .textLayer .highlight { background-color: rgba(163, 230, 53, 0.35) !important; border-radius: 2px; }
 .textLayer .highlight.selected { background-color: rgba(163, 230, 53, 0.75) !important; }
 
+@media (max-width: 720px) {
+  /* Narrow or zoomed in: the notes go under the documents, and the bars wrap (WCAG 1.4.10). */
+  main { flex-direction: column; }
+  .notes { width: auto !important; max-height: 33%; border-top: 1px solid var(--border); }
+  .rich { margin: 8px; padding: 16px; }
+  .text-view { padding: 12px; }
+  .top, .pane-head { height: auto; min-height: 38px; flex-wrap: wrap; padding-top: 4px; padding-bottom: 4px; }
+}
 .notes { width: 340px; flex: none; display: flex; flex-direction: column; background: var(--s1); min-height: 0; }
 .notes[hidden] { display: none; }
 .notes-head { flex: none; padding: 10px; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--border); font-family: var(--mono); font-size: 12px; }
@@ -212,13 +223,14 @@ mark.ws-find.current { background: var(--lime); outline: 2px solid var(--lime); 
   <button class="primary go" id="addPopGo">Add to notes</button><button class="primary more" id="addPopMore" aria-haspopup="true" aria-expanded="false" title="Choose a notebook" aria-label="Choose a notebook">▾</button>
   <div class="menu-pop" id="addPopMenu" hidden></div>
 </div>
-<div class="toast" id="toast" hidden></div>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 <script type="module">
   const $ = id => document.getElementById(id)
   const params = new URLSearchParams(location.search)
   const TEXT_FORMATS = new Set(['md', 'code', 'txt'])
   const RASTER = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'])
   const WS = new RegExp('\\\\s+', 'g')
+  const PARA = new RegExp('\\\\n\\\\s*\\\\n')
   const WORD_CHAR = new RegExp('[\\\\p{L}\\\\p{N}]', 'u')
 
   function h(tag, props, ...kids) {
@@ -509,6 +521,7 @@ mark.ws-find.current { background: var(--lime); outline: 2px solid var(--lime); 
       })
       const scroller = h('div', { class: 'scroller' }, view)
       this.body.append(h('div', { class: 'audio-pane' }, bar, scroller))
+      this.keyboardReading(view, scroller)
       // From a result: cue the recording at its minute (it doesn't start playing by itself).
       if (this.page > 1) {
         const first = lines.find(l => Number(l.dataset.at) >= (this.page - 1) * 60)
@@ -538,9 +551,44 @@ mark.ws-find.current { background: var(--lime); outline: 2px solid var(--lime); 
       }
       scroller.append(page)
       this.body.append(scroller)
+      this.keyboardReading(page, scroller)
       this.findInput.hidden = false
       this.findInput.value = this.terms.join(' ')
       if (this.terms.length) this.domFind(false, false)
+    }
+
+    /**
+     * Reading with the keyboard (text, formatted and transcript views): Tab to the document, then up and down select a
+     * paragraph at a time, and Enter adds it to notes. Screen readers hear each paragraph as it's selected.
+     */
+    keyboardReading(root, scroller) {
+      scroller.tabIndex = 0
+      scroller.setAttribute('role', 'region')
+      scroller.setAttribute('aria-label', 'Document. Up and down arrows select a paragraph; Enter adds it to notes.')
+      const live = h('div', { class: 'sr-only', 'aria-live': 'polite' })
+      scroller.append(live)
+      let at = -1
+      const blocks = () => [...root.querySelectorAll('p, li, td, th, h1, h2, h3, h4, h5, h6, blockquote, pre, dd, .line')]
+        .filter(el => el.textContent.trim() && !el.querySelector('p, li, .line'))
+      scroller.addEventListener('keydown', e => {
+        if (e.target !== scroller) return
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          const all = blocks()
+          if (!all.length) return
+          e.preventDefault()
+          at = Math.max(0, Math.min(all.length - 1, at + (e.key === 'ArrowDown' ? 1 : -1)))
+          const el = all[at]
+          const range = document.createRange()
+          range.selectNodeContents(el)
+          const sel = getSelection(); sel.removeAllRanges(); sel.addRange(range)
+          el.scrollIntoView({ block: 'nearest' })
+          live.textContent = el.textContent.trim().slice(0, 300)
+          checkSelection()
+        } else if (e.key === 'Enter' && pending) {
+          e.preventDefault()
+          addPending(addGo.dataset.target)
+        }
+      })
     }
 
     /** Find in the formatted or text view: marks every match, and steps through them in order. */
@@ -612,11 +660,12 @@ mark.ws-find.current { background: var(--lime); outline: 2px solid var(--lime); 
         shown += s.text.length
         view.append(h('div', { class: 'sec', 'data-page': s.page || false },
           s.title ? h('p', { class: 'sec-label', text: s.title }) : null,
-          h('div', { class: 'sec-text', text: s.text })))
+          h('div', { class: 'sec-text' }, s.text.split(PARA).filter(t => t.trim()).map(t => h('p', { class: 'para', text: t })))))
       }
       if (!data.sections.length) view.append(h('div', { class: 'empty', text: 'Duct found no text in this document.' }))
       const scroller = h('div', { class: 'scroller' }, view)
       this.body.append(scroller)
+      this.keyboardReading(view, scroller)
       const paged = data.sections.filter(s => s.page)
       if (paged.length > 1) {
         this.pageInput.hidden = this.pageCount.hidden = false
@@ -1184,6 +1233,18 @@ mark.ws-find.current { background: var(--lime); outline: 2px solid var(--lime); 
   }
   document.addEventListener('mouseup', e => { if (!addPop.contains(e.target)) setTimeout(checkSelection, 0) })
   document.addEventListener('keyup', e => { if (e.key.startsWith('Arrow') && e.shiftKey) checkSelection(); if (e.key === 'Escape') hidePop() })
+  // Without a mouse: select with the keyboard (caret browsing: F7 in the desktop app), then ⌘⇧N or Ctrl+Shift+N adds
+  // the selection to the notebook shown, and ⌘⇧M or Ctrl+Shift+M opens the menu of notebooks.
+  document.addEventListener('keydown', e => {
+    if (!(e.metaKey || e.ctrlKey) || !e.shiftKey) return
+    const key = e.key.toLowerCase()
+    if (key !== 'n' && key !== 'm') return
+    checkSelection()
+    if (!pending) { toast('Select some text in a document first.'); return }
+    e.preventDefault()
+    if (key === 'n') addPending(addGo.dataset.target)
+    else { drawAddMenu(); addMenu.hidden = false; addMore.setAttribute('aria-expanded', 'true'); addMenu.querySelector('button')?.focus({ preventScroll: true }) }
+  })
   addPop.addEventListener('mousedown', e => e.preventDefault())  // keep the selection while clicking
   addGo.addEventListener('click', () => addPending(addGo.dataset.target))
   addMore.addEventListener('click', () => {
@@ -1192,6 +1253,14 @@ mark.ws-find.current { background: var(--lime); outline: 2px solid var(--lime); 
     addMenu.hidden = !open
     addMore.setAttribute('aria-expanded', String(open))
     if (open) addMenu.querySelector('button')?.focus({ preventScroll: true })
+  })
+  addMenu.addEventListener('keydown', e => {
+    // Up and down move through the notebooks; Escape closes the menu.
+    const items = [...addMenu.querySelectorAll('button')]
+    const i = items.indexOf(document.activeElement)
+    if (e.key === 'ArrowDown') { e.preventDefault(); items[(i + 1) % items.length]?.focus() }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); items[(i - 1 + items.length) % items.length]?.focus() }
+    else if (e.key === 'Escape') { closeAddMenu(); addMore.focus() }
   })
   addMenu.addEventListener('click', e => { const t = e.target.closest('[data-target]'); if (t) addPending(t.dataset.target) })
 

@@ -12,7 +12,7 @@ export const viewerHtml = `<!DOCTYPE html>
 <style>
 :root {
   --black: #0C0C0B; --s1: #111110; --s2: #181816; --border: #252522; --border2: #333330;
-  --muted: #555552; --subtle: #888883; --text: #F0EFE8; --lime: #A3E635; --lime-bg: #141A06;
+  --muted: #888883; --subtle: #9a9a93; --text: #F0EFE8; --lime: #A3E635; --lime-bg: #141A06;
   --mono: 'SF Mono','Fira Code','Cascadia Code','Consolas',monospace;
   --sans: -apple-system,BlinkMacSystemFont,'Inter',sans-serif;
 }
