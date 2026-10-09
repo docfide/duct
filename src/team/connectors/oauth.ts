@@ -1,3 +1,4 @@
+// Copyright Tensflare Ltd. Licensed under the Elastic License 2.0; see src/team/LICENSE.
 // OAuth 2.0 for native apps (RFC 8252): the system browser, a one-request loopback listener and PKCE.
 // Used by the connectors (Google Drive, Microsoft OneDrive and SharePoint) to get read-only tokens.
 // A server in the cloud uses a WebCallback instead: the provider redirects to <public-url>/connectors/callback.

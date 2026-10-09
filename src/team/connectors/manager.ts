@@ -1,3 +1,4 @@
+// Copyright Tensflare Ltd. Licensed under the Elastic License 2.0; see src/team/LICENSE.
 // Connected sources: each keeps a local copy of its readable files under <data>/connectors/<id>/files and indexes
 // them like any other document (source "connector", with the file's web address in its metadata). Changes are
 // fetched incrementally from the source's cursor; files deleted there are removed here.
@@ -5,8 +6,8 @@
 import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { Duct } from '../index.js'
-import { safeFileName } from '../library.js'
+import type { Duct } from '../../index.js'
+import { safeFileName } from '../../library.js'
 import { GoogleDrive, MicrosoftDrive, S3Source, authorizeSource } from './sources.js'
 import type { WebCallback } from './oauth.js'
 import type { ClientIds, ConnectorKind, ConnectorSource, RemoteFile, S3Credentials, Tokens } from './sources.js'

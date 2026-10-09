@@ -245,8 +245,8 @@ async function startServer() {
   const sync = new SettingsSync(duct, account, app.getPath('userData'))
   sync.start()
   // Cloud sources (Team): tokens encrypted with the OS keychain, like the account's.
-  const { ConnectorManager } = await import('../dist/connectors/manager.js')
-  const { clientIdsFromEnv } = await import('../dist/connectors/sources.js')
+  const { ConnectorManager } = await import('../dist/team/connectors/manager.js')
+  const { clientIdsFromEnv } = await import('../dist/team/connectors/sources.js')
   const vaultFile = path.join(app.getPath('userData'), 'connectors.bin')
   let vaultMemory = {}
   const connectors = new ConnectorManager(duct, {

@@ -25,13 +25,13 @@ import { createApiRouter } from './api/v1.js'
 import type { TensflareAccount } from './account.js'
 import type { Telemetry } from './telemetry.js'
 import type { SettingsSync } from './sync.js'
-import type { ConnectorManager } from './connectors/manager.js'
-import type { S3Credentials } from './connectors/sources.js'
-import { callbackPage } from './connectors/oauth.js'
+import type { ConnectorManager } from './team/connectors/manager.js'
 import { currentLedger, LEDGER_CATEGORY_LABELS } from './ledger.js'
 import { importWhatsApp } from './whatsapp.js'
-import { parsePrincipal, principalsFor } from './access.js'
-import type { OidcLogin } from './oidc.js'
+import { principalsFor } from './access.js'
+import type { OidcLogin } from './team/oidc.js'
+import { teamServer } from './team/server.js'
+export { s3Details } from './team/server.js'
 import { clearCrashes, collectDiagnostics, listCrashes, sendFeedback, validateFeedback } from './diagnostics.js'
 import { Collections } from './api/collections.js'
 import { FEATURE_LABELS, FEATURE_NAMES, FORMAT_KINDS, FeatureDisabledError } from './features.js'
@@ -238,6 +238,8 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
   }
 
   const oidc = opts?.oidc
+  // Team features (sign-in, connectors, audit log, notebook sharing): src/team, under the Elastic License 2.0.
+  const team = oidc || opts?.connectors ? teamServer(duct, { oidc, connectors: opts?.connectors, account: opts?.account }) : undefined
   function auth(req: express.Request, res: express.Response, next: express.NextFunction): void {
     // Without a token or sign-in the server only serves this machine, and its user is the admin.
     if (!token && !oidc) { res.locals.role = 'admin'; res.locals.actor = 'local'; return next() }
@@ -245,7 +247,8 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     const bearer = typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : undefined
     const role = token ? (roleFor(bearer) ?? roleFor(readCookie(req.headers.cookie, 'duct_token'))) : null
     if (role) { res.locals.role = role; res.locals.actor = `${role}-token`; return next() }
-    const user = oidc?.session(req)
+    const user = team?.session(req)
+    if (user && 'error' in user) { res.status(402).json({ error: user.error, code: 'licence' }); return }
     if (user) { res.locals.role = user.role; res.locals.actor = user.email; return next() }
     res.status(401).json({ error: oidc ? 'Sign in first.' : 'Unauthorized. Provide a valid Bearer token.', ...(oidc ? { login: '/auth/login' } : {}) })
   }
@@ -318,17 +321,8 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     res.json({ ok: true })
   })
 
-  if (oidc) app.use('/auth', oidc.router(user => {
-    try { duct.recordAudit({ actor: user.email, role: user.role, action: 'signin' }) } catch {}
-  }))
+  if (team) team.mountPublic(app)
   else app.get('/auth/mode', (_req, res) => { res.json({ oidc: false }) })
-
-  // Connector sign-ins on a public server come back here; the random state ties it to the sign-in an admin started.
-  app.get('/connectors/callback', (req, res) => {
-    const web = opts?.connectors?.web
-    const ok = !!web && web.complete(new URLSearchParams(req.query as Record<string, string>))
-    res.status(ok ? 200 : 400).set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'").type('html').send(callbackPage(ok))
-  })
 
   app.use('/api/', auth)
 
@@ -369,19 +363,6 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     res.json({ role: res.locals.role, auth: !!token || !!oidc, ...(oidc && String(res.locals.actor).includes('@') ? { user: res.locals.actor } : {}) })
   })
 
-  // The audit log, newest first: ?before=<id>&actor=&action=&limit=, or ?format=csv for the lot (admin).
-  app.get('/api/audit', adminOnly, (req, res) => {
-    const q = req.query
-    if (q['format'] === 'csv') {
-      const rows = duct.auditLog({ limit: 1000, actor: q['actor'] as string | undefined, action: q['action'] as string | undefined })
-      const cell = (v: unknown) => { let t = v == null ? '' : String(v); if (/^[=+\-@]/.test(t)) t = "'" + t; return `"${t.replace(/"/g, '""')}"` }
-      res.type('text/csv').setHeader('Content-Disposition', 'attachment; filename="duct-audit.csv"')
-      res.send('\ufeff' + [['time', 'actor', 'role', 'action', 'target', 'detail'], ...rows.map(r => [new Date(r.at).toISOString(), r.actor, r.role, r.action, r.target, r.detail])].map(r => r.map(cell).join(',')).join('\r\n'))
-      return
-    }
-    res.json({ enabled: auditOn, queries: auditQueries, entries: duct.auditLog({ before: Number(q['before']) || undefined, limit: Number(q['limit']) || 100, actor: q['actor'] as string | undefined, action: q['action'] as string | undefined }) })
-  })
-
   // Everything the UI needs to know about this server, so the page itself can be a static file.
   app.get('/api/info', (_req, res) => {
     res.json({
@@ -394,6 +375,8 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
       accept: ACCEPT_ATTRIBUTE,
       formats: FORMATS.map(f => ({ format: f.format, kind: f.kind, label: f.label, pageLabel: f.pageLabel ?? 'p.' })),
       features: duct.getFeatures(),
+      // The team licence, for the admin's banner (evaluation days left, or lapsed).
+      ...(team && res.locals.role === 'admin' ? { team: team.licenceInfo() } : {}),
     })
   })
 
@@ -434,70 +417,6 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
   app.get('/api/account/ai', async (_req, res) => {
     if (!account || !account.status().signedIn || !account.has('ai.hosted')) { res.json({ entitled: false }); return }
     try { res.json(await account.aiInfo()) } catch (err) { res.status(502).json({ error: (err as Error).message }) }
-  })
-
-  // ---------- connectors (Google Drive, OneDrive, SharePoint, S3) ----------
-
-  const connectors = opts?.connectors
-  let connecting: { kind: string; error?: string; running: boolean } | null = null
-
-  app.get('/api/connectors', (_req, res) => {
-    if (!connectors) { res.json({ available: false, connectors: [] }); return }
-    res.json({ available: true, ...connectors.available(), connectors: connectors.list(), connecting })
-  })
-
-  // Opens the provider's sign-in in the browser on this machine; the page polls GET /api/connectors.
-  app.post('/api/connectors', adminOnly, (req, res) => {
-    if (!connectors) { res.status(404).json({ error: 'Connectors aren’t available here.' }); return }
-    const kind = req.body?.kind
-    if (kind !== 'gdrive' && kind !== 'microsoft' && kind !== 's3') { res.status(400).json({ error: 'kind must be gdrive, microsoft or s3' }); return }
-    if (!connectors.available().entitled) { res.status(403).json({ error: 'Connectors are part of the Team plan.' }); return }
-    if (kind === 's3') {
-      // No browser sign-in: the keys are checked with one listing before the source is saved.
-      let s3
-      try { s3 = s3Details(req.body) } catch (err) { res.status(400).json({ error: (err as Error).message }); return }
-      audit(res, 'connector-add', 's3', `s3://${s3.bucket}/${s3.prefix ?? ''}`)
-      connectors.add('s3', { s3 }).then(c => res.status(201).json(c), err => res.status(400).json({ error: `Couldn’t read the bucket: ${(err as Error).message}` }))
-      return
-    }
-    const siteUrl = typeof req.body?.siteUrl === 'string' && req.body.siteUrl.trim() ? req.body.siteUrl.trim() : undefined
-    if (connecting?.running) { res.status(409).json({ error: 'Finish the sign-in that’s already open first.' }); return }
-    connecting = { kind, running: true }
-    audit(res, 'connector-add', kind, siteUrl)
-    // A public server sends the admin's browser to the provider; on the desktop the system browser opens.
-    let handOver: ((url: string) => void) | undefined
-    const signInUrl = connectors.web ? new Promise<string>(resolve => { handOver = resolve }) : null
-    connectors.add(kind, { siteUrl, ...(handOver ? { openUrl: handOver } : {}) }).then(() => { connecting = null }, err => { connecting = { kind, running: false, error: (err as Error).message }; handOver?.('') })
-    if (!signInUrl) { res.status(202).json({ started: true }); return }
-    signInUrl.then(url => url ? res.status(202).json({ started: true, url }) : res.status(400).json({ error: connecting?.error ?? 'Couldn’t start the sign-in' }))
-  })
-
-  // Who sees a source's files: { visibility: 'source' | 'everyone' | 'custom', allow?: ['ada@okafor.ng', 'okafor.ng'] }
-  app.put('/api/connectors/:id/visibility', adminOnly, async (req, res) => {
-    if (!connectors) { res.status(404).end(); return }
-    const visibility = req.body?.visibility
-    if (visibility !== 'source' && visibility !== 'everyone' && visibility !== 'custom') { res.status(400).json({ error: 'visibility must be source, everyone or custom' }); return }
-    const raw: unknown[] = Array.isArray(req.body?.allow) ? req.body.allow : []
-    const allow = raw.map(a => typeof a === 'string' ? parsePrincipal(a) : null)
-    if (allow.some(a => a === null)) { res.status(400).json({ error: 'Each entry must be an email address or a domain (okafor.ng)' }); return }
-    if (visibility === 'custom' && allow.length === 0) { res.status(400).json({ error: 'Add at least one email address or domain' }); return }
-    try {
-      await connectors.setVisibility(req.params['id'] as string, visibility, allow as string[])
-      audit(res, 'connector-visibility', req.params['id'] as string, visibility === 'custom' ? (allow as string[]).join(', ') : visibility)
-      res.json(connectors.list().find(c => c.id === req.params['id']))
-    } catch (err) { sendError(res, err, (err as { status?: number }).status ?? 500) }
-  })
-
-  app.post('/api/connectors/:id/sync', adminOnly, (req, res) => {
-    if (!connectors) { res.status(404).end(); return }
-    connectors.sync(req.params['id'] as string).catch(() => {})
-    res.status(202).json({ started: true })
-  })
-
-  app.delete('/api/connectors/:id', adminOnly, async (req, res) => {
-    if (!connectors || !(await connectors.remove(req.params['id'] as string))) { res.status(404).json({ error: 'No such source' }); return }
-    audit(res, 'connector-remove', req.params['id'] as string)
-    res.json({ ok: true })
   })
 
   // ---------- the privacy ledger: what left this computer ----------
@@ -891,8 +810,6 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
       ...(role === 'owner' ? { publicLink: publicToken ? `/n/${publicToken}` : null, publicViews, hostedLink: hosted && hosted.expiresAt > Date.now() ? { url: hosted.url, expiresAt: hosted.expiresAt } : null } : {}),
     }
   }
-  /** Public links need a server people sign in to (so there's an owner who chose to publish) and the switch on. */
-  const publicLinksOn = () => !!oidc && duct.getFeatures().publicLinks
 
   /** The notebook if the caller may do `needs` with it; otherwise answers 404 (they can't see it) or 403 and returns null. */
   const notebookFor = (id: string, res: express.Response, needs: NotebookRole): { nb: Notebook; role: NotebookRole } | null => {
@@ -922,7 +839,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     })
     // `sharing`: whether notebooks can be shared with people here (a server with sign-in).
     // hostedLinks: whether this install can publish links hosted by Tensflare (it has an account to sign in with).
-    res.json({ notebooks, sharing: !!oidc, publicLinks: publicLinksOn(), hostedLinks: !!account && !oidc, signedIn: !!account?.status().signedIn, me: emailOf(res) ?? null })
+    res.json({ notebooks, ...(team?.notebookFlags() ?? { sharing: false, publicLinks: false }), hostedLinks: !!account && !oidc, signedIn: !!account?.status().signedIn, me: emailOf(res) ?? null })
   })
 
   app.post('/api/notebooks', (req, res) => {
@@ -948,28 +865,6 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     res.json({ ok: true })
   })
 
-  // Who a notebook is shared with: { "sharing": [{ "to": "ada@okafor.ng" | "okafor.ng" | "anyone", "can": "view" | "edit" }] }.
-  app.put('/api/notebooks/:id/sharing', (req, res) => {
-    if (!oidc) { res.status(400).json({ error: 'Sharing with people needs a Duct server where people sign in. On this computer, export the notebook as a page to send it.' }); return }
-    if (!notebookFor(req.params.id, res, 'owner')) return
-    try {
-      const sharing = duct.shareNotebook(req.params.id, req.body?.sharing)
-      audit(res, 'notes', undefined, sharing.length ? `shared a notebook with ${sharing.map(s => `${s.to.replace(/^(user|domain):/, '')} (${s.can})`).join(', ')}` : 'stopped sharing a notebook')
-      res.json({ sharing })
-    } catch (err) {
-      sendError(res, err, 400)
-    }
-  })
-
-  // A public link: anyone who has it can read the notebook, without signing in. Owner only; a new link replaces
-  // the old one. { on: false } (or DELETE) turns it off.
-  app.post('/api/notebooks/:id/public-link', (req, res) => {
-    if (!publicLinksOn()) { res.status(403).json({ error: oidc ? 'Public links are switched off on this server (Settings › Features).' : 'Public links need a Duct server where people sign in. On this computer, send the notebook as a page instead.' }); return }
-    if (!notebookFor(req.params.id, res, 'owner')) return
-    const token = duct.setNotebookPublic(req.params.id, true)!
-    audit(res, 'notes', undefined, 'made a public link to a notebook')
-    res.status(201).json({ publicLink: `/n/${token}`, publicViews: 0 })
-  })
   // A link hosted by Tensflare, for the desktop app where this server can't be reached by others. Sends the
   // notebook's name, quotes, document names, pages and comments (the notes this person can see; never paths or
   // who added them) to the account service. { days: 7 | 30 | 90 }. A new link replaces the old one.
@@ -1001,13 +896,6 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     }
     duct.setNotebookHostedLink(found.nb.id, null)
     res.json({ hostedLink: null })
-  })
-
-  app.delete('/api/notebooks/:id/public-link', (req, res) => {
-    if (!notebookFor(req.params.id, res, 'owner')) return
-    duct.setNotebookPublic(req.params.id, false)
-    audit(res, 'notes', undefined, 'turned off a notebook’s public link')
-    res.json({ publicLink: null })
   })
 
   app.delete('/api/notebooks/:id', (req, res) => {
@@ -1098,6 +986,8 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
       sendError(res, err, 500)
     }
   })
+
+  team?.mount(app, { audit, auditOn, auditQueries, adminOnly, sendError, notebookFor })
 
   // ---------- export ----------
 
@@ -1232,21 +1122,6 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     res.setHeader('Content-Security-Policy', INLINE_SCRIPT_CSP)
     res.type('html').send(viewerHtml)
   })
-  // A notebook's public page. It shows the notes its owner can see (someone without an owner: only notes from
-  // documents open to everyone), leaves out who added them, and isn't indexed by search engines. Each open
-  // counts a view; nothing about the visitor is kept.
-  const publicLimiter = rateLimit({ windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false })
-  app.get('/n/:token', publicLimiter, (req, res) => {
-    const nb = publicLinksOn() ? duct.openPublicNotebook(req.params.token) : undefined
-    res.setHeader('Cache-Control', 'no-store')
-    res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; img-src data:; frame-ancestors 'none'")
-    res.setHeader('X-Robots-Tag', 'noindex, nofollow')
-    if (!nb) { res.status(404).type('text/plain').send('This link doesn’t work any more. Ask whoever sent it for a new one.'); return }
-    const hidden = duct.hiddenFrom(principalsFor(nb.owner ?? undefined))
-    const notes = duct.listNotes(nb.id).filter(n => !hidden.has(n.path)).map(n => ({ ...n, author: null }))
-    res.type('html').send(notebookPage(sharedFrom(nb.name, notes, f => pageLabel(f as DocumentFormat)), { noindex: true }))
-  })
-
   app.get('/workspace', (_req, res) => {
     res.setHeader('Content-Security-Policy', INLINE_SCRIPT_CSP)
     res.type('html').send(workspaceHtml)
@@ -1272,20 +1147,3 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
 
 
 /** Validates the S3 form. Plain http is only for a store on this machine (a local MinIO): keys never cross a network unencrypted. */
-export function s3Details(body: Record<string, unknown> | undefined): S3Credentials {
-  const str = (k: string) => typeof body?.[k] === 'string' ? (body[k] as string).trim() : ''
-  const bucket = str('bucket'), accessKeyId = str('accessKeyId'), secretAccessKey = str('secretAccessKey')
-  const region = str('region') || 'us-east-1'
-  if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket)) throw new Error('Enter the bucket’s name')
-  if (!accessKeyId || !secretAccessKey) throw new Error('Enter an access key and its secret')
-  if (!/^[a-z0-9-]+$/.test(region)) throw new Error('The region looks wrong (e.g. eu-west-2, or auto for R2)')
-  const endpoint = str('endpoint')
-  if (endpoint) {
-    let u: URL
-    try { u = new URL(endpoint) } catch { throw new Error('The endpoint isn’t a web address') }
-    const local = ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname)
-    if (u.protocol !== 'https:' && !(u.protocol === 'http:' && local)) throw new Error('The endpoint must use https')
-  }
-  const prefix = str('prefix').replace(/^\/+/, '')
-  return { bucket, region, accessKeyId, secretAccessKey, ...(endpoint ? { endpoint } : {}), ...(prefix ? { prefix } : {}) }
-}

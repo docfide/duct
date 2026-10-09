@@ -12,7 +12,6 @@ import { extractUrl, isUrl } from './extract/web.js'
 import { extractTablesFromContent } from './extract/table.js'
 import { SqliteStore } from './store/sqlite.js'
 import type { AuditEntry, Note, Notebook, StoredApiKey, StoredDocument } from './store/sqlite.js'
-import { cleanSharing } from './notebooks.js'
 import type { NotebookShare } from './notebooks.js'
 import type { SharedNotebook } from './notebook-page.js'
 import { terminateOcr } from './ocr/index.js'
@@ -281,6 +280,15 @@ export class Duct {
     return this.store.latestContent(path)
   }
 
+  /** A small value kept with the index (e.g. when a team server's evaluation started). */
+  storedValue(key: string): unknown {
+    return this.store.getSettings()[`meta.${key}`]
+  }
+
+  storeValue(key: string, value: unknown): void {
+    this.store.setSettings({ [`meta.${key}`]: value })
+  }
+
   // ---------- notebooks ----------
 
   listNotebooks(): Notebook[] {
@@ -313,13 +321,10 @@ export class Duct {
     return /^[\w-]{16,64}$/.test(token) ? this.store.openPublicNotebook(token) : undefined
   }
 
-  /** Replaces who a notebook is shared with. See `cleanSharing()` for what `sharing` may hold. */
-  shareNotebook(id: string, sharing: unknown): NotebookShare[] {
-    const nb = this.store.getNotebook(id)
-    if (!nb) throw new Error('Notebook not found')
-    const clean = cleanSharing(sharing, nb.owner)
-    this.store.setNotebookSharing(id, clean)
-    return clean
+  /** Replaces who a notebook is shared with (a list already checked, e.g. by the team server's `cleanSharing`). */
+  shareNotebook(id: string, sharing: NotebookShare[]): NotebookShare[] {
+    if (!this.store.setNotebookSharing(id, sharing)) throw new Error('Notebook not found')
+    return sharing
   }
 
   /**
@@ -1379,7 +1384,7 @@ export { HybridSearcher, reciprocalRankFusion, extractUrl, isUrl, extractTablesF
 export { FeatureDisabledError, FEATURE_NAMES, FEATURE_LABELS, FORMAT_KINDS, defaultFeatures } from './features.js'
 export type { Features, FeaturesPatch, FeatureName } from './features.js'
 export type { AuditEntry, Note, Notebook, StoredApiKey } from './store/sqlite.js'
-export { notebookRole, canDo, cleanSharing } from './notebooks.js'
+export { notebookRole, canDo } from './notebooks.js'
 export type { NotebookRole, NotebookShare, NotebookActor } from './notebooks.js'
 export { notebookPage, parseSharedNotebook } from './notebook-page.js'
 export type { SharedNotebook } from './notebook-page.js'

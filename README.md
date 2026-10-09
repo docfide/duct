@@ -172,7 +172,7 @@ npm run typecheck    # type-check without emitting
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE).
+The app, the library and the CLI are Apache 2.0 ([LICENSE](LICENSE)). The team features in `src/team/` and `deploy/` (sign-in, permission-aware search, connectors, the audit log, notebook sharing) are under the Elastic License 2.0: free to read, run and change, but not to offer as a hosted service or to get around the licence check. A team server can be evaluated for 30 days; after that its team features need a Team or Enterprise plan. See [LICENSING.md](LICENSING.md).
 
 ---
 

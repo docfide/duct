@@ -1,3 +1,4 @@
+// Copyright Tensflare Ltd. Licensed under the Elastic License 2.0; see src/team/LICENSE.
 // Sign-in for a shared Duct server with the organisation's own identity provider (OpenID Connect: Google
 // Workspace, Microsoft Entra ID, Okta, Tensflare…), instead of handing out tokens. People sign in in the
 // browser; admins and members are decided by email and domain. Sessions are HMAC-signed cookies.

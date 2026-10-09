@@ -58,6 +58,8 @@ async function login() {
 
 async function api(path, options = {}) {
   let res = await rawFetch(path, options)
+  // A team server whose plan lapsed turns signed-in people away with what to do: say it once, plainly.
+  if (res.status === 402) res.clone().json().then(b => { if (b && b.code === 'licence') showLicenceBanner(b.error, false) }, () => {})
   if (res.status === 401 && path !== '/api/login') {
     loginPromise = loginPromise || login().finally(() => { loginPromise = null })
     await loginPromise
@@ -1913,9 +1915,26 @@ async function exportResults(format = 'csv') {
 
 // ---------- start ----------
 
+/** The team licence: days left in the evaluation (admins), or why sign-in and sharing have stopped. */
+function showLicenceBanner(message, admin) {
+  const el = $('#licenceBanner')
+  el.innerHTML = '<span>' + esc(message) + '</span>' + (admin ? '<button class="btn btn-sm" data-action="open-settings" data-tab="account">Open Account settings</button>' : '')
+  el.classList.toggle('lapsed', !admin || /ended|isn’t active/.test(message))
+  el.hidden = false
+}
+function renderLicence() {
+  const t = state.info && state.info.team
+  if (!t || t.state === 'plan') return
+  const days = Math.max(0, Math.ceil((t.evaluationEndsAt - Date.now()) / 86400000))
+  const until = new Date(t.evaluationEndsAt).toLocaleDateString(undefined, { day: 'numeric', month: 'long' })
+  if (t.state === 'evaluation') showLicenceBanner('Team evaluation: ' + plural(days, 'day') + ' left. To keep sign-in, sharing and the audit log after ' + until + ', sign this server in to a Tensflare account with a Team plan.', true)
+  else showLicenceBanner(t.message || 'This server’s Team plan isn’t active.', true)
+}
+
 async function start() {
   try {
     state.info = await json('/api/info')
+    renderLicence()
     state.config = await json('/api/config').catch(() => ({}))
     await loadData()
   } catch (err) {

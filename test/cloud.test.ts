@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Duct } from '../src/index.js'
 import { createServer } from '../src/server.js'
-import { OidcLogin } from '../src/oidc.js'
+import { OidcLogin } from '../src/team/oidc.js'
 
 const ISSUER = 'https://login.example.com'
 let duct: Duct

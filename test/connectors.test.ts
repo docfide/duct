@@ -3,12 +3,12 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Duct } from '../src/index.js'
-import { ConnectorManager } from '../src/connectors/manager.js'
-import type { TokenVault } from '../src/connectors/manager.js'
-import type { S3Credentials, Tokens } from '../src/connectors/sources.js'
-import { drivePrincipals, signS3Get } from '../src/connectors/sources.js'
+import { ConnectorManager } from '../src/team/connectors/manager.js'
+import type { TokenVault } from '../src/team/connectors/manager.js'
+import type { S3Credentials, Tokens } from '../src/team/connectors/sources.js'
+import { drivePrincipals, signS3Get } from '../src/team/connectors/sources.js'
 import { createServer, s3Details } from '../src/server.js'
-import { WebCallback } from '../src/connectors/oauth.js'
+import { WebCallback } from '../src/team/connectors/oauth.js'
 import { makeDocx } from './helpers.js'
 
 const work = mkdtempSync(join(tmpdir(), 'duct-conn-'))
@@ -317,7 +317,7 @@ describe('sharing at the source', () => {
       ] })
       return json({}, 404)
     }) as typeof fetch
-    const { MicrosoftDrive } = await import('../src/connectors/sources.js')
+    const { MicrosoftDrive } = await import('../src/team/connectors/sources.js')
     const src = new MicrosoftDrive({ access: 't', expiresAt: Date.now() + 3600_000 }, { clientId: 'mid' }, { fetch: fetchImpl, saveTokens: () => {} })
     expect(await src.access({ id: '42', name: 'x.txt', modified: '', version: '1' })).toEqual(['user:ada@okafor.ng', 'user:chidi@okafor.ng'])
     expect(await src.access({ id: '43', name: 'y.txt', modified: '', version: '1' })).toBeNull()

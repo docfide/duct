@@ -1,3 +1,4 @@
+// Copyright Tensflare Ltd. Licensed under the Elastic License 2.0; see src/team/LICENSE.
 // Cloud sources Duct reads directly: Google Drive, and Microsoft OneDrive and SharePoint (through Microsoft Graph).
 // Each adapter lists files, reports changes since a cursor, and downloads one file. Access is read-only.
 //
@@ -6,7 +7,7 @@
 
 import { createHash, createHmac } from 'node:crypto'
 import { extname } from 'node:path'
-import { isSupportedFile } from '../formats.js'
+import { isSupportedFile } from '../../formats.js'
 import { WebCallback, loopbackAuthorize, tokenRequest } from './oauth.js'
 
 export type ConnectorKind = 'gdrive' | 'microsoft' | 's3'

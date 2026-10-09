@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Duct } from '../src/index.js'
 import { createServer } from '../src/server.js'
-import type { OidcLogin } from '../src/oidc.js'
+import type { OidcLogin } from '../src/team/oidc.js'
 import { notebookPage, parseSharedNotebook } from '../src/notebook-page.js'
 
 describe('notebooks', () => {
@@ -382,10 +382,8 @@ describe('a notebook as a page to send', () => {
       expect(got.map(n => n.path)).toEqual(['shared:MSA <final>.pdf', lease])
       expect(got[0]).toMatchObject({ page: 4, comment: 'Line one\nLine two', author: 'ada@okafor.ng' })
       expect((await post({ content: 'hello' })).status).toBe(400)
-      // Public links need a server where people sign in; here the page file is the way to share.
-      const refused = await fetch(`${base}/api/notebooks/${notebook.id}/public-link`, { method: 'POST' })
-      expect(refused.status).toBe(403)
-      expect((await refused.json()).error).toMatch(/send the notebook as a page/)
+      // Public links are a team-server feature (src/team); without it there's no such route, and the page file is the way to share.
+      expect((await fetch(`${base}/api/notebooks/${notebook.id}/public-link`, { method: 'POST' })).status).toBe(404)
     } finally {
       server.close()
       rmSync(dir, { recursive: true, force: true })
