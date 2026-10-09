@@ -73,3 +73,33 @@ describe('no dead ends', () => {
     expect(markedWords('a \u0002Notice\u0003 b \u0002notice\u0003 \u0002period\u0003')).toEqual(['Notice', 'notice', 'period'])
   })
 })
+
+describe('fast search keeps the same answers', () => {
+  it('finds filtered results even when every best match is outside the filter', async () => {
+    const dir = mkdtempSync(join(work, 'filtered-'))
+    mkdirSync(join(dir, 'busy'))
+    mkdirSync(join(dir, 'quiet'))
+    // 60 strong matches in one folder, 3 weak ones in the other: the filter has to look past the first candidates.
+    for (let i = 0; i < 60; i++) writeFileSync(join(dir, 'busy', `b${i}.txt`), 'indemnity indemnity indemnity clause')
+    for (let i = 0; i < 3; i++) writeFileSync(join(dir, 'quiet', `q${i}.txt`), 'A long schedule of payments, deliveries and one indemnity clause among many other provisions and terms.')
+    const duct = new Duct({ embed: false })
+    await duct.index(dir)
+    const quiet = await duct.search('indemnity', 10, undefined, { under: join(dir, 'quiet') })
+    expect(quiet.map(r => r.chunk.documentPath.split('/').pop()).sort()).toEqual(['q0.txt', 'q1.txt', 'q2.txt'])
+    expect(quiet.every(r => r.snippet?.includes('\u0002'))).toBe(true)
+    const all = await duct.search('indemnity', 10)
+    expect(all).toHaveLength(10)
+    expect(all[0].score).toBeGreaterThanOrEqual(all[9].score)
+  })
+
+  it('spelling suggestions notice words from documents added later', async () => {
+    const dir = mkdtempSync(join(work, 'vocab-'))
+    writeFileSync(join(dir, 'a.txt'), 'The quarterly report.')
+    const duct = new Duct({ embed: false })
+    await duct.index(dir)
+    expect((await duct.searchHelp('tarriff')).didYouMean).toBeUndefined()
+    writeFileSync(join(dir, 'b.txt'), 'The new tariff schedule applies from March.')
+    await duct.index(dir)
+    expect((await duct.searchHelp('tarriff')).didYouMean).toBe('tariff')
+  })
+})

@@ -742,6 +742,35 @@ export class SqliteStore {
     }
   }
 
+  /**
+   * The best `limit` passages for a full-text query, as chunk ids with scores, best first. Ranks in the full-text
+   * index alone and checks filters on the best candidates (joining every match to its passage and document before
+   * ranking took most of a search's time in big libraries). When filters leave too few, it looks further down,
+   * and in the end ranks with the join, so filtered results are the same either way.
+   */
+  private rankText(fts: string, where: { sql: string; params: (string | number | null)[] }, limit: number): { id: number; score: number }[] {
+    const rank = this.db.prepare('SELECT rowid AS id, -bm25(chunks_fts, 1.0, 2.0) AS score FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY bm25(chunks_fts, 1.0, 2.0) LIMIT ?')
+    for (let n = where.sql ? limit * 4 : limit; n <= 4096; n *= 8) {
+      const candidates = rank.all(fts, n) as unknown as { id: number; score: number }[]
+      let kept = candidates
+      if (where.sql && candidates.length) {
+        const ok = new Set((this.db.prepare(`
+          SELECT c.id FROM chunks c JOIN documents d ON d.id = c.document_id
+          WHERE c.id IN (${candidates.map(() => '?').join(', ')})${where.sql}
+        `).all(...candidates.map(c => c.id), ...where.params) as unknown as { id: number }[]).map(r => r.id))
+        kept = candidates.filter(c => ok.has(c.id))
+      }
+      if (kept.length >= limit || candidates.length < n) return kept.slice(0, limit)
+    }
+    return this.db.prepare(`
+      SELECT c.id, -bm25(chunks_fts, 1.0, 2.0) AS score
+      FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid JOIN documents d ON d.id = c.document_id
+      WHERE chunks_fts MATCH ?${where.sql}
+      ORDER BY bm25(chunks_fts, 1.0, 2.0)
+      LIMIT ?
+    `).all(fts, ...where.params, limit) as unknown as { id: number; score: number }[]
+  }
+
   searchText(query: string, limit: number, filter?: Record<string, unknown>, scope?: SearchScope): SearchResult[] {
     const where = filterClause(filter, scope)
     if (!where) return []
@@ -749,28 +778,39 @@ export class SqliteStore {
 
     const fts = toFtsQuery(query)
     if (fts) {
-      const rows = this.db.prepare(`
-        SELECT c.uid, c.idx, c.heading, c.page, c.content, d.path, d.format, d.chunk_metadata, -bm25(chunks_fts, 1.0, 2.0) AS score,
-          snippet(chunks_fts, 0, char(2), char(3), '…', ${SNIPPET_TOKENS}) AS snippet
-        FROM chunks_fts
-        JOIN chunks c ON c.id = chunks_fts.rowid
-        JOIN documents d ON d.id = c.document_id
-        WHERE chunks_fts MATCH ?${where.sql}
-        ORDER BY bm25(chunks_fts, 1.0, 2.0)
-        LIMIT ?
-      `).all(fts, ...where.params, limit) as unknown as ChunkRow[]
-      for (const r of rows) merged.set(r.uid, { chunk: this.toChunk(r), score: r.score ?? 0, snippet: r.snippet, why: { words: markedWords(r.snippet) } })
+      const ranked = this.rankText(fts, where, limit)
+      if (ranked.length) {
+        // Passages and excerpts only for the results returned: making them for every match was most of a search's time.
+        const rows = this.db.prepare(`
+          SELECT c.id AS cid, c.uid, c.idx, c.heading, c.page, c.content, d.path, d.format, d.chunk_metadata,
+            snippet(chunks_fts, 0, char(2), char(3), '…', ${SNIPPET_TOKENS}) AS snippet
+          FROM chunks_fts
+          JOIN chunks c ON c.id = chunks_fts.rowid
+          JOIN documents d ON d.id = c.document_id
+          WHERE chunks_fts MATCH ? AND chunks_fts.rowid IN (${ranked.map(() => '?').join(', ')})
+        `).all(fts, ...ranked.map(r => r.id)) as unknown as (ChunkRow & { cid: number })[]
+        const byId = new Map(rows.map(r => [r.cid, r]))
+        for (const { id, score } of ranked) {
+          const r = byId.get(id)
+          if (r) merged.set(r.uid, { chunk: this.toChunk(r), score, snippet: r.snippet, why: { words: markedWords(r.snippet) } })
+        }
+      }
     }
 
     // File names: a document whose name contains every query word is a strong match (people search by name).
+    // Names are matched first, then each match's first passage is fetched, so this costs one pass over the names.
     const nameWords = (query.normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}]+/gu) || []).filter(w => w.length > 2).slice(0, 8)
     if (nameWords.length && scope?.fileNames !== false) {
-      const rows = this.db.prepare(`
-        SELECT c.uid, c.idx, c.heading, c.page, c.content, d.path, d.format, d.chunk_metadata
-        FROM documents d JOIN chunks c ON c.document_id = d.id AND c.idx = (SELECT min(idx) FROM chunks WHERE document_id = d.id)
+      const ids = (this.db.prepare(`
+        SELECT d.id FROM documents d
         WHERE ${nameWords.map(() => "lower(d.display_name) LIKE ? ESCAPE '\\'").join(' AND ')}${where.sql}
         LIMIT ?
-      `).all(...nameWords.map(likePattern), ...where.params, limit) as unknown as ChunkRow[]
+      `).all(...nameWords.map(likePattern), ...where.params, limit) as unknown as { id: number }[]).map(r => r.id)
+      const rows = ids.length ? this.db.prepare(`
+        SELECT c.uid, c.idx, c.heading, c.page, c.content, d.path, d.format, d.chunk_metadata
+        FROM documents d JOIN chunks c ON c.document_id = d.id AND c.idx = (SELECT min(idx) FROM chunks WHERE document_id = d.id)
+        WHERE d.id IN (${ids.map(() => '?').join(', ')})
+      `).all(...ids) as unknown as ChunkRow[] : []
       const best = Math.max(0, ...[...merged.values()].map(r => r.score))
       for (const r of rows) {
         const existing = merged.get(r.uid)
@@ -869,12 +909,29 @@ export class SqliteStore {
    * Porter stems ("termin" for "termination"), so each typed word is compared with stems of about its length,
    * and the suggestion is the stem's most common spelling in the text.
    */
+  private vocabCache: { version: string; byLetter: Map<string, { term: string; doc: number }[]> } | null = null
+
+  /**
+   * Indexed words from `first` up to `next` (one starting letter) with how many passages hold each. Reading them
+   * means walking every one of their posting lists, so they're kept until the index changes.
+   */
+  private vocabulary(first: string, next: string): { term: string; doc: number }[] {
+    const v = this.db.prepare('SELECT coalesce(max(id), 0) AS m, count(*) AS n FROM chunks').get() as { m: number; n: number }
+    const version = `${v.m}:${v.n}`
+    if (this.vocabCache?.version !== version) this.vocabCache = { version, byLetter: new Map() }
+    let list = this.vocabCache.byLetter.get(first)
+    if (!list) {
+      this.db.exec('CREATE VIRTUAL TABLE IF NOT EXISTS temp.chunks_vocab USING fts5vocab(main, chunks_fts, row)')
+      list = this.db.prepare('SELECT term, doc FROM temp.chunks_vocab WHERE term >= ? AND term < ?').all(first, next) as { term: string; doc: number }[]
+      this.vocabCache.byLetter.set(first, list)
+    }
+    return list
+  }
+
   suggestSpelling(query: string): string | undefined {
     const words = [...new Set((query.normalize('NFKC').toLowerCase().match(/\p{L}{4,}/gu) || []))].slice(0, 6)
     if (words.length === 0) return undefined
-    this.db.exec('CREATE VIRTUAL TABLE IF NOT EXISTS temp.chunks_vocab USING fts5vocab(main, chunks_fts, row)')
     const hits = this.db.prepare('SELECT 1 FROM chunks_fts WHERE chunks_fts MATCH ? LIMIT 1')
-    const vocab = this.db.prepare('SELECT term, doc FROM temp.chunks_vocab WHERE term >= ? AND term < ?')
     const sample = this.db.prepare(`SELECT snippet(chunks_fts, 0, char(2), char(3), '', 4) AS s FROM chunks_fts WHERE chunks_fts MATCH ? LIMIT 20`)
     let changed = false
     let out = query
@@ -883,11 +940,13 @@ export class SqliteStore {
       const first = word[0]
       const next = String.fromCodePoint(first.codePointAt(0)! + 1)
       let best: { term: string; d: number; doc: number } | undefined
-      for (const { term, doc } of vocab.all(first, next) as { term: string; doc: number }[]) {
+      for (const { term, doc } of this.vocabulary(first, next)) {
         if (term.length < Math.max(4, Math.floor(word.length * 0.6)) || term.length > word.length + 2 || /\d/.test(term)) continue
-        // A stem is usually a prefix of the word: compare it with that much of the typed word.
-        const d = osaDistance(term.length < word.length ? word.slice(0, term.length) : word, term)
-        const limit = word.length >= 8 ? 2 : 1
+        // A stem is usually a prefix of the word ("schedul" for "schedule"), so compare it with the typed word cut
+        // to about its length, and keep the closest: "tarriff" is one letter from "tariff", "shedul" one from "schedul".
+        let d = Infinity
+        for (let k = term.length - 1; k <= Math.min(word.length, term.length + 1); k++) if (k > 0) d = Math.min(d, osaDistance(word.slice(0, k), term))
+        const limit = word.length >= 6 ? 2 : 1
         if (d === 0 && term.length === word.length) continue
         if (d <= limit && (!best || d < best.d || (d === best.d && doc > best.doc))) best = { term, d, doc }
       }
