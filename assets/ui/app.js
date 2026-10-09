@@ -732,6 +732,8 @@ function renderResults() {
   const docs = state.cards.length
   $('#resultsTitle').textContent = !results.length ? 'No results for “' + state.query + '”'
     : plural(docs, 'document') + (results.length > docs ? ' · ' + plural(results.length, 'passage') : '') + ' for “' + state.query + '”'
+  // Screen readers hear the count when a search finishes (WCAG 4.1.3).
+  $('#resultsStatus').textContent = $('#resultsTitle').textContent
   $('#results').innerHTML = state.cards.map((idx, card) => {
     const r = results[idx[0]]
     const c = r.chunk
