@@ -11,7 +11,7 @@ Duct can read Google Drive, OneDrive, SharePoint and S3 buckets directly, withou
 - **Tokens and keys** are kept in the system keychain in the desktop app, and in `connector-tokens.json` (readable only by you) for `duct serve`.
 - **On a server** started with `--public-url`, sign-ins come back to `<public-url>/connectors/callback`, so they work from any browser. Register your own OAuth apps with that redirect URI; see [deploy.md](deploy.md#cloud-sources).
 
-On a shared Duct server, everyone with access to the server can search what its connectors read. Connect sources whose contents the whole team may see.
+On a shared Duct server with sign-in, results from Google Drive and Microsoft 365 follow each file's sharing: people only find what they could open at the source. Sharing links don't count, and files whose sharing Duct can't read stay with the person who connected the source. Each source can instead be visible to everyone on the server, or to chosen people and domains. See [deploy.md](deploy.md#results-follow-each-files-sharing).
 
 ## Setting up the apps (Tensflare)
 

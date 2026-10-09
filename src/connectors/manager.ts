@@ -23,14 +23,28 @@ export class FileTokenVault implements TokenVault {
   save(all: Record<string, Tokens | S3Credentials>) { writeFileSync(this.path, JSON.stringify(all), { mode: 0o600 }) }
 }
 
+/**
+ * Who sees a source's files on a shared server: `source` follows each file's sharing at the source (plus the
+ * person who connected it), `everyone` is everyone who can use the server, `custom` the people and domains in
+ * `allow`. On the desktop app nobody else uses the index, so it doesn't matter there.
+ */
+export type Visibility = 'source' | 'everyone' | 'custom'
+
 export interface ConnectorInfo {
   id: string
   kind: ConnectorKind
   label: string
+  visibility?: Visibility
+  /** For `custom`: principals (src/access.ts). */
+  allow?: string[]
+  /** The account that connected the source, for `source` visibility. */
+  owner?: string
+  /** Sharing must be read again for files that haven't changed (after switching to `source`). */
+  recheckAccess?: boolean
   /** SharePoint: the site's document library; OneDrive and Google: unset. */
   drive?: string
   cursor: string | null
-  files: Record<string, { version: string; name: string }>
+  files: Record<string, { version: string; name: string; access?: string[] | null }>
   addedAt: string
   lastSync?: string
   syncing?: boolean
@@ -48,6 +62,8 @@ export interface ConnectorOptions {
   /** Whether connectors are on this plan (entitlement "team.connectors"). */
   entitled: () => boolean
   onChange?: () => void
+  /** Visibility for new Google Drive and Microsoft sources: `source` on a server with sign-in, else `everyone`. */
+  defaultVisibility?: Visibility
   /** On a server in the cloud: sign-ins come back to <public-url>/connectors/callback instead of a loopback port. */
   web?: WebCallback
 }
@@ -73,7 +89,42 @@ export class ConnectorManager {
   }
 
   list() {
-    return this.state.map(({ files, cursor: _c, ...c }) => ({ ...c, fileCount: Object.keys(files).length, filesDir: this.filesDir(c.id) }))
+    return this.state.map(({ files, cursor: _c, recheckAccess: _r, ...c }) => ({ ...c, visibility: c.visibility ?? 'everyone', fileCount: Object.keys(files).length, filesDir: this.filesDir(c.id) }))
+  }
+
+  private localPath(c: ConnectorInfo, remoteId: string, name: string): string {
+    return join(this.filesDir(c.id), remoteId.replace(/[^\w.-]/g, '_'), safeFileName(name))
+  }
+
+  /** Who may see one of a source's files, by the source's visibility (null: everyone). */
+  private principalsFor(c: ConnectorInfo, sourceAccess: string[] | null | undefined): string[] | null {
+    const v = c.visibility ?? 'everyone'
+    if (v === 'everyone') return null
+    if (v === 'custom') return c.allow ?? []
+    // Unknown sharing stays with the person who connected the source: fail closed.
+    return [...(sourceAccess ?? []), ...(c.owner ? [`user:${c.owner}`] : [])]
+  }
+
+  private applyAccess(c: ConnectorInfo, remoteId: string): void {
+    const f = c.files[remoteId]
+    if (f) this.duct.setDocumentAccess(this.localPath(c, remoteId, f.name), this.principalsFor(c, f.access))
+  }
+
+  /** Changes who sees a source's files; applied to what's already indexed at once. */
+  async setVisibility(id: string, visibility: Visibility, allow: string[] = []): Promise<void> {
+    const c = this.state.find(x => x.id === id)
+    if (!c) throw Object.assign(new Error('No such source'), { status: 404 })
+    c.visibility = visibility
+    c.allow = visibility === 'custom' ? [...new Set(allow)] : undefined
+    for (const remoteId of Object.keys(c.files)) this.applyAccess(c, remoteId)
+    // Files whose sharing hasn't been read yet are read on the next sync (until then: the owner only).
+    if (visibility === 'source' && Object.values(c.files).some(f => f.access === undefined)) {
+      c.recheckAccess = true
+      if (c.kind === 'gdrive') c.cursor = null   // a full listing carries every file's sharing
+    }
+    this.persist()
+    this.opts.onChange?.()
+    if (c.recheckAccess) this.sync(id).catch(() => {})
   }
 
   private filesDir(id: string) { return join(this.opts.dir, id, 'files') }
@@ -98,13 +149,17 @@ export class ConnectorManager {
     const all = this.opts.vault.load()
     all[id] = tokens
     this.opts.vault.save(all)
-    const info: ConnectorInfo = { id, kind, label: kind === 'gdrive' ? 'Google Drive' : kind === 's3' ? 'S3' : 'Microsoft 365', cursor: null, files: {}, addedAt: new Date().toISOString() }
+    // S3 has no per-file sharing to follow; its files are for everyone until an admin says otherwise.
+    const visibility: Visibility = kind === 's3' ? 'everyone' : this.opts.defaultVisibility ?? 'everyone'
+    const info: ConnectorInfo = { id, kind, label: kind === 'gdrive' ? 'Google Drive' : kind === 's3' ? 'S3' : 'Microsoft 365', visibility, cursor: null, files: {}, addedAt: new Date().toISOString() }
     try {
       const src = this.source(info)
       if (kind === 'microsoft' && options.siteUrl) info.drive = await (src as MicrosoftDrive).resolveSite(options.siteUrl)
       // S3: check the credentials and bucket now, with one listing.
       if (kind === 's3') await src.changes(null)
       info.label = await this.source(info).label()
+      const email = /[^\s()<>]+@[^\s()<>]+\.[^\s()<>]+/.exec(info.label)?.[0]
+      if (email) info.owner = email.toLowerCase()
     } catch (err) {
       delete all[id]
       this.opts.vault.save(all)
@@ -142,9 +197,18 @@ export class ConnectorManager {
       }
       for (const remoteId of changes.removed) await this.removeFile(c, remoteId)
       for (const f of changes.upserts) {
-        if (c.files[f.id]?.version === f.version) continue
+        const known = c.files[f.id]
+        if (known?.version === f.version) {
+          // Unchanged content, but sharing can change on its own: keep the access list current.
+          if ((c.visibility ?? 'everyone') === 'source') {
+            const access = f.access ?? (c.recheckAccess && known.access === undefined && src.access ? await src.access(f) : known.access)
+            if (JSON.stringify(access) !== JSON.stringify(known.access)) { known.access = access; this.applyAccess(c, f.id) }
+          }
+          continue
+        }
         try { await this.fetchFile(c, src, f) } catch (err) { c.error = `Some files couldn’t be read: ${(err as Error).message}` }
       }
+      if (c.recheckAccess && (c.kind !== 'gdrive' || changes.full)) delete c.recheckAccess
       c.cursor = changes.cursor
       c.lastSync = new Date().toISOString()
     } catch (err) {
@@ -169,8 +233,11 @@ export class ConnectorManager {
     mkdirSync(dir, { recursive: true })
     const path = join(dir, safeFileName(f.name))
     writeFileSync(path, bytes)
+    // Who may see it is set before it's indexed, so it's never briefly visible to everyone.
+    const access = (c.visibility ?? 'everyone') === 'source' ? (f.access ?? (src.access ? await src.access(f) : null)) : undefined
+    this.duct.setDocumentAccess(path, this.principalsFor(c, access))
     await this.duct.index(path, { connector: c.kind, connectorId: c.id, remoteId: f.id, ...(f.webUrl ? { webUrl: f.webUrl } : {}) }, { source: 'connector', displayName: f.name })
-    c.files[f.id] = { version: f.version, name: f.name }
+    c.files[f.id] = { version: f.version, name: f.name, ...(access !== undefined ? { access } : {}) }
   }
 
   private async removeFile(c: ConnectorInfo, remoteId: string): Promise<void> {

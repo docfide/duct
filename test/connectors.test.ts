@@ -6,7 +6,7 @@ import { Duct } from '../src/index.js'
 import { ConnectorManager } from '../src/connectors/manager.js'
 import type { TokenVault } from '../src/connectors/manager.js'
 import type { S3Credentials, Tokens } from '../src/connectors/sources.js'
-import { signS3Get } from '../src/connectors/sources.js'
+import { drivePrincipals, signS3Get } from '../src/connectors/sources.js'
 import { createServer, s3Details } from '../src/server.js'
 import { WebCallback } from '../src/connectors/oauth.js'
 import { makeDocx } from './helpers.js'
@@ -32,13 +32,13 @@ const browser = async (url: string) => {
 
 // ---------- a fake Google Drive ----------
 
-let drive: Record<string, { name: string; mimeType: string; md5?: string; body?: string | Buffer; trashed?: boolean }>
+let drive: Record<string, { name: string; mimeType: string; md5?: string; body?: string | Buffer; trashed?: boolean; perms?: { type: string; emailAddress?: string; domain?: string; allowFileDiscovery?: boolean }[] }>
 let driveChanges: { fileId: string; removed?: boolean }[]
 let tokenCalls: URLSearchParams[]
 let expireNext = false
 
 const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { 'Content-Type': 'application/json' } })
-const meta = (id: string) => { const f = drive[id]; return { id, name: f.name, mimeType: f.mimeType, modifiedTime: '2026-10-01T00:00:00Z', md5Checksum: f.md5, trashed: f.trashed, webViewLink: `https://drive.google.com/file/d/${id}/view` } }
+const meta = (id: string) => { const f = drive[id]; return { id, name: f.name, mimeType: f.mimeType, modifiedTime: '2026-10-01T00:00:00Z', md5Checksum: f.md5, trashed: f.trashed, webViewLink: `https://drive.google.com/file/d/${id}/view`, ...(f.perms ? { permissions: f.perms } : {}) } }
 
 const googleFetch = (async (input: string | URL | Request, init?: RequestInit) => {
   const url = new URL(String(input))
@@ -137,6 +137,34 @@ describe('Google Drive', () => {
       expect(m.list()[0].label).toBe('ada@okafor.ng')
       expect(tokenCalls[0].get('redirect_uri')).toBe('https://duct.okafor.ng/connectors/callback')
     } finally { server.close() }
+  })
+
+  it('on a server, follows each file\'s sharing: people and discoverable domains count, links don\'t', async () => {
+    const m = new ConnectorManager(duct, { dir: mkdtempSync(join(work, 'p-')), vault, clientIds: { google: { clientId: 'gid', clientSecret: 'gsecret' } }, openUrl: browser, fetch: googleFetch, entitled: () => true, defaultVisibility: 'source' })
+    drive.a.perms = [{ type: 'user', emailAddress: 'Chidi@okafor.ng' }, { type: 'anyone', allowFileDiscovery: false }]
+    drive.b.perms = [{ type: 'domain', domain: 'okafor.ng', allowFileDiscovery: true }]
+    const c = await m.add('gdrive')
+    expect(c).toMatchObject({ visibility: 'source', owner: 'ada@okafor.ng' })
+    await m.sync(c.id)
+    const pathOf = (name: string) => duct.getDocuments().find(d => d.displayName === name)!.path
+    expect(duct.documentAccess(pathOf('Board minutes.txt'))).toEqual(['user:ada@okafor.ng', 'user:chidi@okafor.ng'])
+    expect(duct.documentAccess(pathOf('Leave policy.docx'))).toEqual(['domain:okafor.ng', 'user:ada@okafor.ng'])
+    expect((await duct.search('lease', 5, undefined, { viewer: ['user:bello@other.com', 'domain:other.com', 'anyone'] })).length).toBe(0)
+    expect((await duct.search('lease', 5, undefined, { viewer: ['user:chidi@okafor.ng', 'domain:okafor.ng', 'anyone'] })).length).toBe(1)
+
+    // Sharing changed at the source, content didn't: the access list follows.
+    drive.a.perms = [{ type: 'user', emailAddress: 'bello@other.com' }]
+    driveChanges = [{ fileId: 'a' }]
+    await m.sync(c.id)
+    expect(duct.documentAccess(pathOf('Board minutes.txt'))).toEqual(['user:ada@okafor.ng', 'user:bello@other.com'])
+
+    await m.setVisibility(c.id, 'everyone')
+    expect(duct.documentAccess(pathOf('Board minutes.txt'))).toBeNull()
+    await m.setVisibility(c.id, 'custom', ['domain:okafor.ng'])
+    expect(duct.documentAccess(pathOf('Leave policy.docx'))).toEqual(['domain:okafor.ng'])
+    // Re-indexing keeps the list.
+    await duct.index(pathOf('Leave policy.docx'), undefined, { force: true })
+    expect(duct.documentAccess(pathOf('Leave policy.docx'))).toEqual(['domain:okafor.ng'])
   })
 
   it('is a Team feature', async () => {
@@ -263,5 +291,35 @@ describe('S3 and S3-compatible storage', () => {
     expect(() => s3Details({ bucket: 'docs', accessKeyId: 'a', secretAccessKey: 'b', endpoint: 'http://minio.example.com' })).toThrow(/https/)
     expect(() => s3Details({ bucket: 'Bad_Bucket', accessKeyId: 'a', secretAccessKey: 'b' })).toThrow(/bucket/)
     expect(s3Details({ bucket: 'docs', accessKeyId: 'a', secretAccessKey: 'b', prefix: '/contracts/' })).toEqual({ bucket: 'docs', region: 'us-east-1', accessKeyId: 'a', secretAccessKey: 'b', prefix: 'contracts/' })
+  })
+})
+
+describe('sharing at the source', () => {
+  it('reads Drive permissions without letting links make files public', () => {
+    expect(drivePrincipals(undefined)).toBeUndefined()
+    expect(drivePrincipals([
+      { type: 'user', emailAddress: 'Ada@Okafor.ng' },
+      { type: 'group', emailAddress: 'legal@okafor.ng' },
+      { type: 'domain', domain: 'okafor.ng', allowFileDiscovery: false },
+      { type: 'anyone', allowFileDiscovery: false },
+    ])).toEqual(['user:ada@okafor.ng', 'group:legal@okafor.ng'])
+    expect(drivePrincipals([{ type: 'anyone', allowFileDiscovery: true }])).toEqual(['anyone'])
+  })
+
+  it('reads Microsoft permissions: people named in them; links and site groups don\'t count', async () => {
+    const fetchImpl = (async (input: string | URL | Request) => {
+      const url = String(input)
+      if (url.endsWith('/items/42/permissions')) return json({ value: [
+        { grantedToV2: { user: { email: 'Ada@okafor.ng' } } },
+        { link: { scope: 'organization' }, grantedToIdentitiesV2: [] },
+        { link: { scope: 'users' }, grantedToIdentitiesV2: [{ user: { email: 'chidi@okafor.ng' } }] },
+        { grantedToV2: { siteGroup: { displayName: 'Legal Members' } } },
+      ] })
+      return json({}, 404)
+    }) as typeof fetch
+    const { MicrosoftDrive } = await import('../src/connectors/sources.js')
+    const src = new MicrosoftDrive({ access: 't', expiresAt: Date.now() + 3600_000 }, { clientId: 'mid' }, { fetch: fetchImpl, saveTokens: () => {} })
+    expect(await src.access({ id: '42', name: 'x.txt', modified: '', version: '1' })).toEqual(['user:ada@okafor.ng', 'user:chidi@okafor.ng'])
+    expect(await src.access({ id: '43', name: 'y.txt', modified: '', version: '1' })).toBeNull()
   })
 })

@@ -24,6 +24,8 @@ export interface RemoteFile {
   version: string
   /** Google Docs, Sheets and Slides: the format they're exported as. */
   exportMime?: string
+  /** Who the file is shared with at the source, as principals (src/access.ts), when the listing says. */
+  access?: string[]
 }
 
 export interface Changes {
@@ -46,6 +48,8 @@ export interface ConnectorSource {
   /** Everything (cursor null) or what changed since the cursor. */
   changes(cursor: string | null): Promise<Changes>
   download(file: RemoteFile): Promise<Buffer>
+  /** Who the file is shared with, for sources whose listings don't say (Microsoft). Null when it can't be read. */
+  access?(file: RemoteFile): Promise<string[] | null>
 }
 
 export interface ClientIds {
@@ -115,12 +119,31 @@ abstract class OAuthSource {
 
 // ---------------------------------------------------------------- Google Drive
 
-interface DriveFile { id: string; name: string; mimeType: string; modifiedTime: string; size?: string; webViewLink?: string; md5Checksum?: string; trashed?: boolean }
+interface DriveFile {
+  id: string; name: string; mimeType: string; modifiedTime: string; size?: string; webViewLink?: string; md5Checksum?: string; trashed?: boolean
+  /** Only listed when the connected account can see the file's sharing (not for shared drives). */
+  permissions?: { type: 'user' | 'group' | 'domain' | 'anyone'; emailAddress?: string; domain?: string; allowFileDiscovery?: boolean }[]
+}
+
+/**
+ * A Drive file's sharing as principals. People and groups count; a domain or "anyone" counts only when the file
+ * is discoverable there, not when it's shared by link (a link alone shouldn't make a file searchable by everyone).
+ */
+export function drivePrincipals(perms: DriveFile['permissions']): string[] | undefined {
+  if (!perms) return undefined
+  const out: string[] = []
+  for (const p of perms) {
+    if ((p.type === 'user' || p.type === 'group') && p.emailAddress) out.push(`${p.type}:${p.emailAddress.toLowerCase()}`)
+    else if (p.type === 'domain' && p.domain && p.allowFileDiscovery) out.push(`domain:${p.domain.toLowerCase()}`)
+    else if (p.type === 'anyone' && p.allowFileDiscovery) out.push('anyone')
+  }
+  return out
+}
 
 export class GoogleDrive extends OAuthSource implements ConnectorSource {
   readonly kind = 'gdrive' as const
   private static API = 'https://www.googleapis.com/drive/v3'
-  private static FIELDS = 'id,name,mimeType,modifiedTime,size,webViewLink,md5Checksum,trashed'
+  private static FIELDS = 'id,name,mimeType,modifiedTime,size,webViewLink,md5Checksum,trashed,permissions(type,emailAddress,domain,allowFileDiscovery)'
 
   constructor(tokens: Tokens, private ids: ClientIds['google'], ctx: SourceContext) { super(tokens, ctx) }
 
@@ -141,7 +164,8 @@ export class GoogleDrive extends OAuthSource implements ConnectorSource {
     if (f.mimeType.startsWith('application/vnd.google-apps.') && !exp) return null
     const name = exp && extname(f.name).toLowerCase() !== exp.ext ? f.name + exp.ext : f.name
     if (!isSupportedFile(name)) return null
-    return { id: f.id, name, modified: f.modifiedTime, size: f.size ? Number(f.size) : undefined, webUrl: f.webViewLink, version: f.md5Checksum ?? f.modifiedTime, ...(exp ? { exportMime: exp.mime } : {}) }
+    const access = drivePrincipals(f.permissions)
+    return { id: f.id, name, modified: f.modifiedTime, size: f.size ? Number(f.size) : undefined, webUrl: f.webViewLink, version: f.md5Checksum ?? f.modifiedTime, ...(exp ? { exportMime: exp.mime } : {}), ...(access ? { access } : {}) }
   }
 
   async changes(cursor: string | null): Promise<Changes> {
@@ -188,6 +212,9 @@ export class GoogleDrive extends OAuthSource implements ConnectorSource {
 // ---------------------------------------------------------------- Microsoft OneDrive and SharePoint
 
 interface GraphItem { id: string; name?: string; file?: { mimeType?: string }; folder?: unknown; deleted?: unknown; size?: number; lastModifiedDateTime?: string; webUrl?: string; cTag?: string; eTag?: string }
+
+interface GraphIdentity { user?: { email?: string }; group?: { email?: string } }
+interface GraphPermission { grantedToV2?: GraphIdentity; grantedTo?: GraphIdentity; grantedToIdentitiesV2?: GraphIdentity[]; grantedToIdentities?: GraphIdentity[]; link?: { scope?: string } }
 
 export class MicrosoftDrive extends OAuthSource implements ConnectorSource {
   readonly kind = 'microsoft' as const
@@ -241,6 +268,29 @@ export class MicrosoftDrive extends OAuthSource implements ConnectorSource {
 
   protected downloadUrl(file: RemoteFile): string {
     return `${MicrosoftDrive.API}${this.drive}/items/${encodeURIComponent(file.id)}/content`
+  }
+
+  /**
+   * Who an item is shared with: people (and Microsoft 365 groups) named in its permissions. Sharing links
+   * ("people in your organisation with the link", "anyone with the link") don't count, and neither do
+   * SharePoint site groups, whose members Duct can't see; those files stay with the person who connected them.
+   */
+  async access(file: RemoteFile): Promise<string[] | null> {
+    try {
+      const r = await this.json<{ value: GraphPermission[] }>(`${MicrosoftDrive.API}${this.drive}/items/${encodeURIComponent(file.id)}/permissions`)
+      const out: string[] = []
+      for (const p of r.value) {
+        for (const id of [p.grantedToV2, p.grantedTo, ...(p.grantedToIdentitiesV2 ?? []), ...(p.grantedToIdentities ?? [])]) {
+          const email = id?.user?.email
+          if (email) out.push(`user:${email.toLowerCase()}`)
+          const group = id?.group?.email
+          if (group) out.push(`group:${group.toLowerCase()}`)
+        }
+      }
+      return [...new Set(out)]
+    } catch {
+      return null
+    }
   }
 }
 

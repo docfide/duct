@@ -96,6 +96,11 @@ export interface SearchScope {
   /** Only documents last modified at or after / before these times (ms since epoch). */
   modifiedAfter?: number
   modifiedBefore?: number
+  /**
+   * Who is searching, on a shared server: their principals ("user:ada@okafor.ng", "domain:okafor.ng", "anyone").
+   * Documents with an access list they aren't on are left out. Unset: no restriction.
+   */
+  viewer?: string[]
 }
 
 export interface SearchResult {

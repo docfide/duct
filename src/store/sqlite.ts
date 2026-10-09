@@ -173,6 +173,12 @@ function filterClause(filter: Record<string, unknown> | undefined, scope?: Searc
     sql += ' AND coalesce(d.mtime_ms, d.indexed_at) < ?'
     params.push(scope.modifiedBefore)
   }
+  // Permission-aware search: a document with an access list is only seen by the people on it.
+  if (scope?.viewer) {
+    const v = viewerClause(scope.viewer)
+    sql += v.sql
+    params.push(...v.params)
+  }
   if (!filter) return { sql, params }
   for (const [key, value] of Object.entries(filter)) {
     if (/["\\]/.test(key)) return null
@@ -185,6 +191,16 @@ function filterClause(filter: Record<string, unknown> | undefined, scope?: Searc
     params.push(bound)
   }
   return { sql, params }
+}
+
+/** Documents (alias d) the viewer may see: no access list, or one that names them, their domain or anyone. */
+function viewerClause(viewer: string[] | undefined): { sql: string; params: string[] } {
+  if (!viewer) return { sql: '', params: [] }
+  if (viewer.length === 0) return { sql: ' AND NOT EXISTS (SELECT 1 FROM access a WHERE a.path = d.path)', params: [] }
+  return {
+    sql: ` AND (NOT EXISTS (SELECT 1 FROM access a WHERE a.path = d.path) OR EXISTS (SELECT 1 FROM access a, json_each(a.principals) j WHERE a.path = d.path AND j.value IN (${viewer.map(() => '?').join(', ')})))`,
+    params: viewer,
+  }
 }
 
 /** The matched words in a snippet (between \u0002 and \u0003), in order, without repeats. */
@@ -255,6 +271,9 @@ export class SqliteStore {
         chunk_metadata TEXT NOT NULL DEFAULT '{}'
       );
       CREATE INDEX IF NOT EXISTS documents_hash ON documents(content_hash);
+      -- Who may see a document on a shared server (src/access.ts); no row: everyone. Keyed by path, like tags, so
+      -- it survives re-indexing.
+      CREATE TABLE IF NOT EXISTS access (path TEXT PRIMARY KEY, principals TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS chunks (
         id INTEGER PRIMARY KEY,
         uid TEXT NOT NULL UNIQUE,
@@ -419,13 +438,14 @@ export class SqliteStore {
     const { changes } = this.db.prepare('DELETE FROM documents WHERE path = ?').run(path)
     this.db.prepare('DELETE FROM versions WHERE path = ?').run(path)
     this.db.prepare('DELETE FROM tags WHERE path = ?').run(path)
+    this.db.prepare('DELETE FROM access WHERE path = ?').run(path)
     this.changed()
     return Number(changes) > 0
   }
 
   clear(): void {
     this.transaction(() => {
-      this.db.exec('DELETE FROM documents; DELETE FROM versions; DELETE FROM tags;')
+      this.db.exec('DELETE FROM documents; DELETE FROM versions; DELETE FROM tags; DELETE FROM access;')
     })
     this.changed()
   }
@@ -632,37 +652,66 @@ export class SqliteStore {
     return [...merged.values()].sort((a, b) => b.score - a.score).slice(0, limit)
   }
 
+  // ---------- access lists (permission-aware team search) ----------
+
+  /** Sets who may see a document (principals), or clears the list (`null`: everyone). Kept across re-indexing. */
+  setAccess(path: string, principals: string[] | null): void {
+    if (principals === null) this.db.prepare('DELETE FROM access WHERE path = ?').run(path)
+    else this.db.prepare('INSERT INTO access (path, principals) VALUES (?, ?) ON CONFLICT(path) DO UPDATE SET principals = excluded.principals').run(path, JSON.stringify([...new Set(principals)].sort()))
+    this.changed()
+  }
+
+  getAccess(path: string): string[] | null {
+    const row = this.db.prepare('SELECT principals FROM access WHERE path = ?').get(path) as { principals: string } | undefined
+    return row ? JSON.parse(row.principals) as string[] : null
+  }
+
+  /** Readable documents the viewer may see. */
+  countReadable(viewer?: string[]): number {
+    const v = viewerClause(viewer)
+    return (this.db.prepare(`SELECT count(*) AS n FROM documents d WHERE d.status = 'indexed'${v.sql}`).get(...v.params) as { n: number }).n
+  }
+
+  /** Paths of documents the viewer may not see. */
+  hiddenPaths(viewer: string[]): Set<string> {
+    const rows = this.db.prepare('SELECT path, principals FROM access').all() as { path: string; principals: string }[]
+    return new Set(rows.filter(r => !(JSON.parse(r.principals) as string[]).some(p => viewer.includes(p))).map(r => r.path))
+  }
+
   // ---------- the deadlines radar ----------
 
   /** Passages that mention expiry, due dates or renewals, for `Duct.deadlines` to read dates from. */
-  deadlineCandidates(limit: number): { path: string; name: string; format: string; page: number | null; heading: string | null; content: string }[] {
+  deadlineCandidates(limit: number, viewer?: string[]): { path: string; name: string; format: string; page: number | null; heading: string | null; content: string }[] {
+    const v = viewerClause(viewer)
     return this.db.prepare(`
       SELECT d.path, d.display_name AS name, d.format, c.page, c.heading, c.content
       FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid JOIN documents d ON d.id = c.document_id
-      WHERE chunks_fts MATCH ? AND d.status = 'indexed'
+      WHERE chunks_fts MATCH ? AND d.status = 'indexed'${v.sql}
       LIMIT ?
     `).all(// The index holds Porter stems, so prefixes are stems too ("termin*" for terminates, "laps*" for lapses).
-      'expir* OR due OR deadlin* OR renew* OR payabl* OR termin* OR laps* OR "valid until" OR "no later than" OR "on or before" OR "closing date"', limit) as { path: string; name: string; format: string; page: number | null; heading: string | null; content: string }[]
+      'expir* OR due OR deadlin* OR renew* OR payabl* OR termin* OR laps* OR "valid until" OR "no later than" OR "on or before" OR "closing date"', ...v.params, limit) as { path: string; name: string; format: string; page: number | null; heading: string | null; content: string }[]
   }
 
   // ---------- a first look at the library ----------
 
   /** Each readable document's name, format and opening text, newest first (for `Duct.discover`). */
-  openings(limit: number): { name: string; format: string; text: string }[] {
+  openings(limit: number, viewer?: string[]): { name: string; format: string; text: string }[] {
+    const v = viewerClause(viewer)
     return this.db.prepare(`
       SELECT d.display_name AS name, d.format AS format, substr(c.content, 1, 2500) AS text
       FROM documents d JOIN chunks c ON c.document_id = d.id AND c.idx = (SELECT min(idx) FROM chunks WHERE document_id = d.id)
-      WHERE d.status = 'indexed' ORDER BY d.indexed_at DESC LIMIT ?
-    `).all(limit) as { name: string; format: string; text: string }[]
+      WHERE d.status = 'indexed'${v.sql} ORDER BY d.indexed_at DESC LIMIT ?
+    `).all(...v.params, limit) as { name: string; format: string; text: string }[]
   }
 
   // ---------- when a search finds nothing ----------
 
   /** How much of the library is searchable, and what isn't (for an empty search). */
-  coverage(): { documents: number; needsOcr: number; failed: number; passwordProtected: number } {
-    const rows = this.db.prepare('SELECT status, count(*) AS n FROM documents GROUP BY status').all() as { status: string; n: number }[]
+  coverage(viewer?: string[]): { documents: number; needsOcr: number; failed: number; passwordProtected: number } {
+    const v = viewerClause(viewer)
+    const rows = this.db.prepare(`SELECT d.status, count(*) AS n FROM documents d WHERE 1 = 1${v.sql} GROUP BY d.status`).all(...v.params) as { status: string; n: number }[]
     const n = (status: string) => rows.find(r => r.status === status)?.n ?? 0
-    const locked = this.db.prepare("SELECT count(*) AS n FROM documents WHERE status = 'failed' AND (lower(error) LIKE '%password%' OR lower(error) LIKE '%encrypt%')").get() as { n: number }
+    const locked = this.db.prepare(`SELECT count(*) AS n FROM documents d WHERE d.status = 'failed' AND (lower(d.error) LIKE '%password%' OR lower(d.error) LIKE '%encrypt%')${v.sql}`).get(...v.params) as { n: number }
     return { documents: n('indexed'), needsOcr: n('no-text'), failed: n('failed'), passwordProtected: locked.n }
   }
 

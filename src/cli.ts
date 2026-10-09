@@ -629,6 +629,8 @@ program
         openUrl: url => { console.log(`\n  Opening sign-in for a cloud source. If it doesn't open, visit:\n  ${chalk.cyan(url)}\n`); openBrowser(url) },
         entitled: () => account.has('team.connectors'),
         ...(publicUrl ? { web: new WebCallback(publicUrl) } : {}),
+        // With sign-in, results from Drive and SharePoint follow each file's sharing by default.
+        ...(oidc ? { defaultVisibility: 'source' as const } : {}),
       })
       connectors.start()
       const server = createServer(duct, {

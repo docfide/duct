@@ -1389,11 +1389,38 @@ async function renderConnectors() {
     state.connectors.map(x => '<div class="kv connector-row"><span><strong>' + esc(x.label) + '</strong><br><small class="hint">' +
       (x.syncing ? 'Reading…' : esc(plural(x.fileCount, 'file')) + (x.lastSync ? ' · updated ' + esc(timeAgo(Date.parse(x.lastSync))) : '')) +
       (x.error ? ' · <span class="warn">' + esc(x.error) + '</span>' : '') + '</small></span>' +
-      (isAdmin() ? '<span class="row-actions"><button class="btn btn-sm" data-action="sync-source" data-id="' + esc(x.id) + '">Sync now</button><button class="btn btn-sm btn-danger" data-action="disconnect-source" data-id="' + esc(x.id) + '">Disconnect</button></span>' : '') + '</div>').join('')
+      (isAdmin() ? '<span class="row-actions"><button class="btn btn-sm" data-action="sync-source" data-id="' + esc(x.id) + '">Sync now</button><button class="btn btn-sm btn-danger" data-action="disconnect-source" data-id="' + esc(x.id) + '">Disconnect</button></span>' : '') + '</div>' +
+      (isAdmin() && state.shared ? visibilityRow(x) : '')).join('')
   if (busy && $('#settings').open) connectorPoll = setTimeout(renderConnectors, 2000)
   if (connectorsBusy && !busy) refreshAll()   // a sync just finished: new documents to show
   connectorsBusy = busy
 }
+
+// Who sees a source's results on a shared server.
+const SOURCE_NAME = { gdrive: 'Google Drive', microsoft: 'Microsoft 365', s3: 'S3' }
+function visibilityRow(x) {
+  const opt = (v, label) => '<option value="' + v + '"' + (x.visibility === v ? ' selected' : '') + '>' + esc(label) + '</option>'
+  const allow = (x.allow || []).map(p => p.replace(/^(user|domain):/, '')).join(', ')
+  return '<form class="visibility-row" data-visibility="' + esc(x.id) + '"><label>Who sees these results <select name="visibility">' +
+    (x.kind === 's3' ? '' : opt('source', 'Whoever it’s shared with in ' + SOURCE_NAME[x.kind])) + opt('everyone', 'Everyone on this server') + opt('custom', 'Only these people and domains') + '</select></label>' +
+    '<input name="allow" placeholder="ada@okafor.ng, okafor.ng" value="' + esc(allow) + '"' + (x.visibility === 'custom' ? '' : ' hidden') + ' aria-label="Email addresses and domains">' +
+    '<button class="btn btn-sm" type="submit">Save</button>' +
+    (x.visibility === 'source' ? '<small class="hint">Files shared only by link, or through SharePoint site groups, stay visible to ' + esc(x.owner || 'the person who connected it') + ' alone.</small>' : '') + '</form>'
+}
+
+document.addEventListener('change', e => {
+  const sel = e.target.closest('.visibility-row select')
+  if (sel) sel.form.allow.hidden = sel.value !== 'custom'
+})
+document.addEventListener('submit', async e => {
+  const form = e.target.closest('.visibility-row')
+  if (!form) return
+  e.preventDefault()
+  const visibility = form.visibility.value
+  const allow = visibility === 'custom' ? form.allow.value.split(/[,\s]+/).filter(Boolean) : []
+  try { await send('PUT', '/api/connectors/' + encodeURIComponent(form.dataset.visibility) + '/visibility', { visibility, allow }); toast('Saved: results follow the new setting') } catch (err) { toast(err.message, true) }
+  renderConnectors()
+})
 
 $('#sharepointForm').addEventListener('submit', async e => {
   e.preventDefault()
@@ -1740,6 +1767,7 @@ async function start() {
   if (!isAdmin()) $$('[data-admin]').forEach(el => { el.hidden = true })
   $('#askSetup').hidden = state.config.llmProvider !== 'none'
   json('/api/me').then(me => {
+    state.shared = !!me.auth   // a server other people use: who sees what matters
     if (!me.user) return
     $('#signedInAs').hidden = false
     $('#signedInEmail').textContent = me.user

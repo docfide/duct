@@ -18,6 +18,7 @@ import { SimpleReranker, NoopReranker } from './search/reranker.js'
 import { createLLMProvider, OpenAILLM, GeminiLLM } from './qa/provider.js'
 import { createEmbedder } from './embed/factory.js'
 import { recurringNames, summarizeKinds, triesFor } from './discover.js'
+import { canSee } from './access.js'
 import { excerpt as deadlineExcerpt, findDeadlines, radarFrom } from './deadlines.js'
 import type { Deadline, Radar } from './deadlines.js'
 import type { Discovery } from './discover.js'
@@ -719,15 +720,36 @@ export class Duct {
     return results.slice(0, topK)
   }
 
+  // ---------- who may see what (permission-aware team search) ----------
+
+  /** Sets who may see a document on a shared server (principals, see src/access.ts), or `null` for everyone. */
+  setDocumentAccess(path: string, principals: string[] | null): void {
+    this.store.setAccess(path, principals)
+  }
+
+  documentAccess(path: string): string[] | null {
+    return this.store.getAccess(path)
+  }
+
+  /** Whether `viewer` (undefined: no restriction) may see this document. */
+  canView(path: string, viewer: string[] | undefined): boolean {
+    return canSee(this.store.getAccess(path), viewer)
+  }
+
+  /** Paths `viewer` may not see, to filter lists with. */
+  hiddenFrom(viewer: string[] | undefined): Set<string> {
+    return viewer ? this.store.hiddenPaths(viewer) : new Set()
+  }
+
   /**
    * The deadlines radar: dates in documents that something expires, is due or renews on, read from the words
    * next to each date on this computer. Grouped into recently passed (last `pastDays`), the next 30 days, and
    * later (up to `days` ahead).
    */
-  deadlines(options: { days?: number; pastDays?: number; now?: Date } = {}): Radar {
+  deadlines(options: { days?: number; pastDays?: number; now?: Date; viewer?: string[] } = {}): Radar {
     this.requireFeature('deadlines')
     const items: Deadline[] = []
-    for (const c of this.store.deadlineCandidates(20_000)) {
+    for (const c of this.store.deadlineCandidates(20_000, options.viewer)) {
       for (const f of findDeadlines(c.content)) {
         items.push({ path: c.path, name: c.name, format: c.format, ...(c.page != null ? { page: c.page } : {}), ...(c.heading ? { heading: c.heading } : {}), date: f.date, kind: f.kind, text: deadlineExcerpt(c.content, f) })
       }
@@ -739,8 +761,8 @@ export class Duct {
    * A first look at the library: how many invoices, contracts, CVs… (from names and opening text, on this
    * computer), and a few searches that find something in it. Looks at the newest 5,000 documents.
    */
-  async discover(): Promise<Discovery> {
-    const docs = this.store.openings(5000)
+  async discover(viewer?: string[]): Promise<Discovery> {
+    const docs = this.store.openings(5000, viewer)
     const kinds = summarizeKinds(docs)
     // Alternate a search for the kind of document with a name from the person's own files.
     const tries = triesFor(kinds)
@@ -749,9 +771,9 @@ export class Duct {
     const suggestions: string[] = []
     for (const q of candidates) {
       if (suggestions.length >= 4) break
-      if ((await this.search(q, 1)).length > 0) suggestions.push(q)
+      if ((await this.search(q, 1, undefined, viewer ? { viewer } : undefined)).length > 0) suggestions.push(q)
     }
-    return { documents: this.store.coverage().documents, kinds: kinds.slice(0, 6), suggestions }
+    return { documents: viewer ? this.store.countReadable(viewer) : this.store.coverage().documents, kinds: kinds.slice(0, 6), suggestions }
   }
 
   /**
@@ -759,9 +781,11 @@ export class Duct {
    * unreadable files, files still being read), whether the filters hid results, and a spelling suggestion.
    */
   async searchHelp(query: string, filter?: Record<string, unknown>, scope?: SearchScope): Promise<SearchHelp> {
-    const coverage = this.store.coverage()
-    const filtered = (filter && Object.keys(filter).length > 0) || (scope && Object.keys(scope).length > 0)
-    const outsideFilters = filtered ? (await this.search(query, 100)).length : 0
+    const coverage = this.store.coverage(scope?.viewer)
+    // Who is searching isn't a filter they can clear: the "outside your filters" count keeps it.
+    const { viewer, ...rest } = scope ?? {}
+    const filtered = (filter && Object.keys(filter).length > 0) || Object.keys(rest).length > 0
+    const outsideFilters = filtered ? (await this.search(query, 100, undefined, viewer ? { viewer } : undefined)).length : 0
     const didYouMean = this.store.suggestSpelling(query)
     return {
       ...coverage,
@@ -771,7 +795,8 @@ export class Duct {
     }
   }
 
-  async ask(query: string, topK = 5): Promise<QAResult> {
+  /** `viewer`: on a shared server, answer only from documents this person may see. */
+  async ask(query: string, topK = 5, viewer?: string[]): Promise<QAResult> {
     this.requireFeature('ask')
     const start = Date.now()
 
@@ -786,7 +811,7 @@ export class Duct {
       } catch {}
     }
 
-    const searchResults = await this.search(hydeQuery, topK)
+    const searchResults = await this.search(hydeQuery, topK, undefined, viewer ? { viewer } : undefined)
     if (searchResults.length === 0) {
       return { answer: 'No relevant documents found.', sources: [], time: Date.now() - start }
     }
@@ -884,7 +909,7 @@ export class Duct {
     }
   }
 
-  async agenticSearch(query: string): Promise<QAResult> {
+  async agenticSearch(query: string, viewer?: string[]): Promise<QAResult> {
     this.requireFeature('ask')
     const start = Date.now()
     if (!this.llmProvider) {
@@ -906,7 +931,7 @@ Return ONLY a JSON array of strings, like: ["sub-question 1", "sub-question 2"]`
     const allResults: { q: string; results: SearchResult[] }[] = []
     const seen = new Set<string>()
     for (const sq of subQueries) {
-      const results = await this.search(sq, 3)
+      const results = await this.search(sq, 3, undefined, viewer ? { viewer } : undefined)
       allResults.push({ q: sq, results })
       for (const r of results) seen.add(r.chunk.id)
     }

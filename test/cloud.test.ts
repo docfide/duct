@@ -29,14 +29,17 @@ const idpFetch = (async (input: string | URL | Request, init?: RequestInit) => {
   return new Response('not found', { status: 404 })
 }) as typeof fetch
 
-async function start(audit: { queries?: boolean } = {}) {
-  const docs = mkdtempSync(join(tmpdir(), 'duct-cloud-'))
+let docs: string
+
+async function start(audit: { queries?: boolean } = {}, files: Record<string, string> = {}, tokens: { authToken?: string; memberTokens?: string[] } = {}) {
+  docs = mkdtempSync(join(tmpdir(), 'duct-cloud-'))
   mkdirSync(docs, { recursive: true })
   writeFileSync(join(docs, 'policy.txt'), 'The travel policy covers economy flights.')
+  for (const [name, text] of Object.entries(files)) writeFileSync(join(docs, name), text)
   duct = new Duct({ embed: false })
   await duct.index(docs)
   const oidc = new OidcLogin({ issuer: ISSUER, clientId: 'duct-server', clientSecret: 'secret', publicUrl: 'http://duct.test', admins: ['boss@okafor.ng'], allowDomains: ['okafor.ng'], allowEmails: ['auditor@external.com'], sessionSecret: 'x'.repeat(40) }, idpFetch)
-  server = createServer(duct, { oidc, allowedHosts: '*', audit, libraryDir: join(docs, 'lib') }).listen(0, '127.0.0.1')
+  server = createServer(duct, { oidc, allowedHosts: '*', audit, libraryDir: join(docs, 'lib'), ...tokens }).listen(0, '127.0.0.1')
   await new Promise(r => server.once('listening', r))
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
 }
@@ -110,5 +113,57 @@ describe('Duct in your cloud: audit log', () => {
     const member = await signIn('chidi@okafor.ng')
     await fetch(`${base}/api/search?q=travel`, { headers: { Cookie: member } })
     expect(duct.auditLog()[0]).toMatchObject({ action: 'search', detail: 'travel' })
+  })
+})
+
+describe('Duct in your cloud: results follow who may see each document', () => {
+  const FILES = {
+    'salaries.txt': 'Salary review: the payroll budget for 2027 rises by eight percent.',
+    'board.txt': 'Board minutes: the payroll freeze ends. The lease expires on 20 October 2026.',
+    'handbook.txt': 'Staff handbook: payroll is paid on the 25th.',
+  }
+  const get = (path: string, cookie: string) => fetch(`${base}${path}`, { headers: { Cookie: cookie } })
+  const names = async (path: string, cookie: string) => ((await (await get(path, cookie)).json()).results as { chunk: { documentPath: string } }[]).map(r => r.chunk.documentPath.split('/').pop()).sort()
+
+  it('searches, lists, opens and counts only what each person may see', async () => {
+    await start({}, FILES)
+    duct.setDocumentAccess(join(docs, 'salaries.txt'), ['user:boss@okafor.ng'])
+    duct.setDocumentAccess(join(docs, 'board.txt'), ['user:chidi@okafor.ng', 'user:boss@okafor.ng'])
+    duct.setDocumentAccess(join(docs, 'handbook.txt'), ['domain:okafor.ng'])
+    const boss = await signIn('boss@okafor.ng')
+    const chidi = await signIn('chidi@okafor.ng')
+    const ada = await signIn('ada@okafor.ng')
+    const auditor = await signIn('auditor@external.com')
+
+    expect(await names('/api/search?q=payroll', boss)).toEqual(['board.txt', 'handbook.txt', 'salaries.txt'])
+    expect(await names('/api/search?q=payroll', chidi)).toEqual(['board.txt', 'handbook.txt'])
+    expect(await names('/api/search?q=payroll', ada)).toEqual(['handbook.txt'])
+    expect(await names('/api/search?q=payroll', auditor)).toEqual([])
+    expect(await names('/api/search?q=travel', auditor)).toEqual(['policy.txt'])   // no access list: everyone
+
+    const listed = (await (await get('/api/documents', ada)).json()).documents.map((d: { path: string }) => d.path.split('/').pop()).sort()
+    expect(listed).toEqual(['handbook.txt', 'policy.txt'])
+    const salaries = encodeURIComponent(join(docs, 'salaries.txt'))
+    expect((await get(`/api/file?path=${salaries}`, ada)).status).toBe(404)
+    expect((await get(`/api/documents?path=${salaries}`, chidi)).status).toBe(404)
+    expect((await get(`/api/file?path=${salaries}`, boss)).status).toBe(200)
+    const exported = await fetch(`${base}/api/export`, { method: 'POST', headers: { Cookie: ada, 'Content-Type': 'application/json' }, body: JSON.stringify({ format: 'md', items: [{ path: join(docs, 'salaries.txt'), text: 'x' }] }) })
+    expect(exported.status).toBe(404)
+
+    const help = (await (await get('/api/search?q=zebra', ada)).json()).help
+    expect(help.documents).toBe(2)
+    const radar = await (await get('/api/deadlines?days=3650&pastDays=3650', ada)).json()
+    expect([...radar.passed, ...radar.soon, ...radar.later]).toEqual([])
+    const bossRadar = await (await get('/api/deadlines?days=3650&pastDays=3650', boss)).json()
+    expect([...bossRadar.passed, ...bossRadar.soon, ...bossRadar.later].map((d: { name: string }) => d.name)).toEqual(['board.txt'])
+  })
+
+  it('member tokens carry no identity, so they only see documents open to everyone; the admin token sees all', async () => {
+    await start({}, FILES, { authToken: 'admin-t', memberTokens: ['member-t'] })
+    duct.setDocumentAccess(join(docs, 'salaries.txt'), ['user:boss@okafor.ng'])
+    duct.setDocumentAccess(join(docs, 'handbook.txt'), ['anyone'])
+    const search = async (t: string) => ((await (await fetch(`${base}/api/search?q=payroll`, { headers: { Authorization: `Bearer ${t}` } })).json()).results as { chunk: { documentPath: string } }[]).map(r => r.chunk.documentPath.split('/').pop()).sort()
+    expect(await search('member-t')).toEqual(['board.txt', 'handbook.txt'])
+    expect(await search('admin-t')).toEqual(['board.txt', 'handbook.txt', 'salaries.txt'])
   })
 })

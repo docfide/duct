@@ -26,6 +26,7 @@ import type { S3Credentials } from './connectors/sources.js'
 import { callbackPage } from './connectors/oauth.js'
 import { currentLedger, LEDGER_CATEGORY_LABELS } from './ledger.js'
 import { importWhatsApp } from './whatsapp.js'
+import { parsePrincipal, principalsFor } from './access.js'
 import type { OidcLogin } from './oidc.js'
 import { clearCrashes, collectDiagnostics, listCrashes, sendFeedback, validateFeedback } from './diagnostics.js'
 import { Collections } from './api/collections.js'
@@ -327,6 +328,33 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
 
   app.use('/api/', auth)
 
+  // Permission-aware team search: on a server with sign-in or tokens, documents with an access list (cloud sources
+  // that follow their files' sharing) are only seen by the people on it. Anything addressed by path is checked
+  // here; searches and lists get the viewer in their scope.
+  const viewerOf = (res: express.Response): string[] | undefined => {
+    if (!token && !oidc) return undefined                  // this machine only: its user sees everything
+    const actor = String(res.locals.actor ?? '')
+    if (actor.includes('@')) return principalsFor(actor)    // signed in
+    if (res.locals.role === 'admin') return undefined       // the admin token
+    return principalsFor(undefined)                         // member tokens carry no identity: unrestricted documents only
+  }
+  app.use('/api/', (req, res, next) => {
+    const viewer = viewerOf(res)
+    res.locals.viewer = viewer
+    if (viewer) {
+      const items = Array.isArray(req.body?.items) ? (req.body.items as { path?: unknown }[]).map(i => i?.path) : []
+      for (const p of [req.query['path'], req.body?.path, ...items]) {
+        if (typeof p === 'string' && !duct.canView(p, viewer)) { res.status(404).json({ error: 'Document not found' }); return }
+      }
+    }
+    next()
+  })
+  const scopeFor = (req: express.Request, res: express.Response): SearchScope | undefined => {
+    const scope = scopeFrom(req.query)
+    const viewer = res.locals.viewer as string[] | undefined
+    return viewer ? { ...scope, viewer } : scope
+  }
+
   /** Answers 403 when a feature is switched off in Settings. */
   const needs = (name: FeatureName): express.RequestHandler => (_req, res, next) => {
     if (duct.getFeatures()[name]) next()
@@ -438,6 +466,22 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     connectors.add(kind, { siteUrl, ...(handOver ? { openUrl: handOver } : {}) }).then(() => { connecting = null }, err => { connecting = { kind, running: false, error: (err as Error).message }; handOver?.('') })
     if (!signInUrl) { res.status(202).json({ started: true }); return }
     signInUrl.then(url => url ? res.status(202).json({ started: true, url }) : res.status(400).json({ error: connecting?.error ?? 'Couldn’t start the sign-in' }))
+  })
+
+  // Who sees a source's files: { visibility: 'source' | 'everyone' | 'custom', allow?: ['ada@okafor.ng', 'okafor.ng'] }
+  app.put('/api/connectors/:id/visibility', adminOnly, async (req, res) => {
+    if (!connectors) { res.status(404).end(); return }
+    const visibility = req.body?.visibility
+    if (visibility !== 'source' && visibility !== 'everyone' && visibility !== 'custom') { res.status(400).json({ error: 'visibility must be source, everyone or custom' }); return }
+    const raw: unknown[] = Array.isArray(req.body?.allow) ? req.body.allow : []
+    const allow = raw.map(a => typeof a === 'string' ? parsePrincipal(a) : null)
+    if (allow.some(a => a === null)) { res.status(400).json({ error: 'Each entry must be an email address or a domain (okafor.ng)' }); return }
+    if (visibility === 'custom' && allow.length === 0) { res.status(400).json({ error: 'Add at least one email address or domain' }); return }
+    try {
+      await connectors.setVisibility(req.params['id'] as string, visibility, allow as string[])
+      audit(res, 'connector-visibility', req.params['id'] as string, visibility === 'custom' ? (allow as string[]).join(', ') : visibility)
+      res.json(connectors.list().find(c => c.id === req.params['id']))
+    } catch (err) { sendError(res, err, (err as { status?: number }).status ?? 500) }
   })
 
   app.post('/api/connectors/:id/sync', adminOnly, (req, res) => {
@@ -616,7 +660,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     const topK = Math.min(100, parseInt(req.query.topK as string) || 10)
     const filter = parseMetadata(req.query.filter as string)
     try {
-      const scope = scopeFrom(req.query)
+      const scope = scopeFor(req, res)
       const results = await duct.search(q, topK, filter, scope)
       telemetry?.record('searches')
       audit(res, 'search', undefined, auditQueries ? q : undefined)
@@ -629,20 +673,20 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
 
   // A first look at the library: kinds of documents and searches to try (first run and the home screen).
   app.get('/api/discover', async (_req, res) => {
-    try { res.json(await duct.discover()) } catch (err) { res.status(500).json({ error: (err as Error).message }) }
+    try { res.json(await duct.discover(res.locals.viewer)) } catch (err) { res.status(500).json({ error: (err as Error).message }) }
   })
 
   // The deadlines radar: expiry, due and renewal dates read from documents (?days=365&pastDays=30).
   app.get('/api/deadlines', needs('deadlines'), (req, res) => {
     const num = (v: unknown, d: number, max: number) => Math.min(max, Math.max(0, parseInt(String(v)) || d))
-    try { res.json(duct.deadlines({ days: num(req.query['days'], 365, 3650), pastDays: num(req.query['pastDays'], 30, 365) })) } catch (err) { sendError(res, err) }
+    try { res.json(duct.deadlines({ days: num(req.query['days'], 365, 3650), pastDays: num(req.query['pastDays'], 30, 365), viewer: res.locals.viewer })) } catch (err) { sendError(res, err) }
   })
 
   app.post('/api/ask', needs('ask'), async (req, res) => {
     const { question, topK = 5, agentic } = req.body
     if (!question) { res.status(400).json({ error: 'Question is required' }); return }
     try {
-      const result = agentic ? await duct.agenticSearch(question) : await duct.ask(question, topK)
+      const result = agentic ? await duct.agenticSearch(question, res.locals.viewer) : await duct.ask(question, topK, res.locals.viewer)
       telemetry?.record('ask')
       audit(res, 'ask', undefined, auditQueries ? String(question) : undefined)
       res.json(result)
@@ -659,7 +703,8 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
       res.json({ document: doc })
       return
     }
-    res.json({ documents: duct.getDocuments() })
+    const hidden = duct.hiddenFrom(res.locals.viewer)
+    res.json({ documents: hidden.size ? duct.getDocuments().filter(d => !hidden.has(d.path)) : duct.getDocuments() })
   })
 
   app.delete('/api/documents', adminOnly, async (req, res) => {
@@ -824,7 +869,7 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     if (!q) { res.status(400).json({ error: 'Query parameter "q" is required' }); return }
     try {
       const topK = Math.min(500, parseInt(req.query.topK as string) || 100)
-      const results = await duct.search(q, topK, parseMetadata(req.query.filter as string), scopeFrom(req.query))
+      const results = await duct.search(q, topK, parseMetadata(req.query.filter as string), scopeFor(req, res))
       audit(res, 'export', undefined, auditQueries ? q : `${results.length} results`)
       await sendExport(res, results.map(exportItem), (req.query.format as string) || 'csv', `Search: ${q}`)
     } catch (err) {

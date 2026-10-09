@@ -529,3 +529,19 @@ The deadlines radar: dates documents say something expires, is due or renews on,
 ```
 
 `kind` is `expires`, `due` or `renews`. `soon` is the next 30 days; one entry per document, date and kind. Off when the `deadlines` feature is switched off (403).
+
+
+## `PUT /api/connectors/:id/visibility`
+
+Who sees a cloud source's results on a shared server (admin).
+
+```json
+{ "visibility": "custom", "allow": ["ada@okafor.ng", "okafor.ng"] }
+```
+
+`visibility` can be:
+- `source`: whoever each file is shared with at the source, plus the person who connected it. Not for S3.
+- `everyone`: everyone who can use the server.
+- `custom`: the email addresses and domains in `allow`.
+
+It applies at once to what's already indexed. Searches, lists and file routes then leave out documents the signed-in person isn't allowed to see.

@@ -85,6 +85,17 @@ On a server, Google Drive, OneDrive and SharePoint sign-ins come back to `https:
 
 Connector tokens and S3 keys are kept in `connector-tokens.json` in the data volume, readable only by the Duct user. See [connectors.md](connectors.md).
 
+### Results follow each file's sharing
+
+With sign-in, each person only finds what they could open at the source. A Drive file shared with Chidi shows up in Chidi's searches, not in Bello's. Duct reads each file's sharing when it reads the file, and again when the sharing changes, and applies it everywhere: search, Ask, the documents list, opening and exporting, the deadlines radar and suggestions.
+
+- **Counted:** the people a file is shared with, Microsoft 365 and Google groups named on it (matched by the group's address), and, in Drive, a whole domain when the file is discoverable there.
+- **Not counted:** sharing *links* ("anyone with the link", "people in your organisation with the link"). A link alone is how files get overshared, so it doesn't make a file searchable by everyone.
+- **Kept with whoever connected the source:** files whose sharing Duct can't read, including shared-drive files in Drive and SharePoint libraries shared through site groups. Duct can't see who belongs to a site group.
+- **Per source** (Settings › Library › *Who sees these results*): *whoever it's shared with* (the default for Drive and Microsoft 365 when sign-in is on), *everyone on this server*, or *only these people and domains*. S3 buckets have no per-file sharing, so they're for everyone until you choose people and domains.
+- **Tokens:** the admin token sees everything. Member tokens carry no identity, so they only see documents open to everyone.
+- **Watched folders and the Library** are visible to everyone who can use the server, so only watch folders the whole team may read.
+
 ## The audit log
 
 Shared servers record:

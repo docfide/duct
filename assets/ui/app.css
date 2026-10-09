@@ -395,3 +395,10 @@ dialog::backdrop { background: rgba(0,0,0,.55); }
 .radar-text { font-size: 12.5px; color: var(--subtle); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .radar-foot { margin-top: 8px; }
 @media (max-width: 560px) { .radar-item { grid-template-columns: 1fr; gap: 4px; } .radar-date { flex-direction: row; gap: 8px; align-items: baseline; } }
+
+/* Who sees a cloud source's results (shared servers) */
+.visibility-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 0 10px; border-bottom: 1px solid var(--border); font-size: 12.5px; color: var(--subtle); }
+.visibility-row label { display: flex; align-items: center; gap: 8px; }
+.visibility-row select, .visibility-row input { background: var(--bg); color: var(--text); border: 1px solid var(--border2); border-radius: var(--r); padding: 5px 8px; font: inherit; font-size: 12.5px; }
+.visibility-row input { flex: 1; min-width: 180px; }
+.visibility-row small { flex-basis: 100%; }
