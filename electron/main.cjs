@@ -658,6 +658,12 @@ app.whenReady().then(async () => {
   setInterval(() => {
     duct?.rescanSources().then(refreshPage).catch(err => console.error('Rescan failed:', err))
   }, 30 * 60 * 1000).unref()
+}).catch(err => {
+  // Without this, a failure while starting leaves Duct running with no window and no way to tell why.
+  console.error('Duct could not start:', err)
+  try { diagnostics?.recordCrash(crashDir(), 'startup', err) } catch {}
+  dialog.showErrorBox('Duct couldn’t start', `Something went wrong while Duct was starting, so it will close. Opening it again may help; if it doesn’t, please send this to duct@tensflare.com:\n\n${err?.message ?? err}`)
+  app.exit(1)
 })
 
 app.on('window-all-closed', () => {

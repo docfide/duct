@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-alpha.2] - 2026-10-09
+
+### Fixed
+- The desktop app didn't open: it started without a window, because a package Duct's server needs (express-rate-limit) wasn't included in the installers. The same would have broken `duct serve` from npm. CI now fails any build whose code uses a package that wouldn't be shipped.
+- If something goes wrong while the desktop app starts, it now says so and closes, instead of staying open with no window.
+- The Linux installers build again, and the Intel Mac installer is built on a supported machine.
+
 ## [1.0.0-alpha.1] - 2026-10-09
 
 Duct 1.0 turns the search library into a product family: the desktop app, a team server you can run in your own cloud, the developer API with its clients, and Tensflare accounts for paid plans (hosted AI, sync, connectors, team sign-in). This alpha is for testers; 1.0.0 follows once payments, identity providers, Docker images and Windows and Linux builds are verified.

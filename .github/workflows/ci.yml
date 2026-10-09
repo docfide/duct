@@ -33,6 +33,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      # Installers and the npm package only include "dependencies": catch a runtime import that isn't one.
+      - run: node scripts/check-runtime-deps.mjs
       - uses: actions/upload-artifact@v4
         with:
           name: dist
