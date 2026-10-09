@@ -65,6 +65,12 @@ function bodySize(body: unknown): number {
   if (body instanceof ArrayBuffer) return body.byteLength
   if (ArrayBuffer.isView(body)) return body.byteLength
   if (typeof Blob !== 'undefined' && body instanceof Blob) return body.size
+  // A form's fields and files (the multipart boundaries around them add a little more).
+  if (typeof FormData !== 'undefined' && body instanceof FormData) {
+    let n = 0
+    for (const [name, value] of body) n += Buffer.byteLength(name) + (typeof value === 'string' ? Buffer.byteLength(value) : value.size)
+    return n
+  }
   return 0
 }
 
@@ -164,6 +170,13 @@ export function installLedger(dir?: string): PrivacyLedger {
         const url = input instanceof Request ? input.url : String(input)
         const method = init?.method ?? (input instanceof Request ? input.method : 'GET')
         ledger.record(url, method, bodySize(init?.body))
+        // A streamed body is counted as it's read, like a streamed upload through the http modules.
+        if (typeof ReadableStream !== 'undefined' && init?.body instanceof ReadableStream) {
+          const host = new URL(url).hostname.replace(/^\[|\]$/g, '')
+          init = { ...init, body: init.body.pipeThrough(new TransformStream<unknown, unknown>({
+            transform(chunk, out) { ledger.addBytes(host, bodySize(chunk)); out.enqueue(chunk) },
+          })) }
+        }
       } catch { /* never get in the way of a request */ }
       return realFetch(input, init)
     }) as typeof fetch

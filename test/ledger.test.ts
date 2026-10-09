@@ -44,10 +44,20 @@ describe('privacy ledger', () => {
 
   it('records fetch and the http modules (which SDKs use), without changing the requests', async () => {
     const seen: string[] = []
-    globalThis.fetch = (async (input: string | URL | Request) => { seen.push(String(input)); return new Response('ok') }) as typeof fetch
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      seen.push(String(input))
+      if (init?.body instanceof ReadableStream) await new Response(init.body).arrayBuffer()   // sending reads the stream
+      return new Response('ok')
+    }) as typeof fetch
     const ledger = installLedger()
     expect(await (await fetch('https://api.voyageai.com/v1/embeddings', { method: 'POST', body: 'hello' })).text()).toBe('ok')
     expect(seen).toEqual(['https://api.voyageai.com/v1/embeddings'])
+    const form = new FormData()
+    form.append('a', 'hello')
+    form.append('f', new Blob(['xyz']), 'f.txt')
+    await fetch('https://api.openai.com/v1/files', { method: 'POST', body: form })
+    const stream = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('1234567')); c.close() } })
+    await fetch('https://api.jina.ai/v1/embeddings', { method: 'POST', body: stream, duplex: 'half' } as RequestInit)
 
     const req = https.request('https://api.anthropic.com/v1/messages', { method: 'POST' })
     req.on('error', () => {})
@@ -61,6 +71,8 @@ describe('privacy ledger', () => {
     expect(hosts['api.voyageai.com']).toMatchObject({ requests: 1, bytesOut: 5 })
     expect(hosts['api.anthropic.com']).toMatchObject({ requests: 1, bytesOut: 6 })
     expect(hosts['api.mistral.ai']).toMatchObject({ requests: 1 })
+    expect(hosts['api.openai.com']).toMatchObject({ requests: 1, bytesOut: 10 })   // fields and files, by size
+    expect(hosts['api.jina.ai']).toMatchObject({ requests: 1, bytesOut: 7 })      // a stream, counted as it's read
     expect(installLedger()).toBe(ledger)
   })
 })
