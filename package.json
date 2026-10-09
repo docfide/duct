@@ -181,5 +181,10 @@
   "publishConfig": {
     "access": "public",
     "provenance": true
+  },
+  "overrides": {
+    "voyageai": {
+      "@huggingface/transformers": "$@huggingface/transformers"
+    }
   }
 }
