@@ -521,6 +521,14 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
 
   function showResults(list, help) {
     if (!lastQuery) { showRecent(); return }
+    // One row per document, at its best passage; other pages that match are counted on the row.
+    const byDoc = new Map()
+    for (const r of list) {
+      const k = r.chunk.documentPath
+      if (!byDoc.has(k)) byDoc.set(k, { ...r, otherPages: new Set() })
+      else if (r.chunk.page && r.chunk.page !== byDoc.get(k).chunk.page) byDoc.get(k).otherPages.add(r.chunk.page)
+    }
+    list = [...byDoc.values()]
     results = list
     selected = 0
     document.getElementById('footKeys').hidden = !list.length
@@ -534,7 +542,7 @@ kbd { font-family: var(--mono); font-size: 10px; background: var(--s2); border: 
     }
     box.innerHTML = list.map((r, i) =>
       '<div class="r' + (i === 0 ? ' sel' : '') + '" data-i="' + i + '">' +
-        '<div class="r-name">' + esc(docName(r)) + (r.chunk.page ? '<span class="r-page">' + esc(pageText(r.chunk.documentFormat, r.chunk.page)) + '</span>' : '') + '</div>' +
+        '<div class="r-name">' + esc(docName(r)) + (r.chunk.page ? '<span class="r-page">' + esc(pageText(r.chunk.documentFormat, r.chunk.page)) + (r.otherPages.size ? ' +' + r.otherPages.size + ' more' : '') + '</span>' : '') + '</div>' +
         '<div class="r-snip">' + (r.snippet ? markSnippet(r.snippet) : esc(r.chunk.content.slice(0, 160))) + '</div>' +
       '</div>').join('')
     listHeight = list.length * 62

@@ -110,6 +110,8 @@ function markSnippet(snippet) {
   return esc(snippet).split(MARK_START).join('<mark>').split(MARK_END).join('</mark>')
 }
 
+const WORD_CHAR = /[\p{L}\p{N}]/u
+
 /** Highlights words in raw text and returns escaped HTML. */
 function highlight(text, terms) {
   const words = terms.map(t => t.toLowerCase()).filter(t => t.length > 1)
@@ -118,6 +120,12 @@ function highlight(text, terms) {
   const marked = new Array(text.length).fill(false)
   for (const word of words) {
     for (let i = lower.indexOf(word); i !== -1; i = lower.indexOf(word, i + 1)) {
+      // Whole words, or a word with a short ending ("terminates" for "terminate"), never inside another word:
+      // "tax" shouldn't light up in "taxation".
+      if (i > 0 && WORD_CHAR.test(lower[i - 1])) continue
+      let end = i + word.length
+      while (end < lower.length && WORD_CHAR.test(lower[end])) end++
+      if (end - (i + word.length) > 3) continue
       for (let j = i; j < i + word.length; j++) marked[j] = true
     }
   }
@@ -685,26 +693,64 @@ function terms(result) {
   return [...new Set([...phrases, ...marked, ...words])].slice(0, 12)
 }
 
+/**
+ * Results are grouped by document: a PDF that matches on five pages is one card, with its best passage, links to the
+ * other pages and the other passages a click away. state.results stays the flat, ranked list of passages; state.cards
+ * holds, for each card in order, the indexes of its passages (best first), and state.selected is a card index.
+ */
+function groupResults(results) {
+  const byDoc = new Map()
+  results.forEach((r, i) => {
+    const key = r.chunk.documentPath
+    if (!byDoc.has(key)) byDoc.set(key, [])
+    byDoc.get(key).push(i)
+  })
+  return [...byDoc.values()]
+}
+const cardResult = i => state.cards && state.cards[i] ? state.results[state.cards[i][0]] : undefined
+
+function resultLabel(c, link) {
+  return link ? 'Open link' : c.page ? 'Open at ' + pageRef(c) : 'Open'
+}
+
 function renderResults() {
   const results = state.results
-  $('#resultsTitle').textContent = results.length ? plural(results.length, 'result') + ' for “' + state.query + '”' : 'No results for “' + state.query + '”'
-  $('#results').innerHTML = results.map((r, i) => {
+  state.cards = groupResults(results)
+  const docs = state.cards.length
+  $('#resultsTitle').textContent = !results.length ? 'No results for “' + state.query + '”'
+    : plural(docs, 'document') + (results.length > docs ? ' · ' + plural(results.length, 'passage') : '') + ' for “' + state.query + '”'
+  $('#results').innerHTML = state.cards.map((idx, card) => {
+    const r = results[idx[0]]
     const c = r.chunk
     const link = isLink(c.documentPath)
     const folder = link ? new URL(c.documentPath).host : folderOf(c.documentPath).startsWith(state.info.libraryDir) ? 'Duct Library' : folderOf(c.documentPath)
-    return '<li class="result" data-i="' + i + '" tabindex="-1">' + badge(c.documentFormat) +
+    const others = idx.slice(1)
+    // Other pages, in page order, each opening the document there.
+    const pages = [...new Map(others.filter(j => results[j].chunk.page && results[j].chunk.page !== c.page).map(j => [results[j].chunk.page, j])).entries()].sort((a, b) => a[0] - b[0])
+    const alsoOn = pages.length ? '<div class="also-on">Also on ' + pages.slice(0, 12).map(([, j]) =>
+      '<button class="link-btn" data-act="open-at" data-ri="' + j + '">' + esc(pageRef(results[j].chunk)) + '</button>').join(', ') +
+      (pages.length > 12 ? ' and ' + (pages.length - 12) + ' more' : '') + '</div>' : ''
+    const more = others.length ? '<button class="more-btn" data-act="more" aria-expanded="false">' + plural(others.length, 'more passage') + ' in this document</button>' +
+      '<ol class="more-passages" hidden>' + others.map(j => {
+        const o = results[j]
+        return '<li data-ri="' + j + '">' + (o.chunk.page ? '<span class="where">' + esc(pageRef(o.chunk)) + '</span>' : '') +
+          '<div class="snippet">' + (o.snippet ? markSnippet(o.snippet) : highlight(o.chunk.content.slice(0, 260), terms(o))) + '</div>' +
+          '<button class="btn btn-sm" data-act="open-at" data-ri="' + j + '">' + esc(resultLabel(o.chunk, link)) + '</button></li>'
+      }).join('') + '</ol>' : ''
+    return '<li class="result" data-i="' + idx[0] + '" data-card="' + card + '" tabindex="-1">' + badge(c.documentFormat) +
       '<div class="result-main"><div class="result-title"><span class="name">' + esc(fileName(c.documentPath)) + '</span>' +
       (c.page ? '<span class="where">' + esc(pageRef(c)) + '</span>' : '') +
       (c.heading ? '<span class="section">› ' + esc(c.heading) + '</span>' : '') + '</div>' +
       (c.metadata && c.metadata.whatsappChat ? whatsappLine(c.metadata) : '<div class="folder">' + esc(folder) + '</div>') +
       (r.why ? '<div class="why" hidden>' + whyText(r) + '</div>' : '') +
       '<div class="snippet">' + (r.snippet ? markSnippet(r.snippet) : highlight(c.content.slice(0, 260), terms(r))) + '</div>' +
-      '<div class="result-actions"><button class="btn btn-sm btn-primary" data-act="open">' + (link ? 'Open link' : c.page ? 'Open at ' + esc(pageRef(c)) : 'Open') + '</button>' +
+      alsoOn +
+      '<div class="result-actions"><button class="btn btn-sm btn-primary" data-act="open">' + esc(resultLabel(c, link)) + '</button>' +
       (link ? '' : '<button class="btn btn-sm" data-act="workspace" title="Open beside another document, with notes">Side by side</button>') +
       '<button class="btn btn-sm" data-act="copy-passage" title="Copy the passage with its source">Copy</button>' +
       (feature('export') ? '<button class="btn btn-sm" data-act="collect" title="Collect this passage to export later">Collect</button>' : '') +
       (desktop && desktop.revealDocument && !link ? '<button class="btn btn-sm" data-act="reveal">Show in folder</button>' : '') +
-      (r.why ? '<button class="why-btn" data-act="why" aria-expanded="false">Why this result?</button>' : '') + '</div></div></li>'
+      (r.why ? '<button class="why-btn" data-act="why" aria-expanded="false">Why this result?</button>' : '') + '</div>' + more + '</div></li>'
   }).join('')
   const empty = $('#resultsEmpty')
   empty.hidden = results.length > 0
@@ -719,7 +765,7 @@ function select(i, scroll = true) {
   if (i < 0) { closePreview(); return }
   const el = $$('.result')[i]
   if (scroll && el) el.scrollIntoView({ block: 'nearest' })
-  if (window.innerWidth > 1180) renderPreview(state.results[i])
+  if (window.innerWidth > 1180) renderPreview(cardResult(i))
 }
 
 $('#results').addEventListener('click', e => {
@@ -728,6 +774,16 @@ $('#results').addEventListener('click', e => {
   const r = state.results[Number(item.dataset.i)]
   const act = e.target.closest('[data-act]')
   if (act && act.dataset.act === 'open') return openResult(r)
+  if (act && act.dataset.act === 'open-at') return openResult(state.results[Number(act.dataset.ri)])
+  if (act && act.dataset.act === 'more') {
+    const list = item.querySelector('.more-passages')
+    list.hidden = !list.hidden
+    act.setAttribute('aria-expanded', String(!list.hidden))
+    return
+  }
+  // A passage from the expanded list: show it in the preview.
+  const other = e.target.closest('.more-passages li')
+  if (other) { renderPreview(state.results[Number(other.dataset.ri)]); return }
   if (act && act.dataset.act === 'workspace') return openWorkspace(r.chunk.documentPath, '', r.chunk.page, terms(r))
   if (act && act.dataset.act === 'reveal') return desktop.revealDocument(r.chunk.documentPath)
   if (act && act.dataset.act === 'copy-passage') return copyText('“' + r.chunk.content.trim() + '”\n— ' + sourceLine(r.chunk), 'Passage copied with its source')
@@ -738,7 +794,7 @@ $('#results').addEventListener('click', e => {
     act.setAttribute('aria-expanded', String(!box.hidden))
     return
   }
-  select(Number(item.dataset.i), false)
+  select(Number(item.dataset.card), false)
   if (window.innerWidth <= 1180) renderPreview(r)
 })
 $('#results').addEventListener('dblclick', e => {
@@ -974,13 +1030,13 @@ $('#searchForm').addEventListener('submit', e => {
   if (!value) return
   if (state.mode === 'ask') { ask(value); $('#q').value = ''; return }
   state.query = value
-  if (state.selected >= 0 && state.results.length) openResult(state.results[state.selected])
+  if (state.selected >= 0 && state.results.length) openResult(cardResult(state.selected))
   else runSearch()
 })
 
 $('#q').addEventListener('keydown', e => {
   if (state.mode !== 'search') return
-  if (e.key === 'ArrowDown') { e.preventDefault(); select(Math.min(state.results.length - 1, state.selected + 1)) }
+  if (e.key === 'ArrowDown') { e.preventDefault(); select(Math.min((state.cards || []).length - 1, state.selected + 1)) }
   if (e.key === 'ArrowUp') { e.preventDefault(); select(Math.max(0, state.selected - 1)) }
   if (e.key === 'Escape') { $('#q').value = ''; state.query = ''; setView('home') }
 })
