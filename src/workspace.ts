@@ -110,6 +110,22 @@ main { flex: 1; min-height: 0; display: flex; }
 .menu-pop button { border: 0; text-align: left; padding: 7px 10px; }
 .menu-pop button:hover { background: var(--black); }
 
+.nb-status { margin: 0; color: var(--subtle); font-size: 11px; line-height: 1.4; }
+.nb-status b { color: var(--text); font-weight: 600; }
+.share { border: 1px solid var(--border2); border-radius: 8px; background: var(--s2); padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+.share h3 { margin: 0; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--subtle); font-weight: 600; }
+.share .who { display: flex; align-items: center; gap: 6px; min-height: 26px; }
+.share .who .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.share .who .tag { color: var(--subtle); }
+.share .who select { flex: none; }
+.share .add { display: flex; gap: 6px; }
+.share .add input { flex: 1; min-width: 0; }
+.share select { width: auto; flex: none; }
+.share .hint { margin: 0; color: var(--subtle); font-family: var(--sans); font-size: 12px; line-height: 1.45; }
+.share .sep { border: 0; border-top: 1px solid var(--border); margin: 2px 0; }
+.share .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.note .by { font-family: var(--mono); font-size: 10.5px; color: var(--muted); margin-top: -4px; }
+.note textarea[readonly] { border-color: transparent; background: transparent; padding-left: 0; resize: none; min-height: 0; }
 .add-pop { position: fixed; z-index: 50; display: none; }
 .add-pop.show { display: block; }
 .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--s2); border: 1px solid var(--border2); border-radius: 8px; padding: 8px 14px; font-family: var(--mono); font-size: 12px; z-index: 60; }
@@ -132,17 +148,23 @@ main { flex: 1; min-height: 0; display: flex; }
   <div class="panes" id="panes"></div>
   <aside class="notes" id="notes" aria-label="Notebook">
     <div class="notes-head">
-      <div class="row"><select id="nbSelect" aria-label="Notebook"></select><button id="nbNew" title="New notebook">+ New</button></div>
+      <div class="row"><select id="nbSelect" aria-label="Notebook"></select>
+        <div class="menu"><button id="nbNew" aria-haspopup="true" title="Start or import a notebook">+ New ▾</button>
+          <div class="menu-pop" id="newMenu" hidden><button data-new="new">New notebook</button><button data-new="import">Import a shared notebook…</button></div></div>
+        <input type="file" id="nbImportFile" accept=".html,.htm,.json,text/html,application/json" hidden></div>
       <div class="row" id="nbForm" hidden><input id="nbName" maxlength="120" aria-label="Notebook name"><button id="nbSave" class="primary">Save</button><button id="nbCancel">Cancel</button></div>
       <div class="row">
         <button id="nbRename">Rename</button>
         <button id="nbDelete">Delete</button>
         <span style="flex:1"></span>
+        <button id="nbShare" aria-expanded="false" aria-controls="sharePanel">Share</button>
         <div class="menu"><button id="nbExport" aria-haspopup="true">Export ▾</button>
           <div class="menu-pop" id="exportMenu" hidden>
-            <button data-format="docx">Word (.docx)</button><button data-format="md">Markdown (.md)</button><button data-format="csv">Spreadsheet (.csv)</button><button data-format="json">JSON</button>
+            <button data-format="html">Page to send (.html)</button><button data-format="docx">Word (.docx)</button><button data-format="md">Markdown (.md)</button><button data-format="csv">Spreadsheet (.csv)</button><button data-format="json">JSON</button>
           </div></div>
       </div>
+      <p class="nb-status" id="nbStatus" hidden></p>
+      <div class="share" id="sharePanel" hidden></div>
     </div>
     <div class="notes-list" id="notesList"></div>
   </aside>
@@ -490,25 +512,65 @@ main { flex: 1; min-height: 0; display: flex; }
   let notebooks = []
   let nb = ''
   let notes = []
+  let sharingOn = false   // a server where people sign in: notebooks can be shared with them
+  let me = null           // the signed-in person's email
+  let seenAt = 0          // the open notebook's updatedAt when its notes were last loaded
+
+  const current = () => notebooks.find(b => b.id === nb)
+  const roleOf = () => current()?.role || 'owner'
+  const canEdit = () => roleOf() !== 'view'
+  const sharedWithMe = b => !!(b.owner && b.owner !== me)
 
   async function loadNotebooks() {
-    notebooks = (await (await api('/api/notebooks')).json()).notebooks
+    const data = await (await api('/api/notebooks')).json()
+    notebooks = data.notebooks
+    sharingOn = !!data.sharing
+    me = data.me
     const wanted = params.get('notebook') || store.get('duct.notebook')
-    nb = notebooks.some(b => b.id === wanted) ? wanted : (notebooks[0]?.id || '')
+    nb = notebooks.some(b => b.id === wanted) ? wanted : (notebooks.find(b => !sharedWithMe(b))?.id || notebooks[0]?.id || '')
     drawNotebookSelect()
     await loadNotes()
   }
 
   function drawNotebookSelect() {
     const sel = $('nbSelect')
-    sel.replaceChildren(...notebooks.map(b => h('option', { value: b.id, text: b.name + ' (' + b.notes + ')', selected: b.id === nb })))
+    const option = b => h('option', { value: b.id, text: b.name + ' (' + b.notes + ')', selected: b.id === nb })
+    const mine = notebooks.filter(b => !sharedWithMe(b)), shared = notebooks.filter(sharedWithMe)
+    if (shared.length) sel.replaceChildren(
+      ...(mine.length ? [h('optgroup', { label: 'Your notebooks' }, mine.map(option))] : []),
+      h('optgroup', { label: 'Shared with you' }, shared.map(option)))
+    else sel.replaceChildren(...notebooks.map(option))
     if (!notebooks.length) sel.append(h('option', { value: '', text: 'No notebooks yet' }))
-    for (const id of ['nbRename', 'nbDelete', 'nbExport']) $(id).disabled = !nb
+    const owner = !!nb && roleOf() === 'owner'
+    $('nbRename').disabled = $('nbDelete').disabled = !owner
+    $('nbRename').title = $('nbDelete').title = nb && !owner ? 'Only the notebook’s owner can do this' : ''
+    $('nbExport').disabled = $('nbShare').disabled = !nb
+    drawStatus()
     if (nb) store.set('duct.notebook', nb)
   }
 
+  const who = to => to === 'anyone' ? 'Everyone on this Duct' : to.startsWith('domain:') ? 'Everyone at ' + to.slice(7) : to.replace('user:', '')
+
+  /** One line under the controls: whose notebook this is and what you can do, or who it's shared with. */
+  function drawStatus() {
+    const el = $('nbStatus'), b = current()
+    el.replaceChildren()
+    el.hidden = true
+    if (!b || !sharingOn) return
+    if (sharedWithMe(b)) el.append('Shared with you by ', h('b', { text: b.owner }), b.role === 'view' ? ' · you can read it' : ' · you can add notes and comment')
+    else if (!b.owner) el.append('Everyone on this Duct can see and add to this notebook')
+    else if (b.sharing.length) el.append('Shared with ', h('b', { text: b.sharing.length === 1 ? who(b.sharing[0].to) : b.sharing.length + ' people and groups' }))
+    else el.append('Only you can see this notebook')
+    el.hidden = false
+  }
+
   async function loadNotes() {
-    notes = nb ? (await (await api('/api/notebooks/' + encodeURIComponent(nb) + '/notes')).json()).notes : []
+    if (!nb) { notes = []; seenAt = 0; drawNotes(); return }
+    const data = await (await api('/api/notebooks/' + encodeURIComponent(nb) + '/notes')).json()
+    notes = data.notes
+    seenAt = data.notebook.updatedAt
+    const i = notebooks.findIndex(b => b.id === nb)
+    if (i >= 0) notebooks[i] = data.notebook
     drawNotes()
   }
 
@@ -526,9 +588,14 @@ main { flex: 1; min-height: 0; display: flex; }
         : 'Select text in either document and choose “Add to notes”. Duct will start a notebook for you, or make one with “+ New”.' }))
       return
     }
+    const editable = canEdit()
+    // Who added each note, once more than one person is writing in the notebook.
+    const authors = new Set(notes.map(n => n.author).filter(Boolean))
+    const showAuthors = authors.size > 1 || (authors.size === 1 && !authors.has(me))
     notes.forEach((n, i) => {
-      const area = h('textarea', { placeholder: 'Your comment (optional)', 'aria-label': 'Comment' })
+      const area = h('textarea', { placeholder: editable ? 'Your comment (optional)' : '', 'aria-label': 'Comment', readonly: !editable })
       area.value = n.comment
+      if (!editable && !n.comment) area.hidden = true
       const flush = async () => {
         clearTimeout(saveTimers.get(n.id))
         if (area.value === n.comment) return
@@ -538,11 +605,13 @@ main { flex: 1; min-height: 0; display: flex; }
       }
       area.addEventListener('input', () => { clearTimeout(saveTimers.get(n.id)); saveTimers.set(n.id, setTimeout(flush, 700)) })
       area.addEventListener('blur', flush)
+      const elsewhere = n.path.startsWith('shared:')
       const card = h('div', { class: 'note' + (n.id === focusId ? ' new' : ''), 'data-id': n.id },
         h('blockquote', { text: n.quote }),
-        h('button', { class: 'src', title: 'Go to this passage', text: sourceText(n), onclick: () => showNote(n) }),
+        h('button', { class: 'src', title: elsewhere ? 'From a shared notebook: this document isn’t in your Duct' : 'Go to this passage', text: sourceText(n) + (elsewhere ? ' · not in your Duct' : ''), onclick: () => showNote(n) }),
+        showAuthors && n.author ? h('div', { class: 'by', text: n.author === me ? 'Added by you' : 'Added by ' + n.author }) : null,
         area,
-        h('div', { class: 'tools' },
+        !editable ? null : h('div', { class: 'tools' },
           h('button', { class: 'ghost', title: 'Move up', text: '↑', disabled: i === 0, onclick: () => move(i, -1) }),
           h('button', { class: 'ghost', title: 'Move down', text: '↓', disabled: i === notes.length - 1, onclick: () => move(i, 1) }),
           h('button', { class: 'ghost', title: 'Delete this note', text: '✕', onclick: () => removeNote(n) })))
@@ -571,6 +640,7 @@ main { flex: 1; min-height: 0; display: flex; }
 
   /** Brings a note's document to a pane at the right page: the pane that already shows it, else an empty one, else the right. */
   async function showNote(n) {
+    if (n.path.startsWith('shared:')) { toast('This quote came from a shared notebook. “' + n.docName + '” isn’t in your Duct, so add it to open the quote in place.'); return }
     if (!docOf(n.path)) { toast('That document is no longer in the index.', true); return }
     let pane = panes.find(p => p.path === n.path) || panes.find(p => !p.path) || panes[1]
     if (pane.path === n.path && pane.mode === 'native') pane.goto(n.page || 1)
@@ -594,7 +664,26 @@ main { flex: 1; min-height: 0; display: flex; }
     syncUrl()
     return notebook
   }
-  $('nbNew').addEventListener('click', () => showForm('new'))
+  $('nbNew').addEventListener('click', e => { e.stopPropagation(); $('newMenu').hidden = !$('newMenu').hidden })
+  document.addEventListener('click', () => { $('newMenu').hidden = true })
+  $('newMenu').addEventListener('click', e => {
+    const what = e.target.closest('[data-new]')?.dataset.new
+    if (what === 'new') showForm('new')
+    if (what === 'import') $('nbImportFile').click()
+  })
+  $('nbImportFile').addEventListener('change', async e => {
+    const file = e.target.files[0]
+    e.target.value = ''
+    if (!file) return
+    try {
+      if (file.size > 8 * 1024 * 1024) throw new Error('That file is too big to be a shared notebook.')
+      const { notebook } = await (await api('/api/notebooks/import', json('POST', { content: await file.text() }))).json()
+      notebooks.unshift(notebook)
+      nb = notebook.id
+      drawNotebookSelect(); await loadNotes(); syncUrl()
+      toast('Added “' + notebook.name + '”: ' + notebook.notes + (notebook.notes === 1 ? ' note' : ' notes'))
+    } catch (err) { toast(err.message, true) }
+  })
   $('nbRename').addEventListener('click', () => showForm('rename'))
   $('nbCancel').addEventListener('click', () => showForm(''))
   $('nbName').addEventListener('keydown', e => { if (e.key === 'Enter') $('nbSave').click(); if (e.key === 'Escape') showForm('') })
@@ -627,7 +716,97 @@ main { flex: 1; min-height: 0; display: flex; }
       drawNotebookSelect(); await loadNotes(); syncUrl()
     } catch (err) { toast(err.message, true) }
   })
-  $('nbSelect').addEventListener('change', async e => { nb = e.target.value; drawNotebookSelect(); await loadNotes(); syncUrl() })
+  $('nbSelect').addEventListener('change', async e => { nb = e.target.value; showShare(false); drawNotebookSelect(); await loadNotes(); syncUrl() })
+
+  // ---------- sharing ----------
+  // With sign-in, the owner shares with people, domains or everyone, to read or to edit. Anywhere, a notebook can
+  // go out as a page: one file anyone can open in a browser, which holds quotes, document names and comments only.
+  function showShare(open) {
+    $('sharePanel').hidden = !open
+    $('nbShare').setAttribute('aria-expanded', String(open))
+    if (open) drawShare()
+  }
+  $('nbShare').addEventListener('click', () => showShare($('sharePanel').hidden))
+
+  async function saveSharing(sharing) {
+    const b = current()
+    try {
+      const res = await (await api('/api/notebooks/' + encodeURIComponent(nb) + '/sharing', json('PUT', { sharing }))).json()
+      b.sharing = res.sharing
+      drawStatus(); drawShare()
+      return true
+    } catch (err) { toast(err.message, true); return false }
+  }
+
+  function roleSelect(value, onchange) {
+    const sel = h('select', { 'aria-label': 'Access' }, h('option', { value: 'view', text: 'Can read' }), h('option', { value: 'edit', text: 'Can edit' }))
+    sel.value = value
+    if (onchange) sel.addEventListener('change', () => onchange(sel.value))
+    return sel
+  }
+
+  function drawShare() {
+    const panel = $('sharePanel'), b = current()
+    panel.replaceChildren()
+    if (!b) return
+    if (sharingOn && b.role === 'owner' && b.owner) {
+      panel.append(h('h3', { text: 'Who can see it' }), h('div', { class: 'who' }, h('span', { class: 'nm', text: b.owner }), h('span', { class: 'tag', text: 'Owner' })))
+      for (const s of b.sharing) {
+        panel.append(h('div', { class: 'who' },
+          h('span', { class: 'nm', text: who(s.to), title: who(s.to) }),
+          roleSelect(s.can, can => saveSharing(b.sharing.map(x => x.to === s.to ? { ...x, can } : x))),
+          h('button', { class: 'ghost', title: 'Stop sharing with ' + who(s.to), text: '✕', onclick: () => saveSharing(b.sharing.filter(x => x.to !== s.to)) })))
+      }
+      const input = h('input', { placeholder: 'Email, domain, or “everyone”', 'aria-label': 'Share with', autocomplete: 'off' })
+      const can = roleSelect('view')
+      const add = async () => {
+        const to = input.value.trim()
+        if (!to) { input.focus(); return }
+        if (await saveSharing([...b.sharing, { to, can: can.value }])) { panel.querySelector('input')?.focus() }
+      }
+      input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); add() } })
+      panel.append(h('div', { class: 'add' }, input, can, h('button', { class: 'primary', text: 'Share', onclick: add })),
+        h('p', { class: 'hint', text: 'People only see notes from documents they can open themselves.' }),
+        h('div', { class: 'actions' }, h('button', { text: 'Copy link', onclick: copyLink })),
+        h('hr', { class: 'sep' }))
+    } else if (sharingOn && sharedWithMe(b)) {
+      panel.append(h('p', { class: 'hint', text: b.owner + ' shared this notebook with you. Only they can change who can see it.' }), h('div', { class: 'actions' }, h('button', { text: 'Copy link', onclick: copyLink })), h('hr', { class: 'sep' }))
+    }
+    panel.append(h('h3', { text: 'Send as a page' }),
+      h('p', { class: 'hint', text: 'A single file anyone can open in a browser, even on a phone, without Duct. It holds the quotes, document names, pages and comments: never the documents themselves or where they’re kept.' }),
+      h('div', { class: 'actions' }, h('button', { text: 'Save the page', onclick: () => exportAs('html') })))
+    if (!sharingOn) panel.append(h('p', { class: 'hint', text: 'Working on it together? On a Duct team server, notebooks can be shared with people, who add to them as you do.' }))
+  }
+
+  async function copyLink() {
+    const u = new URL('/workspace', location.href)
+    u.searchParams.set('notebook', nb)
+    try { await navigator.clipboard.writeText(u.toString()); toast('Link copied. It opens for people this notebook is shared with.') }
+    catch { toast(u.toString()) }
+  }
+
+  // Others' changes: check every few seconds while the window is in view, and redraw unless you're mid-comment.
+  async function refresh() {
+    if (document.visibilityState !== 'visible') return
+    try {
+      const data = await (await fetch('/api/notebooks')).json()
+      if (!Array.isArray(data.notebooks)) return
+      const was = current()
+      notebooks = data.notebooks
+      if (nb && !current()) {
+        toast('“' + (was?.name || 'That notebook') + '” isn’t shared with you any more.')
+        nb = notebooks[0]?.id || ''
+        drawNotebookSelect(); await loadNotes(); syncUrl()
+        return
+      }
+      drawNotebookSelect()
+      const typing = document.activeElement?.tagName === 'TEXTAREA' && $('notesList').contains(document.activeElement)
+      if (nb && current().updatedAt !== seenAt && !typing) await loadNotes()
+      if (!$('sharePanel').hidden && !$('sharePanel').contains(document.activeElement)) drawShare()
+    } catch { /* offline for a moment; try again next time */ }
+  }
+  setInterval(refresh, 8000)
+  document.addEventListener('visibilitychange', refresh)
   $('toggleNotes').addEventListener('click', () => {
     const aside = $('notes')
     aside.hidden = !aside.hidden
@@ -637,9 +816,11 @@ main { flex: 1; min-height: 0; display: flex; }
   // Export: fetched rather than navigated to, so a refusal shows as a message instead of replacing this page.
   $('nbExport').addEventListener('click', e => { e.stopPropagation(); $('exportMenu').hidden = !$('exportMenu').hidden })
   document.addEventListener('click', () => { $('exportMenu').hidden = true })
-  $('exportMenu').addEventListener('click', async e => {
+  $('exportMenu').addEventListener('click', e => {
     const format = e.target.closest('[data-format]')?.dataset.format
-    if (!format) return
+    if (format) exportAs(format)
+  })
+  async function exportAs(format) {
     try {
       const res = await api('/api/notebooks/' + encodeURIComponent(nb) + '/export?format=' + format)
       const m = /filename\\*=UTF-8''([^;]+)/.exec(res.headers.get('Content-Disposition') || '')
@@ -648,7 +829,7 @@ main { flex: 1; min-height: 0; display: flex; }
       document.body.append(a); a.click(); a.remove()
       setTimeout(() => URL.revokeObjectURL(url), 5000)
     } catch (err) { toast(err.message, true) }
-  })
+  }
 
   // ---------- selecting text ----------
   const addPop = $('addPop')
@@ -675,6 +856,7 @@ main { flex: 1; min-height: 0; display: flex; }
     const p = pending
     if (!p) return
     hidePop()
+    if (nb && !canEdit()) { toast('You can read “' + current().name + '” but not add to it. Pick one of your notebooks, or start one with “+ New”.', true); return }
     try {
       if (!nb) await createNotebook('My notes')
       const { note } = await (await api('/api/notebooks/' + encodeURIComponent(nb) + '/notes', json('POST', { path: p.pane.path, quote: p.quote, page: p.page || undefined }))).json()

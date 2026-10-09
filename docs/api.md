@@ -379,12 +379,16 @@ Exports passages picked by hand (the app's **Collect**), in the order given. Onl
 
 ## Notebooks
 
-Named collections of quotes picked from documents, each kept with its document, page and your own comment. The app's **Workspace** (`/workspace?left=<path>&right=<path>`) shows two documents side by side and adds the selected text to a notebook. Notebooks belong to the index: on a shared server everyone sees them, like tags.
+Named collections of quotes picked from documents, each kept with its document, page and your own comment. The app's **Workspace** (`/workspace?left=<path>&right=<path>&notebook=<id>`) shows two documents side by side and adds the selected text to a notebook.
+
+Without sign-in (the desktop app, a token-only server) notebooks belong to everyone using Duct. On a server with sign-in, a notebook belongs to the person who made it (`owner`) and is private until they share it. Each notebook in a response carries the caller's `role`: `owner` (rename, share, delete), `edit` (add, comment, reorder, delete notes) or `view` (read and export). Notebooks the caller can't see answer 404. Notes quoting documents the caller can't open are left out of everything, even in a notebook shared with them. Notebooks made before sharing existed have no owner and stay everyone's to edit; admins manage them.
 
 | Route | |
 |-------|---|
-| `GET /api/notebooks` | Every notebook with its note count, most recently changed first |
-| `POST /api/notebooks` | `{ "name" }` → `201 { notebook }` |
+| `GET /api/notebooks` | `{ notebooks, sharing, me }`: the notebooks the caller can see, with note counts and `role`, most recently changed first. `sharing` says whether this server can share with people; `me` is the signed-in email |
+| `POST /api/notebooks` | `{ "name" }` → `201 { notebook }`, owned by the signed-in person |
+| `PUT /api/notebooks/:id/sharing` | Owner only, on a server with sign-in. `{ "sharing": [{ "to": "ada@okafor.ng" \| "okafor.ng" \| "anyone", "can": "view" \| "edit" }] }` replaces the list |
+| `POST /api/notebooks/import` | `{ "content": "<text of a shared .html page or a JSON export>" }` → `201 { notebook }`. Notes are matched by document name to documents the caller can open; others keep their name and quote |
 | `PATCH /api/notebooks/:id` | `{ "name" }` renames |
 | `DELETE /api/notebooks/:id` | Deletes the notebook and its notes |
 | `GET /api/notebooks/:id/notes` | `{ notebook, notes }` in order |
@@ -392,7 +396,7 @@ Named collections of quotes picked from documents, each kept with its document, 
 | `PUT /api/notebooks/:id/order` | `{ "ids": [...] }` sets the order of the notes |
 | `PATCH /api/notes/:id` | `{ "comment" }` |
 | `DELETE /api/notes/:id` | |
-| `GET /api/notebooks/:id/export?format=docx` | The notebook as `docx` (default), `md`, `csv` or `json`: each quote with its source, then your comment. Needs the `export` feature |
+| `GET /api/notebooks/:id/export?format=docx` | The notebook as `docx` (default), `md`, `csv`, `json`, or `html`: a self-contained page to send to anyone (no scripts, no file paths) that Duct can import. Needs the `export` feature |
 | `GET /api/document-text?path=…` | A document as `{ name, format, pageLabel, sections: [{ title, text, page? }] }`: the text the workspace shows for formats the browser can't draw itself |
 
 ## `GET /api/tags` / `PUT /api/documents/tags`

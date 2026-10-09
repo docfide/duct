@@ -94,6 +94,7 @@
           <button class="side-item active" data-view="search"><span>Search</span></button>
           <button class="side-item" data-view="documents"><span>All documents</span><span class="count" data-bind="docCount"></span></button>
           <button class="side-item attention" data-view="attention" hidden><span>Needs attention</span><span class="count warn" data-bind="attentionCount"></span></button>
+          <button class="side-item" data-view="notebooks"><span>Notebooks</span><span class="count" data-bind="notebookCount"></span></button>
         </nav>
         <div class="side-section">
           <h2>File types</h2>
@@ -158,6 +159,23 @@
               <p class="hint" id="askSetup" hidden>Ask needs an AI model. <button class="link" data-action="open-settings" data-tab="ai">Choose one in Settings</button>.</p>
             </div>
           </div>
+        </section>
+
+        <section id="viewNotebooks" class="view" hidden aria-label="Notebooks">
+          <div class="results-head">
+            <h2>Notebooks</h2>
+            <div class="results-tools">
+              <button class="btn btn-sm" data-action="import-notebook">Import a shared notebook…</button>
+              <button class="btn btn-sm btn-primary" data-action="new-notebook">+ New notebook</button>
+            </div>
+          </div>
+          <form class="nb-new" id="nbNewForm" hidden>
+            <input id="nbNewName" maxlength="120" placeholder="What’s it for? e.g. Acme lease review" aria-label="Notebook name" autocomplete="off">
+            <button class="btn btn-primary" type="submit">Create</button>
+            <button class="btn" type="button" data-action="cancel-notebook">Cancel</button>
+          </form>
+          <input type="file" id="nbImportInput" accept=".html,.htm,.json,text/html,application/json" hidden>
+          <div id="notebookList"></div>
         </section>
 
         <section id="viewDocuments" class="view" hidden aria-label="Documents">

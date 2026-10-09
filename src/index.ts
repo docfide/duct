@@ -12,6 +12,9 @@ import { extractUrl, isUrl } from './extract/web.js'
 import { extractTablesFromContent } from './extract/table.js'
 import { SqliteStore } from './store/sqlite.js'
 import type { AuditEntry, Note, Notebook, StoredApiKey, StoredDocument } from './store/sqlite.js'
+import { cleanSharing } from './notebooks.js'
+import type { NotebookShare } from './notebooks.js'
+import type { SharedNotebook } from './notebook-page.js'
 import { terminateOcr } from './ocr/index.js'
 import { HybridSearcher, reciprocalRankFusion } from './search/hybrid.js'
 import { SimpleReranker, NoopReranker } from './search/reranker.js'
@@ -284,8 +287,44 @@ export class Duct {
     return this.store.listNotebooks()
   }
 
-  createNotebook(name: string): Notebook {
-    return this.store.createNotebook(randomUUID(), cleanName(name, 'Untitled notebook'))
+  getNotebook(id: string): Notebook | undefined {
+    return this.store.getNotebook(id)
+  }
+
+  /** Makes a notebook. `owner` (an email) makes it theirs and private until shared; without one it's everyone's. */
+  createNotebook(name: string, owner?: string | null): Notebook {
+    return this.store.createNotebook(randomUUID(), cleanName(name, 'Untitled notebook'), owner?.toLowerCase() || null)
+  }
+
+  /** Replaces who a notebook is shared with. See `cleanSharing()` for what `sharing` may hold. */
+  shareNotebook(id: string, sharing: unknown): NotebookShare[] {
+    const nb = this.store.getNotebook(id)
+    if (!nb) throw new Error('Notebook not found')
+    const clean = cleanSharing(sharing, nb.owner)
+    this.store.setNotebookSharing(id, clean)
+    return clean
+  }
+
+  /**
+   * Adds a notebook someone shared as a page or JSON (`parseSharedNotebook`), owned by `owner`. Notes keep their
+   * document's name and page; ones whose document is in this index can be opened from the notebook.
+   */
+  importNotebook(shared: SharedNotebook, owner?: string | null, viewer?: string[]): Notebook {
+    // Only documents the importer can see are matched, so an import can't reveal that a hidden file exists.
+    const hidden = this.hiddenFrom(viewer)
+    const byName = new Map<string, DocumentInfo>()
+    for (const d of this.store.listDocuments()) if (!hidden.has(d.path)) byName.set((d.displayName ?? basename(d.path)).toLowerCase(), d)
+    return this.store.transaction(() => {
+      const nb = this.createNotebook(shared.name, owner)
+      for (const n of shared.notes) {
+        const doc = byName.get(n.doc.toLowerCase())
+        this.store.addNote({
+          id: randomUUID(), notebookId: nb.id, path: doc?.path ?? `shared:${n.doc}`, docName: n.doc, format: doc?.format ?? n.format ?? 'txt',
+          page: n.page ?? null, quote: n.quote.slice(0, 20_000), comment: (n.comment ?? '').slice(0, 5000), author: n.author ?? null,
+        })
+      }
+      return this.store.getNotebook(nb.id)!
+    })
   }
 
   renameNotebook(id: string, name: string): boolean {
@@ -301,7 +340,7 @@ export class Duct {
   }
 
   /** Adds a quote from an indexed document to a notebook, at the end. The quote is kept as written, up to 20,000 characters. */
-  addNote(notebookId: string, input: { path: string; quote: string; page?: number; comment?: string }): Note {
+  addNote(notebookId: string, input: { path: string; quote: string; page?: number; comment?: string; author?: string | null }): Note {
     const doc = this.findDocument(input.path)
     if (!doc) throw new Error('Document not found')
     if (!this.store.getNotebook(notebookId)) throw new Error('Notebook not found')
@@ -310,7 +349,7 @@ export class Duct {
     return this.store.addNote({
       id: randomUUID(), notebookId, path: doc.path, docName: doc.displayName ?? basename(doc.path), format: doc.format,
       page: Number.isInteger(input.page) && (input.page as number) > 0 ? (input.page as number) : null,
-      quote, comment: String(input.comment ?? '').slice(0, 5000),
+      quote, comment: String(input.comment ?? '').slice(0, 5000), author: input.author?.toLowerCase() || null,
     })
   }
 
@@ -322,9 +361,9 @@ export class Duct {
     return this.store.deleteNote(id)
   }
 
-  /** The path of the document a note quotes, or undefined if there's no such note. */
-  notePath(id: string): string | undefined {
-    return this.store.notePath(id)
+  /** The document a note quotes and the notebook it's in, or undefined if there's no such note. */
+  noteInfo(id: string): { path: string; notebookId: string } | undefined {
+    return this.store.noteInfo(id)
   }
 
   reorderNotes(notebookId: string, ids: string[]): void {
@@ -1323,6 +1362,10 @@ export { HybridSearcher, reciprocalRankFusion, extractUrl, isUrl, extractTablesF
 export { FeatureDisabledError, FEATURE_NAMES, FEATURE_LABELS, FORMAT_KINDS, defaultFeatures } from './features.js'
 export type { Features, FeaturesPatch, FeatureName } from './features.js'
 export type { AuditEntry, Note, Notebook, StoredApiKey } from './store/sqlite.js'
+export { notebookRole, canDo, cleanSharing } from './notebooks.js'
+export type { NotebookRole, NotebookShare, NotebookActor } from './notebooks.js'
+export { notebookPage, parseSharedNotebook } from './notebook-page.js'
+export type { SharedNotebook } from './notebook-page.js'
 export type { SearchResult, SearchHelp, MatchReason, SearchScope } from './types.js'
 export type { Discovery, DocumentKind } from './discover.js'
 export type { Deadline, DeadlineKind, Radar } from './deadlines.js'

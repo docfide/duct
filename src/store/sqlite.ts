@@ -2,6 +2,7 @@ import { createRequire } from 'node:module'
 import { sep } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import type { Chunk, DocumentFormat, DocumentInfo, SearchResult, SearchScope } from '../types.js'
+import type { NotebookShare } from '../notebooks.js'
 
 const require = createRequire(import.meta.url)
 
@@ -47,7 +48,17 @@ export interface NewDocument {
 
 export interface AuditEntry { id: number; at: number; actor: string; role: string | null; action: string; target: string | null; detail: string | null }
 
-export interface Notebook { id: string; name: string; createdAt: number; updatedAt: number; notes: number }
+export interface Notebook {
+  id: string
+  name: string
+  createdAt: number
+  updatedAt: number
+  notes: number
+  /** The email of whoever made it, on a server with sign-in; null when made without one (everyone's). */
+  owner: string | null
+  /** Who else it's shared with ("user:…", "domain:…", "anyone") and whether they may edit. */
+  sharing: NotebookShare[]
+}
 export interface Note {
   id: string
   notebookId: string
@@ -59,8 +70,17 @@ export interface Note {
   page: number | null
   quote: string
   comment: string
+  /** Who added it, on a server with sign-in. */
+  author: string | null
   createdAt: number
   updatedAt: number
+}
+
+function parseSharing(raw: string | null): NotebookShare[] {
+  try {
+    const v = JSON.parse(raw ?? '[]')
+    return Array.isArray(v) ? v.filter(s => s && typeof s.to === 'string').map(s => ({ to: s.to, can: s.can === 'edit' ? 'edit' : 'view' })) : []
+  } catch { return [] }
 }
 
 export interface StoredApiKey {
@@ -341,6 +361,8 @@ export class SqliteStore {
       CREATE TABLE IF NOT EXISTS notebooks (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
+        owner TEXT,
+        sharing TEXT NOT NULL DEFAULT '[]',
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
@@ -354,6 +376,7 @@ export class SqliteStore {
         page INTEGER,
         quote TEXT NOT NULL,
         comment TEXT NOT NULL DEFAULT '',
+        author TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
@@ -374,6 +397,10 @@ export class SqliteStore {
     if (!columns.some(c => c.name === 'page')) {
       this.db.exec("ALTER TABLE chunks ADD COLUMN page INTEGER; UPDATE documents SET mtime_ms = NULL, content_hash = '' WHERE format IN ('pdf', 'pptx');")
     }
+    // Notebooks made before sharing have no owner, so they stay everyone's, as they were.
+    const hasColumn = (table: string, name: string) => (this.db.prepare(`PRAGMA table_info(${table})`).all() as unknown as { name: string }[]).some(c => c.name === name)
+    if (!hasColumn('notebooks', 'owner')) this.db.exec("ALTER TABLE notebooks ADD COLUMN owner TEXT; ALTER TABLE notebooks ADD COLUMN sharing TEXT NOT NULL DEFAULT '[]';")
+    if (!hasColumn('notes', 'author')) this.db.exec('ALTER TABLE notes ADD COLUMN author TEXT;')
     this.db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run('schema_version', SCHEMA_VERSION)
   }
 
@@ -604,22 +631,28 @@ export class SqliteStore {
 
   // ---------- notebooks ----------
 
-  listNotebooks(): Notebook[] {
-    return (this.db.prepare(`
-      SELECT b.id, b.name, b.created_at AS createdAt, b.updated_at AS updatedAt, count(n.id) AS notes
+  listNotebooks(id?: string): Notebook[] {
+    const rows = this.db.prepare(`
+      SELECT b.id, b.name, b.owner, b.sharing, b.created_at AS createdAt, b.updated_at AS updatedAt, count(n.id) AS notes
       FROM notebooks b LEFT JOIN notes n ON n.notebook_id = b.id
+      ${id === undefined ? '' : 'WHERE b.id = ?'}
       GROUP BY b.id ORDER BY b.updated_at DESC
-    `).all() as unknown as Notebook[])
+    `).all(...(id === undefined ? [] : [id])) as unknown as (Omit<Notebook, 'sharing'> & { sharing: string })[]
+    return rows.map(r => ({ ...r, sharing: parseSharing(r.sharing) }))
   }
 
   getNotebook(id: string): Notebook | undefined {
-    return this.listNotebooks().find(b => b.id === id)
+    return this.listNotebooks(id)[0]
   }
 
-  createNotebook(id: string, name: string): Notebook {
+  createNotebook(id: string, name: string, owner: string | null = null): Notebook {
     const now = Date.now()
-    this.db.prepare('INSERT INTO notebooks (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)').run(id, name, now, now)
-    return { id, name, createdAt: now, updatedAt: now, notes: 0 }
+    this.db.prepare('INSERT INTO notebooks (id, name, owner, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run(id, name, owner, now, now)
+    return { id, name, owner, sharing: [], createdAt: now, updatedAt: now, notes: 0 }
+  }
+
+  setNotebookSharing(id: string, sharing: NotebookShare[]): boolean {
+    return this.db.prepare('UPDATE notebooks SET sharing = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(sharing), Date.now(), id).changes > 0
   }
 
   renameNotebook(id: string, name: string): boolean {
@@ -632,7 +665,7 @@ export class SqliteStore {
 
   listNotes(notebookId: string): Note[] {
     return this.db.prepare(`
-      SELECT id, notebook_id AS notebookId, position, path, doc_name AS docName, format, page, quote, comment, created_at AS createdAt, updated_at AS updatedAt
+      SELECT id, notebook_id AS notebookId, position, path, doc_name AS docName, format, page, quote, comment, author, created_at AS createdAt, updated_at AS updatedAt
       FROM notes WHERE notebook_id = ? ORDER BY position, created_at
     `).all(notebookId) as unknown as Note[]
   }
@@ -640,8 +673,8 @@ export class SqliteStore {
   addNote(n: Omit<Note, 'position' | 'createdAt' | 'updatedAt'>): Note {
     const now = Date.now()
     const { next } = this.db.prepare('SELECT coalesce(max(position), -1) + 1 AS next FROM notes WHERE notebook_id = ?').get(n.notebookId) as { next: number }
-    this.db.prepare('INSERT INTO notes (id, notebook_id, position, path, doc_name, format, page, quote, comment, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(n.id, n.notebookId, next, n.path, n.docName, n.format, n.page, n.quote, n.comment, now, now)
+    this.db.prepare('INSERT INTO notes (id, notebook_id, position, path, doc_name, format, page, quote, comment, author, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(n.id, n.notebookId, next, n.path, n.docName, n.format, n.page, n.quote, n.comment, n.author, now, now)
     this.db.prepare('UPDATE notebooks SET updated_at = ? WHERE id = ?').run(now, n.notebookId)
     return { ...n, position: next, createdAt: now, updatedAt: now }
   }
@@ -654,12 +687,16 @@ export class SqliteStore {
   }
 
   deleteNote(id: string): boolean {
-    return this.db.prepare('DELETE FROM notes WHERE id = ?').run(id).changes > 0
+    const notebookId = this.noteInfo(id)?.notebookId
+    const gone = this.db.prepare('DELETE FROM notes WHERE id = ?').run(id).changes > 0
+    // Others with the notebook open notice changes by its updated time.
+    if (gone) this.db.prepare('UPDATE notebooks SET updated_at = ? WHERE id = ?').run(Date.now(), notebookId!)
+    return gone
   }
 
-  /** The path of the document a note quotes. */
-  notePath(id: string): string | undefined {
-    return (this.db.prepare('SELECT path FROM notes WHERE id = ?').get(id) as { path: string } | undefined)?.path
+  /** The document a note quotes and the notebook it's in. */
+  noteInfo(id: string): { path: string; notebookId: string } | undefined {
+    return this.db.prepare('SELECT path, notebook_id AS notebookId FROM notes WHERE id = ?').get(id) as { path: string; notebookId: string } | undefined
   }
 
   /** Sets the order of a notebook's notes to `ids` (ids not in the notebook are ignored; notes left out go last). */
@@ -669,6 +706,7 @@ export class SqliteStore {
       const have = new Set(this.listNotes(notebookId).map(n => n.id))
       const order = [...ids.filter(i => have.has(i)), ...[...have].filter(i => !ids.includes(i))]
       order.forEach((id, i) => update.run(i, id, notebookId))
+      this.db.prepare('UPDATE notebooks SET updated_at = ? WHERE id = ?').run(Date.now(), notebookId)
     })
   }
 

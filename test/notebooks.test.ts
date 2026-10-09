@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Duct } from '../src/index.js'
 import { createServer } from '../src/server.js'
+import type { OidcLogin } from '../src/oidc.js'
+import { notebookPage, parseSharedNotebook } from '../src/notebook-page.js'
 
 describe('notebooks', () => {
   let dir: string
@@ -155,6 +157,187 @@ describe('notebooks on a shared server: notes follow who may see the document th
       expect((await member('DELETE', `/api/notes/${hiddenNote}`)).status).toBe(404)
       expect((await member('DELETE', `/api/notebooks/${nb}`)).status).toBe(403)
       expect((await admin('GET', `/api/notebooks/${nb}/notes`)).json.notes).toHaveLength(2)
+    } finally {
+      server.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('shared notebooks on a server where people sign in', () => {
+  let dir: string
+  let duct: Duct
+  let server: Server
+  let base: string
+  let lease: string
+  let salaries: string
+
+  // A stand-in for OIDC sign-in: the person is whoever the X-Test-User header names.
+  const fakeOidc = {
+    session: (req: { headers: Record<string, unknown> }) => {
+      const email = req.headers['x-test-user']
+      return typeof email === 'string' ? { email, role: email === 'boss@okafor.ng' ? 'admin' : 'member' } : null
+    },
+    router: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+  } as unknown as OidcLogin
+
+  const as = (email: string) => async (method: string, path: string, body?: unknown) => {
+    const res = await fetch(base + path, { method, headers: { 'X-Test-User': email, 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) })
+    const isJson = res.headers.get('content-type')?.includes('json')
+    return { status: res.status, json: isJson ? await res.json() : undefined, text: isJson ? '' : await res.text() }
+  }
+  const ada = as('ada@okafor.ng')
+  const ben = as('ben@okafor.ng')
+  const boss = as('boss@okafor.ng')
+  const guest = as('guest@elsewhere.com')
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'duct-shared-notebooks-'))
+    lease = join(dir, 'lease.md')
+    salaries = join(dir, 'salaries.txt')
+    writeFileSync(lease, 'The tenant may terminate this lease with 60 days written notice.')
+    writeFileSync(salaries, 'The payroll budget for 2027 rises by eight percent.')
+    duct = new Duct({ embed: false })
+    await duct.index([lease, salaries])
+    duct.setDocumentAccess(salaries, ['user:ada@okafor.ng'])
+    server = createServer(duct, { libraryDir: join(dir, 'library'), oidc: fakeOidc, allowedHosts: '*', audit: {} }).listen(0, '127.0.0.1')
+    await new Promise(resolve => server.once('listening', resolve))
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+  })
+
+  afterAll(() => {
+    server.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('a new notebook is private to whoever made it, even from admins', async () => {
+    const made = await ada('POST', '/api/notebooks', { name: 'Ada private' })
+    expect(made.json.notebook).toMatchObject({ owner: 'ada@okafor.ng', role: 'owner', sharing: [] })
+    const id = made.json.notebook.id
+    const list = await ada('GET', '/api/notebooks')
+    expect(list.json).toMatchObject({ sharing: true, me: 'ada@okafor.ng' })
+    expect(list.json.notebooks.map((b: { id: string }) => b.id)).toContain(id)
+    for (const other of [ben, boss]) {
+      expect((await other('GET', '/api/notebooks')).json.notebooks.map((b: { id: string }) => b.id)).not.toContain(id)
+      expect((await other('GET', `/api/notebooks/${id}/notes`)).status).toBe(404)
+      expect((await other('GET', `/api/notebooks/${id}/export?format=md`)).status).toBe(404)
+      expect((await other('PATCH', `/api/notebooks/${id}`, { name: 'mine now' })).status).toBe(404)
+    }
+  })
+
+  it('sharing to read lets people read and export, not change', async () => {
+    const id = (await ada('POST', '/api/notebooks', { name: 'Lease review' })).json.notebook.id
+    const note = (await ada('POST', `/api/notebooks/${id}/notes`, { path: lease, quote: '60 days written notice' })).json.note
+    expect(note.author).toBe('ada@okafor.ng')
+
+    const shared = await ada('PUT', `/api/notebooks/${id}/sharing`, { sharing: [{ to: 'Ben@Okafor.ng' }, { to: 'ada@okafor.ng', can: 'edit' }] })
+    expect(shared.json.sharing).toEqual([{ to: 'user:ben@okafor.ng', can: 'view' }])  // the owner is left out
+
+    const seen = await ben('GET', `/api/notebooks/${id}/notes`)
+    expect(seen.json.notebook).toMatchObject({ role: 'view', owner: 'ada@okafor.ng', sharing: [] })
+    expect(seen.json.notes[0].quote).toBe('60 days written notice')
+    expect((await ben('GET', `/api/notebooks/${id}/export?format=md`)).text).toContain('60 days written notice')
+
+    const refused = await ben('POST', `/api/notebooks/${id}/notes`, { path: lease, quote: 'terminate' })
+    expect(refused.status).toBe(403)
+    expect(refused.json.error).toMatch(/read this notebook but not change it\. Ask ada@okafor\.ng/)
+    expect((await ben('PATCH', `/api/notes/${note.id}`, { comment: 'x' })).status).toBe(403)
+    expect((await ben('DELETE', `/api/notes/${note.id}`)).status).toBe(403)
+    expect((await ben('PUT', `/api/notebooks/${id}/order`, { ids: [note.id] })).status).toBe(403)
+    expect((await guest('GET', `/api/notebooks/${id}/notes`)).status).toBe(404)
+  })
+
+  it('sharing with a domain to edit lets its people add and comment, but only the owner renames, shares or deletes', async () => {
+    const id = (await ada('POST', '/api/notebooks', { name: 'Team notes' })).json.notebook.id
+    await ada('PUT', `/api/notebooks/${id}/sharing`, { sharing: [{ to: 'okafor.ng', can: 'edit' }, { to: 'ben@okafor.ng', can: 'view' }] })
+
+    const added = await ben('POST', `/api/notebooks/${id}/notes`, { path: lease, quote: 'The tenant may terminate' })
+    expect(added.status).toBe(201)
+    expect(added.json.note.author).toBe('ben@okafor.ng')
+    expect((await ben('PATCH', `/api/notes/${added.json.note.id}`, { comment: 'Ben was here' })).status).toBe(200)
+    expect((await ben('GET', '/api/notebooks')).json.notebooks.find((b: { id: string }) => b.id === id).role).toBe('edit')  // the stronger grant wins
+
+    expect((await ben('PATCH', `/api/notebooks/${id}`, { name: 'x' })).status).toBe(403)
+    expect((await ben('PUT', `/api/notebooks/${id}/sharing`, { sharing: [] })).status).toBe(403)
+    expect((await ben('DELETE', `/api/notebooks/${id}`)).status).toBe(403)
+    expect((await guest('GET', `/api/notebooks/${id}/notes`)).status).toBe(404)  // another domain
+
+    expect((await ada('PUT', `/api/notebooks/${id}/sharing`, { sharing: [{ to: 'not a person' }] })).status).toBe(400)
+    await ada('PUT', `/api/notebooks/${id}/sharing`, { sharing: [] })
+    expect((await ben('GET', `/api/notebooks/${id}/notes`)).status).toBe(404)
+    const log = duct.auditLog({ limit: 50 }).map(e => e.detail)
+    expect(log).toContain('shared a notebook with ben@okafor.ng (view), okafor.ng (edit)')
+    expect(log).toContain('stopped sharing a notebook')
+  })
+
+  it('sharing a notebook never shares the documents it quotes', async () => {
+    const id = (await ada('POST', '/api/notebooks', { name: 'Budget' })).json.notebook.id
+    await ada('POST', `/api/notebooks/${id}/notes`, { path: salaries, quote: 'rises by eight percent' })
+    await ada('POST', `/api/notebooks/${id}/notes`, { path: lease, quote: '60 days' })
+    await ada('PUT', `/api/notebooks/${id}/sharing`, { sharing: [{ to: 'anyone', can: 'edit' }] })
+    const seen = await guest('GET', `/api/notebooks/${id}/notes`)
+    expect(seen.json.notes.map((n: { quote: string }) => n.quote)).toEqual(['60 days'])
+    expect(seen.json.notebook.notes).toBe(1)
+    const page = await guest('GET', `/api/notebooks/${id}/export?format=html`)
+    expect(page.text).toContain('60 days')
+    expect(page.text).not.toContain('eight percent')
+  })
+
+  it('notebooks from before sharing stay everyone’s', async () => {
+    const old = duct.createNotebook('From 0.x')
+    expect((await ben('GET', `/api/notebooks/${old.id}/notes`)).json.notebook.role).toBe('edit')
+    expect((await boss('GET', `/api/notebooks/${old.id}/notes`)).json.notebook.role).toBe('owner')
+    expect((await ben('POST', `/api/notebooks/${old.id}/notes`, { path: lease, quote: 'lease' })).status).toBe(201)
+  })
+})
+
+describe('a notebook as a page to send', () => {
+  const notes = [
+    { quote: 'Either party may terminate </script><script>alert(1)</script> for convenience.', doc: 'MSA <final>.pdf', page: 4, pageLabel: 'Page', format: 'pdf', comment: 'Line one\nLine two', author: 'ada@okafor.ng' },
+    { quote: 'Rent is due on the first.', doc: 'lease.md', format: 'md', author: 'ben@okafor.ng' },
+  ]
+
+  it('is one file with no scripts, escapes what it shows, and leaves out file paths', () => {
+    const html = notebookPage({ name: 'Acme & co', notes }, { sharedBy: 'ada@okafor.ng', date: new Date('2026-10-09') })
+    expect(html).toContain('<title>Acme &amp; co</title>')
+    expect(html).toContain('2 quotes from 2 documents · shared by ada@okafor.ng · 9 October 2026')
+    expect(html).toContain('MSA &lt;final&gt;.pdf')
+    expect(html).toContain('Page 4')
+    expect(html).toContain('Line one<br>Line two')
+    expect(html).toContain('added by ben@okafor.ng')
+    expect(html).not.toMatch(/<script(?![^>]*application\/json)/)
+    expect(html.match(/<\/script>/g)).toHaveLength(1)  // only the data block's own end
+    expect(html).toContain("default-src 'none'")
+  })
+
+  it('reads back what it carries, and Duct’s JSON export too', () => {
+    const back = parseSharedNotebook(notebookPage({ name: 'Acme', notes }))
+    expect(back).toEqual({ name: 'Acme', notes })
+    const fromExport = parseSharedNotebook(JSON.stringify({ title: 'Collected', items: [{ name: 'a.pdf', path: '/x/a.pdf', location: 'Slide 3', text: 'Quote', note: 'Mine' }] }))
+    expect(fromExport).toEqual({ name: 'Collected', notes: [{ quote: 'Quote', doc: 'a.pdf', page: 3, pageLabel: 'Slide', comment: 'Mine' }] })
+    expect(parseSharedNotebook('<html>not one</html>')).toBeNull()
+    expect(parseSharedNotebook('{"name":"x"}')).toBeNull()
+  })
+
+  it('imports into a notebook, matching documents this Duct has by name', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'duct-import-'))
+    const lease = join(dir, 'lease.md')
+    writeFileSync(lease, 'Rent is due on the first.')
+    const duct = new Duct({ embed: false })
+    await duct.index(lease)
+    const server = createServer(duct, { libraryDir: join(dir, 'library') }).listen(0, '127.0.0.1')
+    await new Promise(resolve => server.once('listening', resolve))
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    const post = (body: unknown) => fetch(`${base}/api/notebooks/import`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    try {
+      const res = await post({ content: notebookPage({ name: 'From Ada', notes }) })
+      expect(res.status).toBe(201)
+      const { notebook } = await res.json()
+      expect(notebook).toMatchObject({ name: 'From Ada', notes: 2 })
+      const got = duct.listNotes(notebook.id)
+      expect(got.map(n => n.path)).toEqual(['shared:MSA <final>.pdf', lease])
+      expect(got[0]).toMatchObject({ page: 4, comment: 'Line one\nLine two', author: 'ada@okafor.ng' })
+      expect((await post({ content: 'hello' })).status).toBe(400)
     } finally {
       server.close()
       rmSync(dir, { recursive: true, force: true })

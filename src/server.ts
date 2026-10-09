@@ -7,7 +7,10 @@ import { randomBytes } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { Duct, Note } from './index.js'
+import type { Duct, Note, Notebook } from './index.js'
+import { canDo, notebookRole } from './notebooks.js'
+import type { NotebookActor, NotebookRole } from './notebooks.js'
+import { notebookPage, parseSharedNotebook, sharedFrom } from './notebook-page.js'
 import type { DocumentFormat, SearchResult, SearchScope } from './types.js'
 import { isUrl } from './extract/web.js'
 import { addToLibrary, defaultLibraryDir } from './library.js'
@@ -845,8 +848,8 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
   })
 
   // ---------- notebooks ----------
-  // Named collections of quotes picked from documents, with the reader's comments. Like tags, they belong to the
-  // index and are shared by everyone using the server.
+  // Named collections of quotes picked from documents, with comments. With sign-in, a notebook belongs to the
+  // person who made it and is private until they share it (src/notebooks.ts); without, it's everyone's.
 
   const noteExport = (n: Note): ExportItem => ({
     name: n.docName,
@@ -857,55 +860,119 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
     tags: duct.getDocument(n.path)?.tags ?? [],
   })
 
+  const emailOf = (res: express.Response): string | undefined => {
+    const actor = String(res.locals.actor ?? '')
+    return actor.includes('@') ? actor : undefined
+  }
+  const actorOf = (res: express.Response): NotebookActor => {
+    const principals = res.locals.viewer as string[] | undefined
+    return principals ? { email: emailOf(res), admin: res.locals.role === 'admin', principals } : {}
+  }
+
   // On a shared server, a note quoting a document someone may not see is left out for them, like the document
-  // itself (permission-aware team search): they don't see it, count it, export it, change it or delete it.
+  // itself (permission-aware team search): they don't see it, count it, export it, change it or delete it. Sharing
+  // a notebook never shares the documents it quotes.
   const visibleNotes = (notes: Note[], res: express.Response): Note[] => {
     const hidden = duct.hiddenFrom(res.locals.viewer)
     return hidden.size ? notes.filter(n => !hidden.has(n.path)) : notes
   }
-  const noteHidden = (id: string, res: express.Response): boolean => {
-    const path = duct.notePath(id)
-    return path !== undefined && !duct.canView(path, res.locals.viewer)
+
+  /** What the caller may do with each notebook they may know about, with the sharing list for owners only. */
+  const notebookView = (nb: Notebook, role: NotebookRole, res: express.Response) => ({
+    ...nb,
+    notes: res.locals.viewer ? visibleNotes(duct.listNotes(nb.id), res).length : nb.notes,
+    role,
+    sharing: role === 'owner' ? nb.sharing : [],
+  })
+
+  /** The notebook if the caller may do `needs` with it; otherwise answers 404 (they can't see it) or 403 and returns null. */
+  const notebookFor = (id: string, res: express.Response, needs: NotebookRole): { nb: Notebook; role: NotebookRole } | null => {
+    const nb = duct.getNotebook(id)
+    const role = nb ? notebookRole(nb, actorOf(res)) : null
+    if (!nb || !role) { res.status(404).json({ error: 'Notebook not found' }); return null }
+    if (!canDo(role, needs)) {
+      const owner = nb.owner ? ` Ask ${nb.owner}` : ' Ask an admin'
+      res.status(403).json({ error: needs === 'owner' ? `Only the notebook’s owner can do this.${owner} if it needs changing.` : `You can read this notebook but not change it.${owner} to let you edit.` })
+      return null
+    }
+    return { nb, role }
+  }
+
+  /** The notebook a note is in, if the caller may edit it and see the document the note quotes; else answers and returns null. */
+  const noteFor = (id: string, res: express.Response): Notebook | null => {
+    const info = duct.noteInfo(id)
+    if (!info || !duct.canView(info.path, res.locals.viewer)) { res.status(404).json({ error: 'Note not found' }); return null }
+    return notebookFor(info.notebookId, res, 'edit')?.nb ?? null
   }
 
   app.get('/api/notebooks', (_req, res) => {
-    const notebooks = duct.listNotebooks()
-    if (!res.locals.viewer) { res.json({ notebooks }); return }
-    res.json({ notebooks: notebooks.map(b => ({ ...b, notes: visibleNotes(duct.listNotes(b.id), res).length })) })
+    const who = actorOf(res)
+    const notebooks = duct.listNotebooks().flatMap(nb => {
+      const role = notebookRole(nb, who)
+      return role ? [notebookView(nb, role, res)] : []
+    })
+    // `sharing`: whether notebooks can be shared with people here (a server with sign-in).
+    res.json({ notebooks, sharing: !!oidc, me: emailOf(res) ?? null })
   })
 
   app.post('/api/notebooks', (req, res) => {
-    const notebook = duct.createNotebook(req.body?.name)
+    const notebook = duct.createNotebook(req.body?.name, emailOf(res))
     audit(res, 'notes', undefined, `created notebook "${notebook.name}"`)
-    res.status(201).json({ notebook })
+    res.status(201).json({ notebook: notebookView(notebook, 'owner', res) })
+  })
+
+  // A notebook someone sent as a shared page (.html) or JSON: { "content": "<the file's text>" }.
+  app.post('/api/notebooks/import', (req, res) => {
+    const content = typeof req.body?.content === 'string' ? req.body.content : ''
+    const shared = content ? parseSharedNotebook(content) : null
+    if (!shared) { res.status(400).json({ error: 'That isn’t a notebook shared from Duct. Choose the .html page (or .json) someone sent you.' }); return }
+    const notebook = duct.importNotebook(shared, emailOf(res), res.locals.viewer)
+    audit(res, 'notes', undefined, `imported notebook "${notebook.name}", ${notebook.notes} notes`)
+    res.status(201).json({ notebook: notebookView(notebook, 'owner', res) })
   })
 
   app.patch('/api/notebooks/:id', (req, res) => {
-    if (!duct.renameNotebook(req.params.id, req.body?.name)) { res.status(404).json({ error: 'Notebook not found' }); return }
+    if (!notebookFor(req.params.id, res, 'owner')) return
+    duct.renameNotebook(req.params.id, req.body?.name)
     audit(res, 'notes', undefined, 'renamed a notebook')
     res.json({ ok: true })
   })
 
+  // Who a notebook is shared with: { "sharing": [{ "to": "ada@okafor.ng" | "okafor.ng" | "anyone", "can": "view" | "edit" }] }.
+  app.put('/api/notebooks/:id/sharing', (req, res) => {
+    if (!oidc) { res.status(400).json({ error: 'Sharing with people needs a Duct server where people sign in. On this computer, export the notebook as a page to send it.' }); return }
+    if (!notebookFor(req.params.id, res, 'owner')) return
+    try {
+      const sharing = duct.shareNotebook(req.params.id, req.body?.sharing)
+      audit(res, 'notes', undefined, sharing.length ? `shared a notebook with ${sharing.map(s => `${s.to.replace(/^(user|domain):/, '')} (${s.can})`).join(', ')}` : 'stopped sharing a notebook')
+      res.json({ sharing })
+    } catch (err) {
+      sendError(res, err, 400)
+    }
+  })
+
   app.delete('/api/notebooks/:id', (req, res) => {
+    if (!notebookFor(req.params.id, res, 'owner')) return
     const all = duct.listNotes(req.params.id)
     if (visibleNotes(all, res).length !== all.length) { res.status(403).json({ error: 'This notebook has notes from documents you can’t open, so only someone who can see them all can delete it.' }); return }
-    if (!duct.deleteNotebook(req.params.id)) { res.status(404).json({ error: 'Notebook not found' }); return }
+    duct.deleteNotebook(req.params.id)
     audit(res, 'notes', undefined, 'deleted a notebook')
     res.json({ ok: true })
   })
 
   app.get('/api/notebooks/:id/notes', (req, res) => {
-    const notebook = duct.listNotebooks().find(b => b.id === req.params.id)
-    if (!notebook) { res.status(404).json({ error: 'Notebook not found' }); return }
-    const notes = visibleNotes(duct.listNotes(notebook.id), res)
-    res.json({ notebook: { ...notebook, notes: notes.length }, notes })
+    const found = notebookFor(req.params.id, res, 'view')
+    if (!found) return
+    const notes = visibleNotes(duct.listNotes(found.nb.id), res)
+    res.json({ notebook: notebookView(found.nb, found.role, res), notes })
   })
 
   app.post('/api/notebooks/:id/notes', (req, res) => {
     const { path, quote, page, comment } = req.body ?? {}
     if (typeof path !== 'string' || typeof quote !== 'string') { res.status(400).json({ error: 'Send { "path": "…", "quote": "…", "page"?: 1, "comment"?: "…" }' }); return }
+    if (!notebookFor(req.params.id, res, 'edit')) return
     try {
-      const note = duct.addNote(req.params.id, { path, quote, page, comment })
+      const note = duct.addNote(req.params.id, { path, quote, page, comment, author: emailOf(res) })
       audit(res, 'notes', path, 'added a note')
       res.status(201).json({ note })
     } catch (err) {
@@ -916,33 +983,43 @@ export function createServer(duct: Duct, opts?: ServerOptions) {
   app.put('/api/notebooks/:id/order', (req, res) => {
     const ids = req.body?.ids
     if (!Array.isArray(ids) || !ids.every(i => typeof i === 'string')) { res.status(400).json({ error: 'Send { "ids": ["…"] }' }); return }
+    if (!notebookFor(req.params.id, res, 'edit')) return
     duct.reorderNotes(req.params.id, ids)
     res.json({ ok: true })
   })
 
   app.patch('/api/notes/:id', (req, res) => {
     if (typeof req.body?.comment !== 'string') { res.status(400).json({ error: 'Send { "comment": "…" }' }); return }
-    if (noteHidden(req.params.id, res)) { res.status(404).json({ error: 'Note not found' }); return }
-    if (!duct.updateNote(req.params.id, req.body.comment)) { res.status(404).json({ error: 'Note not found' }); return }
+    if (!noteFor(req.params.id, res)) return
+    duct.updateNote(req.params.id, req.body.comment)
     res.json({ ok: true })
   })
 
   app.delete('/api/notes/:id', (req, res) => {
-    if (noteHidden(req.params.id, res)) { res.status(404).json({ error: 'Note not found' }); return }
-    if (!duct.deleteNote(req.params.id)) { res.status(404).json({ error: 'Note not found' }); return }
+    if (!noteFor(req.params.id, res)) return
+    duct.deleteNote(req.params.id)
     audit(res, 'notes', undefined, 'deleted a note')
     res.json({ ok: true })
   })
 
-  // The notebook as csv, md, json or docx: each quote with its source, then the reader's comment.
+  // The notebook as docx, md, csv or json (each quote with its source, then the comment), or html: a page to send
+  // to anyone, readable in any browser and importable into Duct (src/notebook-page.ts).
   app.get('/api/notebooks/:id/export', needs('export'), async (req, res) => {
-    const notebook = duct.listNotebooks().find(b => b.id === req.params.id)
-    if (!notebook) { res.status(404).json({ error: 'Notebook not found' }); return }
-    const notes = visibleNotes(duct.listNotes(notebook.id), res)
+    const found = notebookFor(req.params.id, res, 'view')
+    if (!found) return
+    const notes = visibleNotes(duct.listNotes(found.nb.id), res)
     if (!notes.length) { res.status(400).json({ error: 'This notebook has no notes yet' }); return }
+    const format = (req.query.format as string) || 'docx'
     try {
-      audit(res, 'export', undefined, `notebook, ${notes.length} notes`)
-      await sendExport(res, notes.map(noteExport), (req.query.format as string) || 'docx', notebook.name)
+      audit(res, 'export', undefined, `notebook as ${format}, ${notes.length} notes`)
+      if (format === 'html') {
+        const page = notebookPage(sharedFrom(found.nb.name, notes, f => pageLabel(f as DocumentFormat)), { sharedBy: emailOf(res) })
+        res.setHeader('Content-Type', 'text/html; charset=utf-8')
+        res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(exportFileName(found.nb.name, 'md').replace(/\.md$/, '.html'))}`)
+        res.send(page)
+        return
+      }
+      await sendExport(res, notes.map(noteExport), format, found.nb.name)
     } catch (err) {
       res.status(500).json({ error: (err as Error).message })
     }

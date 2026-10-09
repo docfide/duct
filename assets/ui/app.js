@@ -466,7 +466,7 @@ function renderSidebar() {
     '<button class="side-item' + (state.tags.includes(t.tag) ? ' active' : '') + '" data-tag="' + esc(t.tag) + '"><span class="name"># ' + esc(t.tag) + '</span><span class="count">' + fmt(t.count) + '</span></button>').join('')
 
   for (const el of $$('[data-requires="watch"]')) el.hidden = !state.canWatch || !isAdmin() || !feature('watchedFolders')
-  $$('.side-item[data-view]').forEach(el => el.classList.toggle('active', el.dataset.view === (state.view === 'documents' ? (state.docFilter === 'attention' ? 'attention' : 'documents') : state.view === 'home' || state.view === 'results' ? 'search' : '')))
+  $$('.side-item[data-view]').forEach(el => el.classList.toggle('active', el.dataset.view === (state.view === 'documents' ? (state.docFilter === 'attention' ? 'attention' : 'documents') : state.view === 'home' || state.view === 'results' ? 'search' : state.view)))
 }
 
 $('#sidebar').addEventListener('click', async e => {
@@ -496,6 +496,7 @@ $('#sidebar').addEventListener('click', async e => {
   else if (source) state.source = state.source && state.source.under === source.dataset.under ? null : { under: source.dataset.under, label: source.dataset.label }
   else if (view) {
     if (view.dataset.view === 'search') { state.group = null; state.source = null; setView(state.query ? 'results' : 'home') }
+    else if (view.dataset.view === 'notebooks') setView('notebooks')
     else { state.docFilter = view.dataset.view === 'attention' ? 'attention' : 'all'; setView('documents') }
     $('#sidebar').classList.remove('open')
     return
@@ -515,9 +516,11 @@ function setView(view) {
   $('#viewResults').hidden = view !== 'results'
   $('#viewAsk').hidden = view !== 'ask'
   $('#viewDocuments').hidden = view !== 'documents'
+  $('#viewNotebooks').hidden = view !== 'notebooks'
   if (view !== 'results') closePreview()
   if (view === 'home') renderHome()
   if (view === 'documents') renderDocuments()
+  if (view === 'notebooks') renderNotebooks()
   renderSidebar()
   renderMascots()
 }
@@ -782,9 +785,9 @@ document.addEventListener('keydown', async e => {
 // ---------- opening documents ----------
 
 /** Opens the workspace: documents side by side with a notebook for notes. */
-async function openWorkspace(left, right, page, highlightTerms = []) {
+async function openWorkspace(left, right, page, highlightTerms = [], notebook = '') {
   if (desktop && desktop.openWorkspace) {
-    if (!(await desktop.openWorkspace(left, right, page, highlightTerms))) toast("Couldn't open the workspace", true)
+    if (!(await desktop.openWorkspace(left, right, page, highlightTerms, notebook))) toast("Couldn't open the workspace", true)
     return
   }
   const q = new URLSearchParams()
@@ -792,8 +795,73 @@ async function openWorkspace(left, right, page, highlightTerms = []) {
   if (right) q.set('right', right)
   if (left && page) q.set('lpage', String(page))
   if (left && highlightTerms.length) q.set('lterms', JSON.stringify(highlightTerms))
+  if (notebook) q.set('notebook', notebook)
   window.open('/workspace?' + q, '_blank', 'noopener')
 }
+
+// ---------- notebooks ----------
+// Quotes picked from documents side by side, with comments (the workspace). With sign-in, notebooks can be shared
+// with people; the list keeps yours apart from the ones shared with you.
+
+async function renderNotebooks() {
+  const box = $('#notebookList')
+  let data
+  try { data = await json('/api/notebooks') } catch (err) { box.innerHTML = '<p class="empty">' + esc(err.message) + '</p>'; return }
+  const list = data.notebooks
+  $$('[data-bind="notebookCount"]').forEach(el => { el.textContent = list.length ? fmt(list.length) : '' })
+  if (!list.length) {
+    box.innerHTML = '<div class="empty"><div class="mascot-slot mascot-md" data-mascot="idle" aria-hidden="true"></div>' +
+      '<p><strong>Keep what matters from your documents in one place.</strong></p>' +
+      '<p>Open any document with <strong>Side by side</strong>, select a sentence and choose <strong>Add to notes</strong>. Each quote keeps its document and page, and you can add your own comment. Export to Word, or send it as a page anyone can open.</p></div>'
+    renderMascots()
+    return
+  }
+  const shared = b => b.owner && b.owner !== data.me
+  const access = b => {
+    if (!data.sharing) return ''
+    if (shared(b)) return '<span class="nb-share">' + (b.role === 'view' ? 'Can read' : 'Can edit') + ' · from ' + esc(b.owner) + '</span>'
+    if (!b.owner) return '<span class="nb-share">Everyone</span>'
+    return b.sharing.length ? '<span class="nb-share">Shared with ' + (b.sharing.length === 1 ? esc(b.sharing[0].to.replace(/^(user|domain):/, '').replace(/^anyone$/, 'everyone')) : b.sharing.length) + '</span>' : '<span class="nb-share">Only you</span>'
+  }
+  const row = b => '<button class="nb-row" data-notebook="' + esc(b.id) + '"><span class="nb-name">' + esc(b.name) + '</span>' + access(b) +
+    '<span class="nb-meta">' + plural(b.notes, 'note') + ' · ' + timeAgo(b.updatedAt) + '</span></button>'
+  const mine = list.filter(b => !shared(b)), theirs = list.filter(shared)
+  box.innerHTML = (theirs.length ? (mine.length ? '<h3 class="nb-group">Yours</h3>' : '') : '') + mine.map(row).join('') +
+    (theirs.length ? '<h3 class="nb-group">Shared with you</h3>' + theirs.map(row).join('') : '')
+}
+
+$('#notebookList').addEventListener('click', e => {
+  const row = e.target.closest('[data-notebook]')
+  if (row) openWorkspace('', '', undefined, [], row.dataset.notebook)
+})
+$('#viewNotebooks').addEventListener('click', e => {
+  const act = e.target.closest('[data-action]')?.dataset.action
+  if (act === 'new-notebook') { $('#nbNewForm').hidden = false; $('#nbNewName').focus() }
+  if (act === 'cancel-notebook') { $('#nbNewForm').hidden = true; $('#nbNewName').value = '' }
+  if (act === 'import-notebook') $('#nbImportInput').click()
+})
+$('#nbNewForm').addEventListener('submit', async e => {
+  e.preventDefault()
+  const name = $('#nbNewName').value.trim()
+  if (!name) { $('#nbNewName').focus(); return }
+  try {
+    const { notebook } = await json('/api/notebooks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) })
+    $('#nbNewForm').hidden = true; $('#nbNewName').value = ''
+    renderNotebooks()
+    openWorkspace('', '', undefined, [], notebook.id)
+  } catch (err) { toast(err.message, true) }
+})
+$('#nbImportInput').addEventListener('change', async e => {
+  const file = e.target.files[0]
+  e.target.value = ''
+  if (!file) return
+  try {
+    if (file.size > 8 * 1024 * 1024) throw new Error('That file is too big to be a shared notebook.')
+    const { notebook } = await json('/api/notebooks/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: await file.text() }) })
+    toast('Added “' + notebook.name + '”: ' + plural(notebook.notes, 'note'))
+    renderNotebooks()
+  } catch (err) { toast(err.message, true) }
+})
 
 async function openDocument(path, page, highlightTerms = []) {
   if (isLink(path)) { window.open(path, '_blank', 'noopener'); return }
@@ -1659,6 +1727,8 @@ async function refreshAll() {
   if (state.view === 'home') renderHome()
   if (state.view === 'documents') renderDocuments()
   if (state.view === 'results' && state.query) runSearch()
+  if (state.view === 'notebooks') renderNotebooks()
+  else json('/api/notebooks').then(d => { $$('[data-bind="notebookCount"]').forEach(el => { el.textContent = d.notebooks.length ? fmt(d.notebooks.length) : '' }) }, () => {})
   renderMascots()
   finishWelcomeIfReady()
   if (!state.wasBusy && (state.activity.indexing || state.activity.embedding)) { state.wasBusy = true; poll() }
