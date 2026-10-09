@@ -73,11 +73,12 @@ export function convertToPdf(path: string, cacheDir: string, timeoutMs = 120_000
     mkdirSync(work, { recursive: true, mode: 0o700 })
     const profile = 'file://' + join(work, 'profile').replace(/\\/g, '/').replace(/^([A-Za-z]):/, '/$1:')
     execFile(soffice, [`-env:UserInstallation=${profile}`, '--headless', '--norestore', '--nologo', '--convert-to', 'pdf', '--outdir', work, path],
-      { timeout: timeoutMs, windowsHide: true }, err => {
+      { timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {
         const made = join(work, basename(path, extname(path)) + '.pdf')
         if (!err && existsSync(made)) { renameSync(made, out); rmSync(work, { recursive: true, force: true }); resolve(out); return }
         rmSync(work, { recursive: true, force: true })
-        reject(new Error(err?.killed ? 'LibreOffice took too long to open this document' : 'LibreOffice couldn’t open this document'))
+        const said = `${stderr || ''} ${stdout || ''}`.replace(/\s+/g, ' ').trim().slice(0, 300)
+        reject(new Error(err?.killed ? 'LibreOffice took too long to open this document' : `LibreOffice couldn’t open this document${said ? ` (${said})` : ''}`))
       })
   }).finally(() => converting.delete(key))
   converting.set(key, job)

@@ -153,7 +153,7 @@ describe('Apple iWork', () => {
     const numbers = await makeZip({ 'QuickLook/Preview.pdf': makeTextPdf([[[12, 700, 'Expense report']], [[12, 700, 'Total travel spend']]]) })
     const doc = await extract(file('expenses.numbers', numbers))
     expect(doc.pages).toEqual(['Expense report', 'Total travel spend'])
-  })
+  }, 30_000)   // reads PDFs; slow Windows runners have taken 10 s
 
   it('skips files named .key that are not Keynote decks (e.g. TLS keys) without reporting a failure', async () => {
     const dir = join(work, 'keys')
