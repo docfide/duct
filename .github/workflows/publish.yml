@@ -42,3 +42,37 @@ jobs:
           push: true
           # :latest only moves for stable releases; prereleases get their own tag and :next.
           tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }},ghcr.io/${{ github.repository }}:${{ github.event.release.prerelease && 'next' || 'latest' }}
+
+  installers:
+    # The desktop app for each platform, attached to the release (the site's Download page links to it).
+    # Unsigned until a signing certificate is set up: macOS asks people to allow it once in System Settings.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, args: --mac --arm64 }
+          - { os: macos-13, args: --mac --x64 }
+          - { os: windows-latest, args: --win --x64 }
+          - { os: ubuntu-latest, args: --linux --x64 }
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npx electron-builder ${{ matrix.args }} --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Attach to the release
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(release/*.dmg release/*.zip release/*.exe release/*.AppImage release/*.deb)
+          gh release upload "${{ github.event.release.tag_name }}" "${files[@]}" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
