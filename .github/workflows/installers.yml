@@ -32,7 +32,10 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      # onnxruntime-node would download its NVIDIA (CUDA) add-on on Linux, hundreds of MB Duct never uses.
       - run: npm ci
+        env:
+          ONNXRUNTIME_NODE_INSTALL: skip
       - run: npm run build
       - run: node scripts/check-runtime-deps.mjs
       - run: npx electron-builder ${{ matrix.args }} --publish never
