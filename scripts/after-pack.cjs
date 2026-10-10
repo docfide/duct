@@ -17,8 +17,11 @@ exports.default = async function afterPack(context) {
   for (const napi of readdirSync(bin)) {
     for (const os of readdirSync(join(bin, napi))) {
       for (const cpu of readdirSync(join(bin, napi, os))) {
-        if (os === platform && cpu === arch) kept++
-        else rmSync(join(bin, napi, os, cpu), { recursive: true, force: true })
+        if (os === platform && cpu === arch) {
+          kept++
+          // GPU add-ons (CUDA, TensorRT): transcription runs on the CPU.
+          for (const f of readdirSync(join(bin, napi, os, cpu))) if (/providers_(cuda|tensorrt|rocm)/i.test(f)) rmSync(join(bin, napi, os, cpu, f), { force: true })
+        } else rmSync(join(bin, napi, os, cpu), { recursive: true, force: true })
       }
       if (!readdirSync(join(bin, napi, os)).length) rmSync(join(bin, napi, os), { recursive: true, force: true })
     }
