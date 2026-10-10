@@ -62,23 +62,14 @@
         "dmg",
         "zip"
       ],
-      "icon": "electron/icon.icns",
-      "files": [
-        "!node_modules/onnxruntime-node/bin/napi-v*/linux/**",
-        "!node_modules/onnxruntime-node/bin/napi-v*/win32/**"
-      ]
+      "icon": "electron/icon.icns"
     },
     "win": {
       "target": [
         "nsis",
         "zip"
       ],
-      "icon": "electron/icon.png",
-      "files": [
-        "!node_modules/onnxruntime-node/bin/napi-v*/linux/**",
-        "!node_modules/onnxruntime-node/bin/napi-v*/darwin/**",
-        "!node_modules/onnxruntime-node/bin/napi-v*/win32/arm64/**"
-      ]
+      "icon": "electron/icon.png"
     },
     "linux": {
       "target": [
@@ -87,12 +78,7 @@
       ],
       "category": "Office",
       "icon": "electron/icon.png",
-      "executableName": "duct",
-      "files": [
-        "!node_modules/onnxruntime-node/bin/napi-v*/darwin/**",
-        "!node_modules/onnxruntime-node/bin/napi-v*/win32/**",
-        "!node_modules/onnxruntime-node/bin/napi-v*/linux/arm64/**"
-      ]
+      "executableName": "duct"
     },
     "deb": {
       "packageName": "duct",
@@ -105,7 +91,8 @@
       "assets/ocr/**",
       "node_modules/ffmpeg-static/**",
       "node_modules/onnxruntime-node/**"
-    ]
+    ],
+    "afterPack": "scripts/after-pack.cjs"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.1",
