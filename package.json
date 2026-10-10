@@ -1,6 +1,6 @@
 {
   "name": "@docfide/duct",
-  "version": "1.0.0-alpha.2",
+  "version": "1.0.0-alpha.3",
   "description": "Document intelligence pipeline — extract, chunk, embed, and search any document format",
   "type": "module",
   "bin": {

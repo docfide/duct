@@ -7,7 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-alpha.3] - 2026-10-10
+
 ### Added
+- Accessibility: Duct aims to meet WCAG 2.2 AA, and publishes a conformance report (VPAT®) at duct.tensflare.com/legal/accessibility. Text and field borders meet the contrast minimums; focus is always visible; there's a Skip to content link; the documents list is a table for screen readers; the number of results is announced. In a document, ↑ and ↓ select a paragraph and Enter adds it to a notebook, and ⌘⇧N / Ctrl+Shift+N adds any selection. Everything reflows at 400% zoom. The / shortcut can be turned off (Settings › Features › Keyboard), and the mascot stops moving within 5 seconds. `npm run a11y` checks every main screen with axe-core, and CI runs it.
 - Search results are grouped by document. A PDF that matches on several pages is one result with its best passage, links to the other pages ("Also on p. 2, p. 7") and its other passages a click away; the heading counts documents and passages. Quick search shows one row per document.
 - Open shows the document inside Duct, on its own, with your notebooks beside it; **Open in app** hands it to the program it belongs to. Closing one of two documents in the workspace leaves the other full width, and **One / Side by side / Stacked** switches between them.
 - Selected text can go to any notebook: the pop-up says **Add to "<notebook>"**, and its menu lists every notebook you can add to, or starts a new one named after the document.
