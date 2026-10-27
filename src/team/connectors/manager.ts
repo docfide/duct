@@ -1,4 +1,4 @@
-// Copyright Tensflare Ltd. Licensed under the Elastic License 2.0; see src/team/LICENSE.
+// Copyright Tensflare Inc. Licensed under the Elastic License 2.0; see src/team/LICENSE.
 // Connected sources: each keeps a local copy of its readable files under <data>/connectors/<id>/files and indexes
 // them like any other document (source "connector", with the file's web address in its metadata). Changes are
 // fetched incrementally from the source's cursor; files deleted there are removed here.

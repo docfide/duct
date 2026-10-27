@@ -8,7 +8,7 @@ Prices and rules were checked in October 2026 and change; confirm them on the ve
 
 ## macOS: Apple Developer Program (about $99 a year)
 
-1. **D-U-N-S Number for Tensflare Ltd.** Apple requires one for organisations. Look it up first (the company may
+1. **D-U-N-S Number for Tensflare Inc.** Apple requires one for organisations. Look it up first (the company may
    already have one) with Apple's D-U-N-S lookup during enrolment; requesting one is free but can take up to about 30
    business days (Dun & Bradstreet sells faster processing).
 2. **Enrol as an organisation** at developer.apple.com/programs/enroll with an Apple ID that has two-factor
@@ -26,12 +26,13 @@ Then the Mac builds are signed with the hardened runtime and notarized by Apple,
 
 Since June 2023, code-signing keys must live in a hardware token or a cloud HSM, so a certificate file alone won't do,
 and a USB token can't be used by GitHub's build machines. Microsoft's own low-cost service (Azure Artifact Signing,
-about $10 a month) is only open to organisations in the US, Canada, the EU and the UK, and Tensflare Ltd is registered
-in Nigeria.
+about $10 a month) is only open to organisations in the US, Canada, the EU and the UK. Tensflare Inc. is a US (Colorado) company, but it
+was incorporated in October 2026, and at launch Microsoft also required several years of verifiable business history;
+check the current rule before choosing it over SSL.com.
 
 Recommended: **SSL.com OV code signing with eSigner cloud signing.**
 
-1. Buy an **OV code-signing certificate** for Tensflare Ltd (organisation validation: company documents and a phone
+1. Buy an **OV code-signing certificate** for Tensflare Inc. (organisation validation: company documents and a phone
    check) and the **eSigner** plan for code (Tier 1: 240 signatures a month is plenty; each release signs a handful of
    files). New certificates include 30 days of eSigner free, so we can test before paying monthly.
 2. **Add GitHub secrets:** `ES_USERNAME`, `ES_PASSWORD`, `ES_CREDENTIAL_ID`, `ES_TOTP_SECRET` (from the eSigner
