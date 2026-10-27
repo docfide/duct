@@ -1,4 +1,4 @@
-// Copyright Tensflare Ltd. Licensed under the Elastic License 2.0; see src/team/LICENSE.
+// Copyright Tensflare Inc. Licensed under the Elastic License 2.0; see src/team/LICENSE.
 // You may not move, change, disable or circumvent this licence check, or remove or obscure what it protects.
 //
 // The licence check for Duct's team features. A server where people sign in can use them for a 30-day

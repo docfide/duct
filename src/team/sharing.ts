@@ -1,4 +1,4 @@
-// Copyright Tensflare Ltd. Licensed under the Elastic License 2.0; see src/team/LICENSE.
+// Copyright Tensflare Inc. Licensed under the Elastic License 2.0; see src/team/LICENSE.
 //
 // Sharing a notebook with people on a server where they sign in (see ../notebooks.ts for what each role may do).
 

@@ -1,4 +1,4 @@
-// Copyright Tensflare Ltd. Licensed under the Elastic License 2.0; see src/team/LICENSE.
+// Copyright Tensflare Inc. Licensed under the Elastic License 2.0; see src/team/LICENSE.
 // You may not move, change, disable or circumvent the licence checks in this file, or remove or obscure the
 // functionality they protect.
 //

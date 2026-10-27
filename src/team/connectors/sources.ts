@@ -1,4 +1,4 @@
-// Copyright Tensflare Ltd. Licensed under the Elastic License 2.0; see src/team/LICENSE.
+// Copyright Tensflare Inc. Licensed under the Elastic License 2.0; see src/team/LICENSE.
 // Cloud sources Duct reads directly: Google Drive, and Microsoft OneDrive and SharePoint (through Microsoft Graph).
 // Each adapter lists files, reports changes since a cursor, and downloads one file. Access is read-only.
 //

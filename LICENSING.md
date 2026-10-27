@@ -1,6 +1,6 @@
 # Licensing
 
-Duct is made by Tensflare Ltd. It is licensed in two parts.
+Duct is made by Tensflare Inc. It is licensed in two parts.
 
 ## The app and the library: Apache 2.0
 
@@ -37,6 +37,6 @@ ask you to agree that Tensflare may license your contribution under both licence
 
 ## Trademarks
 
-"Duct", the Duct logo and the mascot are trademarks of Tensflare Ltd. Neither licence grants rights to use them,
+"Duct", the Duct logo and the mascot are trademarks of Tensflare Inc. Neither licence grants rights to use them,
 except to describe the software truthfully. See [the press kit](https://duct.tensflare.com/press/) for how to use
 the mascot and logo when you write about Duct.
